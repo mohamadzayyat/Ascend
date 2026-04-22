@@ -73,17 +73,27 @@ check_systemd() {
     command -v systemctl &>/dev/null || die "systemd is required but not found."
 }
 
-# Abort if a port is already bound by a *different* process.
-# Our own ascend-* services are allowed (re-running the installer is fine).
+# Abort if a port is bound by a process that isn't ours.
+# Allowed owners per port:
+#   PANEL_PORT    → nginx (the reverse proxy we configure)
+#   BACKEND_PORT  → ascend-backend.service
+#   FRONTEND_PORT → ascend-frontend.service
+# Any other binding is a real conflict.
 port_used_by_other() {
     local port=$1
+    local expected=$2
     local pids
     pids=$(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
     [[ -z "$pids" ]] && return 1
     for pid in $pids; do
-        local unit
+        local comm unit
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')
         unit=$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')
-        [[ "$unit" == ascend-backend.service || "$unit" == ascend-frontend.service ]] && continue
+        case "$expected" in
+            nginx)           [[ "$comm" == "nginx" || "$unit" == "nginx.service" ]] && continue ;;
+            ascend-backend)  [[ "$unit" == "ascend-backend.service" ]] && continue ;;
+            ascend-frontend) [[ "$unit" == "ascend-frontend.service" ]] && continue ;;
+        esac
         return 0
     done
     return 1
@@ -92,13 +102,22 @@ port_used_by_other() {
 check_ports() {
     section "Checking port availability"
     local conflict=0
+    local expected
     for p in $PANEL_PORT $BACKEND_PORT $FRONTEND_PORT; do
-        if port_used_by_other "$p"; then
+        if [[ $p == "$PANEL_PORT" ]]; then
+            expected=nginx
+        elif [[ $p == "$BACKEND_PORT" ]]; then
+            expected=ascend-backend
+        else
+            expected=ascend-frontend
+        fi
+
+        if port_used_by_other "$p" "$expected"; then
             warn "Port $p is already in use by another process:"
             ss -tlnp "sport = :$p" 2>/dev/null | tail -n +2 | sed 's/^/    /'
             conflict=1
         else
-            ok "Port $p is free"
+            ok "Port $p is free (or owned by $expected)"
         fi
     done
     [[ $conflict -eq 0 ]] || die "Port conflict detected. Free the port(s) above or edit PANEL_PORT/BACKEND_PORT/FRONTEND_PORT in install.sh."
