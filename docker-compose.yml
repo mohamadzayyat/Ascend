@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  cpanel:
+    build: .
+    container_name: cpanel
+    ports:
+      - "80:80"       # nginx → public HTTP
+      - "443:443"     # nginx → public HTTPS
+      - "8716:8716"   # Flask backend (direct access / healthcheck)
+      - "8717:8717"   # Next.js frontend (direct access)
+    volumes:
+      - ./cpanel.db:/opt/cpanel/cpanel.db
+      - ./logs:/var/log/cpanel
+      - ./deployments:/root/deployments
+      - ./deploy_logs:/root/deploy_logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - FLASK_ENV=production
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - DATABASE_URL=sqlite:////opt/cpanel/cpanel.db
+      - PORT=8716
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:8717}
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+    networks:
+      - cpanel-network
+
+networks:
+  cpanel-network:
+    driver: bridge
