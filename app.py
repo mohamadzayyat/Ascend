@@ -6,6 +6,7 @@ Features: Multi-project support, SQLite persistence, webhooks, real-time logs
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -895,6 +896,185 @@ def setup_nginx_config(project, log_file):
                 os.remove(backup_path)
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════
+# System API (read-only introspection)
+# ═══════════════════════════════════════════
+
+# Short-lived caches so repeated page loads don't hammer CLI tools.
+_system_cache = {}
+_SYSTEM_TTL = 5  # seconds
+
+
+def _cached(key, ttl, builder):
+    """Return cached value for `key` if fresh, else recompute via `builder()`."""
+    now = time.time()
+    entry = _system_cache.get(key)
+    if entry and now - entry[0] < ttl:
+        return entry[1]
+    value = builder()
+    _system_cache[key] = (now, value)
+    return value
+
+
+def _pm2_summary(proc):
+    """Flatten a single `pm2 jlist` entry to the fields we care about."""
+    env = proc.get('pm2_env') or {}
+    monit = proc.get('monit') or {}
+    pm_uptime = env.get('pm_uptime') or 0
+    status = env.get('status', 'unknown')
+    uptime_ms = int(time.time() * 1000) - pm_uptime if status == 'online' and pm_uptime else 0
+    port = None
+    exec_env = env.get('env') or {}
+    if isinstance(exec_env, dict):
+        port = exec_env.get('PORT') or exec_env.get('port')
+    return {
+        'name': proc.get('name'),
+        'pid': proc.get('pid') or 0,
+        'status': status,
+        'restarts': env.get('restart_time', 0),
+        'uptime_ms': uptime_ms,
+        'cpu': monit.get('cpu', 0),
+        'memory_mb': round((monit.get('memory') or 0) / 1024 / 1024, 1),
+        'exec_path': env.get('pm_exec_path'),
+        'cwd': env.get('pm_cwd'),
+        'port': int(port) if port and str(port).isdigit() else None,
+    }
+
+
+def _load_pm2_processes():
+    try:
+        result = subprocess.run(['pm2', 'jlist'], capture_output=True, timeout=10)
+        if result.returncode != 0:
+            return []
+        out = result.stdout.decode('utf-8', errors='replace').strip() or '[]'
+        # pm2 sometimes prints warning lines before the JSON — grab the first '['.
+        idx = out.find('[')
+        if idx > 0:
+            out = out[idx:]
+        return [_pm2_summary(p) for p in json.loads(out)]
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        return []
+
+
+def _load_listening_ports():
+    try:
+        result = subprocess.run(['ss', '-tlnp'], capture_output=True, timeout=5)
+        if result.returncode != 0:
+            return []
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+    seen = {}
+    for line in result.stdout.decode('utf-8', errors='replace').splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local = parts[3]
+        m = re.search(r':(\d+)$', local)
+        if not m:
+            continue
+        port = int(m.group(1))
+        proc_match = re.search(r'\("([^"]+)",pid=(\d+)', line)
+        if port not in seen:
+            seen[port] = {
+                'port': port,
+                'address': local,
+                'process': proc_match.group(1) if proc_match else '',
+                'pid': int(proc_match.group(2)) if proc_match else None,
+            }
+    return sorted(seen.values(), key=lambda x: x['port'])
+
+
+def _load_nginx_sites():
+    sites_dir = '/etc/nginx/sites-enabled'
+    if not os.path.isdir(sites_dir):
+        return []
+    sites = []
+    for name in sorted(os.listdir(sites_dir)):
+        path = os.path.join(sites_dir, name)
+        try:
+            with open(path, 'r', errors='replace') as f:
+                content = f.read()
+        except OSError:
+            continue
+        listens = re.findall(r'\blisten\s+(?:\[?[\w:.]+\]?:)?(\d+)([^;]*);', content)
+        ports = sorted({int(p) for p, _ in listens})
+        has_ssl = any('ssl' in tail for _, tail in listens)
+        server_names = []
+        for sn in re.findall(r'\bserver_name\s+([^;]+);', content):
+            server_names.extend(sn.split())
+        proxies = re.findall(r'\bproxy_pass\s+([^;]+);', content)
+        sites.append({
+            'name': name,
+            'server_names': server_names,
+            'proxy_targets': proxies,
+            'listen_ports': ports,
+            'ssl': has_ssl,
+        })
+    return sites
+
+
+def _is_port_listening(port):
+    try:
+        result = subprocess.run(
+            ['ss', '-tln', f'sport = :{port}'],
+            capture_output=True, timeout=3
+        )
+        return b'LISTEN' in result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+@app.route('/api/system/pm2')
+@login_required
+def api_system_pm2():
+    return jsonify({
+        'processes': _cached('pm2', _SYSTEM_TTL, _load_pm2_processes),
+    })
+
+
+@app.route('/api/system/ports')
+@login_required
+def api_system_ports():
+    return jsonify({
+        'ports': _cached('ports', _SYSTEM_TTL, _load_listening_ports),
+    })
+
+
+@app.route('/api/system/nginx')
+@login_required
+def api_system_nginx():
+    return jsonify({
+        'sites': _cached('nginx', _SYSTEM_TTL, _load_nginx_sites),
+    })
+
+
+@app.route('/api/project/<int:project_id>/runtime')
+@login_required
+def api_project_runtime(project_id):
+    project = db.session.get(Project, project_id)
+    if not project or project.user_id != current_user.id:
+        return jsonify({'error': 'Not found'}), 404
+
+    pm2_status = None
+    if project.pm2_name:
+        for p in _cached('pm2', _SYSTEM_TTL, _load_pm2_processes):
+            if p.get('name') == project.pm2_name:
+                pm2_status = p
+                break
+
+    webhook_path = None
+    if project.enable_webhook and project.webhook_secret:
+        webhook_path = f'/webhook/github/{project.webhook_secret}'
+
+    return jsonify({
+        'pm2': pm2_status,
+        'port': project.app_port,
+        'port_listening': _is_port_listening(project.app_port) if project.app_port else None,
+        'webhook_path': webhook_path,
+    })
 
 
 # ═══════════════════════════════════════════

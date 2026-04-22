@@ -108,6 +108,41 @@ export function useDeployment(id) {
   }
 }
 
+export function useProjectRuntime(projectId) {
+  const { data, error, mutate } = useSWR(
+    projectId ? `${API_URL}/api/project/${projectId}/runtime` : null,
+    fetchWithCreds,
+    { refreshInterval: 5000, dedupingInterval: 2000 }
+  )
+  return {
+    runtime: data || null,
+    isLoading: !error && !data,
+    isError: !!error,
+    mutate,
+  }
+}
+
+export function useSystem() {
+  const pm2 = useSWR(`${API_URL}/api/system/pm2`, fetchWithCreds, {
+    refreshInterval: 5000,
+    dedupingInterval: 2000,
+  })
+  const ports = useSWR(`${API_URL}/api/system/ports`, fetchWithCreds, {
+    refreshInterval: 10000,
+    dedupingInterval: 3000,
+  })
+  const nginx = useSWR(`${API_URL}/api/system/nginx`, fetchWithCreds, {
+    refreshInterval: 30000,
+    dedupingInterval: 10000,
+  })
+  return {
+    pm2: pm2.data?.processes || [],
+    ports: ports.data?.ports || [],
+    nginxSites: nginx.data?.sites || [],
+    isLoading: !pm2.data && !pm2.error,
+  }
+}
+
 export function useProjectDeployments(projectId) {
   const { data: deployments, error, mutate } = useSWR(
     projectId ? `${API_URL}/api/project/${projectId}/deployments` : null,

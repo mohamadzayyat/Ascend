@@ -40,6 +40,12 @@ export const apiClient = {
   getGitHubCredentials: () => api.get('/api/github-credentials'),
   addGitHubCredential: (username, token) => api.post('/api/github-credentials', { username, token }),
   deleteGitHubCredential: (id) => api.delete(`/api/github-credentials/${id}`),
+
+  // System introspection
+  getPm2Processes: () => api.get('/api/system/pm2'),
+  getListeningPorts: () => api.get('/api/system/ports'),
+  getNginxSites: () => api.get('/api/system/nginx'),
+  getProjectRuntime: (id) => api.get(`/api/project/${id}/runtime`),
 }
 
 export { API_URL }

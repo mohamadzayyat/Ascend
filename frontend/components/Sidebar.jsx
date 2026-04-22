@@ -53,6 +53,12 @@ export default function Sidebar() {
               label="Projects"
             />
             <NavLink
+              href="/system"
+              active={isActive('/system')}
+              icon="🖥️"
+              label="System"
+            />
+            <NavLink
               href="/settings/github"
               active={isActive('/settings/github')}
               icon="🔑"

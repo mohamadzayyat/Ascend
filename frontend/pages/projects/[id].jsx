@@ -4,6 +4,7 @@ import { useProject } from '@/lib/hooks/useAuth'
 import DeploymentForm from '@/components/DeploymentForm'
 import DeploymentLogs from '@/components/DeploymentLogs'
 import ProjectSettings from '@/components/ProjectSettings'
+import ProjectRuntime from '@/components/ProjectRuntime'
 
 export default function ProjectDetail() {
   const router = useRouter()
@@ -73,7 +74,7 @@ export default function ProjectDetail() {
       {/* Tab Content */}
       {activeTab === 'overview' && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 space-y-6">
             <div className="bg-secondary rounded-lg border border-gray-700 p-6">
               <h2 className="text-xl font-bold text-white mb-4">Project Information</h2>
               <div className="space-y-4">
@@ -97,6 +98,8 @@ export default function ProjectDetail() {
                 )}
               </div>
             </div>
+
+            <ProjectRuntime projectId={project.id} />
           </div>
 
           <div>
