@@ -877,4 +877,6 @@ if __name__ == '__main__':
         db.create_all()
         if not User.query.first():
             print("No users found. Visit http://localhost:5000/setup or http://localhost:3000/setup")
-        app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 8716)))
+        host = os.environ.get('HOST', '127.0.0.1')
+        port = int(os.environ.get('PORT', 8765))
+        app.run(debug=False, host=host, port=port)

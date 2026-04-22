@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
 #  Ascend — One-file installer  (safe to re-run after any failure)
+#
+#  Architecture:
+#    Nginx  :8716  (public)  ─┬─ /api/* /webhook/*  → Flask  127.0.0.1:8765
+#                              └─ everything else    → Next.js 127.0.0.1:8717
+#
 #  Usage:  sudo bash install.sh
 #  Or:     curl -fsSL https://raw.githubusercontent.com/mohamadzayyat/Ascend/main/install.sh | sudo bash
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# ── Defaults ────────────────────────────────────────────────────
-BACKEND_PORT=8716
-FRONTEND_PORT=8717
+# ── Ports ───────────────────────────────────────────────────────
+PANEL_PORT=8716          # public-facing Nginx port
+BACKEND_PORT=8765        # Flask (internal, 127.0.0.1 only)
+FRONTEND_PORT=8717       # Next.js (internal, 127.0.0.1 only)
+
 REPO_URL="https://github.com/mohamadzayyat/Ascend.git"
 NODE_MAJOR=20
 
@@ -191,8 +198,9 @@ setup_backend_env() {
     cat > "$env_file" <<EOF
 SECRET_KEY=$secret_key
 FLASK_ENV=production
+HOST=127.0.0.1
 PORT=$BACKEND_PORT
-CORS_ORIGIN=http://localhost:$FRONTEND_PORT
+CORS_ORIGIN=http://localhost:$PANEL_PORT
 SQLALCHEMY_DATABASE_URI=sqlite:////$INSTALL_DIR/ascend.db
 EOF
     chmod 600 "$env_file"
@@ -214,13 +222,11 @@ PYEOF
 # ── Next.js frontend ────────────────────────────────────────────
 
 setup_frontend_env() {
+    section "Configuring frontend"
     local fe_env="$INSTALL_DIR/frontend/.env.local"
-    if [[ ! -f "$fe_env" ]]; then
-        echo "NEXT_PUBLIC_API_URL=http://localhost:$BACKEND_PORT" > "$fe_env"
-        ok "frontend/.env.local created"
-    else
-        ok "frontend/.env.local already exists"
-    fi
+    # Always (re)write with empty API URL — Nginx provides same-origin routing
+    echo "NEXT_PUBLIC_API_URL=" > "$fe_env"
+    ok "frontend/.env.local set to empty (relative URLs via Nginx)"
 }
 
 build_frontend() {
@@ -241,6 +247,76 @@ build_frontend() {
     npm run build
     cd "$INSTALL_DIR"
     ok "Frontend built successfully"
+}
+
+# ── Nginx reverse proxy ─────────────────────────────────────────
+
+setup_nginx() {
+    section "Configuring Nginx reverse proxy"
+
+    local nginx_conf="/etc/nginx/sites-available/ascend"
+
+    cat > "$nginx_conf" <<NGINX
+server {
+    listen $PANEL_PORT;
+    server_name _;
+
+    client_max_body_size 100M;
+
+    # Flask API and webhooks
+    location /api/ {
+        proxy_pass         http://127.0.0.1:$BACKEND_PORT;
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+    }
+
+    location /webhook/ {
+        proxy_pass         http://127.0.0.1:$BACKEND_PORT;
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+    }
+
+    # Next.js frontend (everything else)
+    location / {
+        proxy_pass         http://127.0.0.1:$FRONTEND_PORT;
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade \$http_upgrade;
+        proxy_set_header   Connection "upgrade";
+    }
+}
+NGINX
+
+    # Enable site (idempotent symlink)
+    local enabled="/etc/nginx/sites-enabled/ascend"
+    if [[ -L "$enabled" || -f "$enabled" ]]; then
+        rm -f "$enabled"
+    fi
+    ln -s "$nginx_conf" "$enabled"
+
+    # Disable the default Nginx site if it conflicts on port 80
+    if [[ -f /etc/nginx/sites-enabled/default ]]; then
+        rm -f /etc/nginx/sites-enabled/default
+        info "Disabled default Nginx site to avoid port conflicts"
+    fi
+
+    # Test and reload
+    if nginx -t 2>/dev/null; then
+        systemctl enable nginx --quiet
+        systemctl reload nginx 2>/dev/null || systemctl start nginx
+        ok "Nginx configured — panel accessible on port $PANEL_PORT"
+    else
+        nginx -t   # print error
+        die "Nginx config test failed"
+    fi
 }
 
 # ── Systemd services ────────────────────────────────────────────
@@ -269,7 +345,7 @@ WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$INSTALL_DIR/venv/bin/gunicorn \\
     --workers 4 \\
-    --bind 0.0.0.0:$BACKEND_PORT \\
+    --bind 127.0.0.1:$BACKEND_PORT \\
     --timeout 120 \\
     --access-logfile - \\
     app:app
@@ -292,7 +368,7 @@ Wants=ascend-backend.service
 [Service]
 User=root
 WorkingDirectory=$INSTALL_DIR/frontend
-Environment=NEXT_PUBLIC_API_URL=http://localhost:$BACKEND_PORT
+Environment=NEXT_PUBLIC_API_URL=
 Environment=PORT=$FRONTEND_PORT
 ExecStart=$node_bin $INSTALL_DIR/frontend/node_modules/.bin/next start -p $FRONTEND_PORT
 Restart=on-failure
@@ -305,8 +381,8 @@ SyslogIdentifier=ascend-frontend
 WantedBy=multi-user.target
 EOF
 
-    ok "ascend-backend.service written"
-    ok "ascend-frontend.service written"
+    ok "ascend-backend.service written  (127.0.0.1:$BACKEND_PORT)"
+    ok "ascend-frontend.service written (127.0.0.1:$FRONTEND_PORT)"
 }
 
 start_services() {
@@ -318,13 +394,13 @@ start_services() {
     sleep 3
 
     if systemctl is-active --quiet ascend-backend; then
-        ok "Backend  → running on port $BACKEND_PORT"
+        ok "Backend  → running on 127.0.0.1:$BACKEND_PORT (internal)"
     else
         warn "Backend failed to start. Check: journalctl -u ascend-backend -n 50"
     fi
 
     if systemctl is-active --quiet ascend-frontend; then
-        ok "Frontend → running on port $FRONTEND_PORT"
+        ok "Frontend → running on 127.0.0.1:$FRONTEND_PORT (internal)"
     else
         warn "Frontend failed to start. Check: journalctl -u ascend-frontend -n 50"
     fi
@@ -335,9 +411,8 @@ start_services() {
 open_firewall() {
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
         section "Opening firewall ports"
-        ufw allow "$BACKEND_PORT/tcp"  comment "Ascend API"      >/dev/null
-        ufw allow "$FRONTEND_PORT/tcp" comment "Ascend Frontend" >/dev/null
-        ok "Ports $BACKEND_PORT and $FRONTEND_PORT allowed in ufw"
+        ufw allow "$PANEL_PORT/tcp" comment "Ascend Panel" >/dev/null
+        ok "Port $PANEL_PORT allowed in ufw (backend and frontend are internal-only)"
     fi
 }
 
@@ -353,12 +428,17 @@ print_summary() {
     echo -e "╚═══════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "  ${BOLD}Open your browser:${NC}"
-    echo -e "  ${CYAN}http://$ip:$FRONTEND_PORT${NC}"
+    echo -e "  ${CYAN}http://$ip:$PANEL_PORT${NC}"
     echo
     echo -e "  ${BOLD}First visit:${NC} go to /setup to create your admin account"
     echo
+    echo -e "  ${BOLD}Port layout:${NC}"
+    echo -e "    $PANEL_PORT  → Nginx (public, routes to backend + frontend)"
+    echo -e "    $BACKEND_PORT  → Flask/Gunicorn (internal only)"
+    echo -e "    $FRONTEND_PORT  → Next.js (internal only)"
+    echo
     echo -e "  ${BOLD}Service management:${NC}"
-    echo -e "    systemctl status  ascend-backend ascend-frontend"
+    echo -e "    systemctl status  ascend-backend ascend-frontend nginx"
     echo -e "    systemctl restart ascend-backend ascend-frontend"
     echo -e "    systemctl stop    ascend-backend ascend-frontend"
     echo
@@ -368,7 +448,7 @@ print_summary() {
     echo
     echo -e "  ${BOLD}Config files:${NC}"
     echo -e "    $INSTALL_DIR/.env"
-    echo -e "    $INSTALL_DIR/frontend/.env.local"
+    echo -e "    /etc/nginx/sites-available/ascend"
     echo
     echo -e "  ${BOLD}Add a domain + SSL:${NC}"
     echo -e "    certbot --nginx -d yourdomain.com"
@@ -404,6 +484,7 @@ main() {
 
     create_services
     start_services
+    setup_nginx
     open_firewall
 
     print_summary
