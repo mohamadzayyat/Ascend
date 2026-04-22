@@ -410,9 +410,12 @@ start_services() {
 
 open_firewall() {
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-        section "Opening firewall ports"
+        section "Configuring firewall"
         ufw allow "$PANEL_PORT/tcp" comment "Ascend Panel" >/dev/null
-        ok "Port $PANEL_PORT allowed in ufw (backend and frontend are internal-only)"
+        # Block direct external access to internal ports — all traffic must go through Nginx
+        ufw deny "$BACKEND_PORT/tcp"  comment "Ascend internal" >/dev/null
+        ufw deny "$FRONTEND_PORT/tcp" comment "Ascend internal" >/dev/null
+        ok "Port $PANEL_PORT open; ports $BACKEND_PORT and $FRONTEND_PORT blocked (internal only)"
     fi
 }
 
