@@ -568,14 +568,15 @@ def github_webhook(webhook_secret):
     if not project or not project.enable_webhook or not project.auto_deploy:
         return jsonify({'error': 'Not found'}), 404
 
-    # Verify GitHub signature
+    # Verify GitHub signature — required, never optional.
     signature_header = request.headers.get('X-Hub-Signature-256', '')
-    if signature_header:
-        expected = 'sha256=' + hmac.new(
-            webhook_secret.encode(), request.data, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(signature_header, expected):
-            return jsonify({'error': 'Invalid signature'}), 403
+    if not signature_header:
+        return jsonify({'error': 'Missing signature'}), 403
+    expected = 'sha256=' + hmac.new(
+        webhook_secret.encode(), request.data, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature_header, expected):
+        return jsonify({'error': 'Invalid signature'}), 403
 
     data = request.get_json(force=True) or {}
 
@@ -748,7 +749,8 @@ def deploy_project_bg(deployment_id, github_username, github_token):
 
                 if project.domain:
                     log.write("\nStep 6: Configuring Nginx...\n")
-                    setup_nginx_config(project, log)
+                    if not setup_nginx_config(project, log):
+                        raise RuntimeError("Nginx configuration failed — see log above")
 
                 log.write("\n=== Deployment Completed Successfully ===\n")
                 deployment.status = 'success'
@@ -807,54 +809,92 @@ def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
 
 
 def setup_nginx_config(project, log_file):
-    """Write an Nginx virtual host and optionally obtain an SSL cert."""
+    """Write an Nginx virtual host and optionally obtain an SSL cert.
+
+    Returns True on success, False if the config failed to write, test,
+    or reload — caller should treat False as a deployment failure so
+    domains don't silently 502 after a bad config lands.
+    """
+    log_file.write(f"  Domain: {project.domain}\n")
+
+    nginx_config = (
+        f"server {{\n"
+        f"    listen 80;\n"
+        f"    server_name {project.domain} www.{project.domain};\n"
+        f"    client_max_body_size {project.client_max_body};\n"
+        f"\n"
+        f"    location / {{\n"
+        f"        proxy_pass http://127.0.0.1:{project.app_port};\n"
+        f"        proxy_set_header Host $host;\n"
+        f"        proxy_set_header X-Real-IP $remote_addr;\n"
+        f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        f"    }}\n"
+        f"}}\n"
+    )
+
+    config_path = f"/etc/nginx/sites-available/{project.domain}"
+    enabled_path = f"/etc/nginx/sites-enabled/{project.domain}"
+    # Back up any existing config so we can roll back on validation failure
+    backup_path = None
+    if os.path.exists(config_path):
+        backup_path = config_path + '.ascend.bak'
+        try:
+            with open(config_path, 'rb') as src, open(backup_path, 'wb') as dst:
+                dst.write(src.read())
+        except Exception as e:
+            log_file.write(f"  Warning: could not back up existing config: {e}\n")
+
     try:
-        log_file.write(f"  Domain: {project.domain}\n")
-
-        nginx_config = (
-            f"server {{\n"
-            f"    listen 80;\n"
-            f"    server_name {project.domain} www.{project.domain};\n"
-            f"    client_max_body_size {project.client_max_body};\n"
-            f"\n"
-            f"    location / {{\n"
-            f"        proxy_pass http://127.0.0.1:{project.app_port};\n"
-            f"        proxy_set_header Host $host;\n"
-            f"        proxy_set_header X-Real-IP $remote_addr;\n"
-            f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
-            f"    }}\n"
-            f"}}\n"
-        )
-
-        config_path = f"/etc/nginx/sites-available/{project.domain}"
         with open(config_path, 'w') as f:
             f.write(nginx_config)
         log_file.write(f"  Config written: {config_path}\n")
 
-        enabled_path = f"/etc/nginx/sites-enabled/{project.domain}"
         if not os.path.exists(enabled_path):
             os.symlink(config_path, enabled_path)
 
         test = subprocess.run(['nginx', '-t'], capture_output=True)
-        if test.returncode == 0:
-            subprocess.run(['systemctl', 'reload', 'nginx'], capture_output=True)
-            log_file.write("  Nginx reloaded\n")
-
-            if project.enable_ssl:
-                log_file.write("  Obtaining SSL certificate...\n")
-                subprocess.run([
-                    'certbot', '--nginx',
-                    '-d', project.domain,
-                    '-d', f'www.{project.domain}',
-                    '--non-interactive', '--agree-tos',
-                    '-m', f'admin@{project.domain}',
-                ], capture_output=True)
-        else:
+        if test.returncode != 0:
             log_file.write(f"  Nginx test failed: {test.stderr.decode()}\n")
+            # Roll back
+            if backup_path and os.path.exists(backup_path):
+                with open(backup_path, 'rb') as src, open(config_path, 'wb') as dst:
+                    dst.write(src.read())
+                log_file.write("  Rolled back to previous config.\n")
+            elif not backup_path and os.path.islink(enabled_path):
+                os.unlink(enabled_path)
+            return False
+
+        reload = subprocess.run(['systemctl', 'reload', 'nginx'], capture_output=True)
+        if reload.returncode != 0:
+            log_file.write(f"  Nginx reload failed: {reload.stderr.decode()}\n")
+            return False
+        log_file.write("  Nginx reloaded\n")
+
+        if project.enable_ssl:
+            log_file.write("  Obtaining SSL certificate...\n")
+            cert = subprocess.run([
+                'certbot', '--nginx',
+                '-d', project.domain,
+                '-d', f'www.{project.domain}',
+                '--non-interactive', '--agree-tos',
+                '-m', f'admin@{project.domain}',
+            ], capture_output=True)
+            if cert.returncode != 0:
+                # Cert failure is non-fatal — site still serves on HTTP
+                log_file.write(f"  Warning: certbot failed: {cert.stderr.decode()}\n")
+
+        return True
 
     except Exception as e:
         log_file.write(f"  Nginx setup error: {e}\n")
+        return False
+    finally:
+        if backup_path and os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════

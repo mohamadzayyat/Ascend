@@ -73,6 +73,47 @@ check_systemd() {
     command -v systemctl &>/dev/null || die "systemd is required but not found."
 }
 
+# Abort if a port is already bound by a *different* process.
+# Our own ascend-* services are allowed (re-running the installer is fine).
+port_used_by_other() {
+    local port=$1
+    local pids
+    pids=$(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+    [[ -z "$pids" ]] && return 1
+    for pid in $pids; do
+        local unit
+        unit=$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')
+        [[ "$unit" == ascend-backend.service || "$unit" == ascend-frontend.service ]] && continue
+        return 0
+    done
+    return 1
+}
+
+check_ports() {
+    section "Checking port availability"
+    local conflict=0
+    for p in $PANEL_PORT $BACKEND_PORT $FRONTEND_PORT; do
+        if port_used_by_other "$p"; then
+            warn "Port $p is already in use by another process:"
+            ss -tlnp "sport = :$p" 2>/dev/null | tail -n +2 | sed 's/^/    /'
+            conflict=1
+        else
+            ok "Port $p is free"
+        fi
+    done
+    [[ $conflict -eq 0 ]] || die "Port conflict detected. Free the port(s) above or edit PANEL_PORT/BACKEND_PORT/FRONTEND_PORT in install.sh."
+}
+
+# Detect CPU count for gunicorn worker calculation: (2 * CPU) + 1, capped at 9.
+detect_worker_count() {
+    local cpus
+    cpus=$(nproc 2>/dev/null || echo 1)
+    local workers=$(( cpus * 2 + 1 ))
+    [[ $workers -gt 9 ]] && workers=9
+    [[ $workers -lt 2 ]] && workers=2
+    echo "$workers"
+}
+
 # ── System packages ─────────────────────────────────────────────
 
 # Check a binary; install apt packages only if it is missing.
@@ -302,11 +343,9 @@ NGINX
     fi
     ln -s "$nginx_conf" "$enabled"
 
-    # Disable the default Nginx site if it conflicts on port 80
-    if [[ -f /etc/nginx/sites-enabled/default ]]; then
-        rm -f /etc/nginx/sites-enabled/default
-        info "Disabled default Nginx site to avoid port conflicts"
-    fi
+    # Note: we do NOT touch /etc/nginx/sites-enabled/default —
+    # Ascend uses port $PANEL_PORT so there is no conflict with the default site,
+    # and other projects on this VPS may rely on it.
 
     # Test and reload
     if nginx -t 2>/dev/null; then
@@ -344,7 +383,7 @@ User=root
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$INSTALL_DIR/venv/bin/gunicorn \\
-    --workers 4 \\
+    --workers $GUNICORN_WORKERS \\
     --bind 127.0.0.1:$BACKEND_PORT \\
     --timeout 120 \\
     --access-logfile - \\
@@ -472,6 +511,10 @@ main() {
     check_root
     check_os
     check_systemd
+    check_ports
+
+    GUNICORN_WORKERS=$(detect_worker_count)
+    info "Gunicorn workers: $GUNICORN_WORKERS  (based on $(nproc) CPU core(s))"
 
     install_system_deps
     install_node

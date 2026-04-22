@@ -74,7 +74,12 @@ export function useDeployment(id) {
   const { data: deployment, error, mutate } = useSWR(
     id ? `${API_URL}/api/deployment/${id}/status` : null,
     fetchWithCreds,
-    { refreshInterval: (data) => (isRunning(data) ? 1500 : 0) }
+    {
+      // Poll every 3s while a deployment is in flight, stop when done.
+      // SWR's refreshWhenHidden defaults to false → polling pauses on background tabs.
+      refreshInterval: (data) => (isRunning(data) ? 3000 : 0),
+      dedupingInterval: 1000,
+    }
   )
 
   const getLog = () =>
@@ -93,7 +98,7 @@ export function useProjectDeployments(projectId) {
   const { data: deployments, error, mutate } = useSWR(
     projectId ? `${API_URL}/api/project/${projectId}/deployments` : null,
     fetchWithCreds,
-    { refreshInterval: 5000 }
+    { refreshInterval: 10000, dedupingInterval: 2000 }
   )
 
   return {
