@@ -1,339 +1,243 @@
-# 🚀 CPanel - Powerful Deployment Management System
+# Ascend — Deployment Management System
 
-A modern, web-based deployment panel that transforms your deployment process into an intuitive interface. Deploy websites, APIs, and CMS platforms from the same GitHub repository with ease.
+A modern, web-based deployment panel that turns your VPS into a self-hosted deployment platform. Manage unlimited projects, stream live logs, and auto-deploy on every GitHub push — all from a clean dashboard.
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14, Tailwind CSS, SWR |
+| Backend | Flask, SQLAlchemy, Flask-Login |
+| Process manager | PM2 |
+| Web server | Nginx + Certbot (auto-SSL) |
+| Database | SQLite |
 
 ## Features
 
-✨ **Modern Web Interface** - Built with Next.js and Tailwind CSS
-🔐 **Secure** - User authentication and role-based access control
-⚡ **Real-time Logs** - Stream deployment logs live to your browser
-🔗 **Multi-Project Support** - Manage unlimited deployments
-🎯 **Auto-Deployment** - GitHub webhook integration for automatic deployments
-📦 **Package Manager Support** - NPM, Yarn, PNPM
-🌐 **Domain Management** - Automatic Nginx configuration and SSL with Certbot
-💾 **Persistent Storage** - SQLite database for configurations and history
-🚀 **PM2 Integration** - Process management and auto-restart
-📊 **Dashboard** - Real-time stats and project overview
+- **Multi-project dashboard** — manage websites, APIs, CMS, and custom apps from one place
+- **Real-time deployment logs** — streamed live to the browser as they happen
+- **GitHub webhooks** — auto-deploy on push with HMAC signature verification
+- **Nginx + SSL automation** — virtual host and Let's Encrypt cert created automatically
+- **Environment variables** — per-project `.env` stored and applied at deploy time
+- **Monorepo support** — deploy from a subdirectory of any repository
+- **Deployment history** — full log archive for every past deployment
 
-## Architecture
+## Ports
+
+| Service | Default port |
+|---|---|
+| Flask backend | **8716** |
+| Next.js frontend | **8717** |
+
+Both are configurable via `.env` / npm scripts and sit well above common VPS service ports (MySQL 3306, PostgreSQL 5432, Redis 6379).
+
+## Project Structure
 
 ```
-CPanel/
-├── app.py                 # Flask backend API
-├── requirements.txt       # Python dependencies
-├── cpanel.db             # SQLite database
-└── frontend/             # Next.js frontend
-    ├── pages/
-    ├── components/
+Ascend/
+├── app.py                # Flask API — auth, projects, deployments, webhooks
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+└── frontend/
+    ├── pages/            # Next.js pages (login, dashboard, projects, settings)
+    ├── components/       # UI components (ProjectCard, DeploymentLogs, …)
     ├── lib/
-    ├── styles/
-    └── package.json
+    │   ├── api.js        # Axios client pointing at the Flask API
+    │   ├── store.js      # Zustand global state
+    │   └── hooks/
+    │       └── useAuth.js  # SWR hooks for auth, projects, deployments
+    └── styles/
 ```
 
 ## Quick Start
 
-### Prerequisites
+### Requirements
 
 - Python 3.9+
-- Node.js 16+
-- Ubuntu/Debian VPS with root access
-- GitHub Personal Access Token (for cloning private repos)
+- Node.js 18+
+- Ubuntu/Debian VPS (for Nginx/PM2/Certbot features)
 
-### Backend Setup
+### 1. Clone
 
-1. Clone and enter the project:
 ```bash
-cd /opt/cpanel
+git clone https://github.com/mohamadzayyat/Ascend.git
+cd Ascend
 ```
 
-2. Create Python virtual environment:
+### 2. Backend
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-```
-
-3. Install dependencies:
-```bash
 pip install -r requirements.txt
-```
 
-4. Set up environment:
-```bash
 cp .env.example .env
-# Edit .env with your settings
+# Edit .env — set SECRET_KEY at minimum
+
+python app.py
+# Runs on http://0.0.0.0:8716
 ```
 
-5. Initialize database:
-```bash
-flask --app app init-db
-```
+### 3. Frontend
 
-6. Run the backend:
-```bash
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
-```
-
-### Frontend Setup
-
-1. Navigate to frontend directory:
 ```bash
 cd frontend
-```
-
-2. Install dependencies:
-```bash
 npm install
-```
 
-3. Build for production:
-```bash
+# Development
+npm run dev        # http://localhost:8717
+
+# Production
 npm run build
-```
-
-4. Start the frontend:
-```bash
 npm start
 ```
 
-Or run in development:
-```bash
-npm run dev
-```
+### 4. First Login
 
-## Using the Panel
+Open `http://your-vps:8717` → you'll be redirected to `/setup` to create the admin account.
 
-### 1. Initial Setup
+## Configuration
 
-1. Access http://your-vps:5000/setup
-2. Create an admin account
-3. Log in to the dashboard
-
-### 2. Add GitHub Credentials
-
-1. Go to Settings → GitHub Credentials
-2. Add your GitHub username and Personal Access Token
-3. Credentials are saved for future use
-
-### 3. Create a Project
-
-1. Click "New Project" on dashboard
-2. Fill in project details:
-   - Name, description
-   - GitHub URL and branch
-   - Project type (Website, API, CMS, Custom)
-   - Build and start commands
-   - Domain name (optional)
-3. Click "Create Project"
-
-### 4. Deploy a Project
-
-1. Go to project details
-2. Click "Start Deployment"
-3. Watch real-time logs in the Deployments tab
-4. Once complete, your app will be running
-
-### 5. Set Up Auto-Deployment
-
-1. Edit project settings
-2. Enable "Auto-deploy on GitHub push"
-3. Copy the webhook URL from project details
-4. Add webhook to GitHub repository settings:
-   - Payload URL: `http://your-vps/webhook/github/{webhook_secret}`
-   - Content type: application/json
-   - Events: Push events
-
-## Supported Project Types
-
-### Website
-- HTML, Vue, React, Angular, Next.js
-- Automatic Nginx proxy setup
-- SSL with Certbot
-
-### API
-- Node.js, Python, Ruby
-- Port forwarding with Nginx
-- Environment variable support
-
-### CMS
-- WordPress, Strapi, Ghost
-- Database connectivity
-- File uploads support
-
-### Custom
-- Any Node.js or Python application
-- Custom build and start commands
-
-## Environment Variables
-
-Create a `.env` file in the root directory:
+Copy `.env.example` to `.env` and set:
 
 ```bash
-# Flask
-SECRET_KEY=your-secret-key-here
-FLASK_ENV=production
+SECRET_KEY=your-random-secret-key
+PORT=8716
+CORS_ORIGIN=http://localhost:8717   # or your production domain
 
-# Database
-DATABASE_URL=sqlite:///cpanel.db
-
-# Server
-HOST=0.0.0.0
-PORT=5000
-
-# CORS
-CORS_ORIGINS=http://localhost:3000,https://your-domain.com
+# Optional: persist the DB outside the project dir
+SQLALCHEMY_DATABASE_URI=sqlite:////opt/ascend/ascend.db
 ```
 
-## API Endpoints
+For the frontend, edit `frontend/.env.local`:
 
-### Authentication
-- `POST /login` - User login
-- `POST /logout` - User logout
-- `POST /setup` - Initial setup
-- `GET /api/current-user` - Get current user
+```bash
+NEXT_PUBLIC_API_URL=http://your-vps:8716
+```
+
+## Docker
+
+```bash
+docker-compose up -d
+```
+
+Nginx handles ports 80/443 publicly; Flask (8716) and Next.js (8717) are internal.
+
+## API Reference
+
+### Auth
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/auth/login` | Login (JSON) |
+| `POST` | `/api/auth/logout` | Logout |
+| `POST` | `/api/auth/setup` | Create first admin |
+| `GET` | `/api/current-user` | Current session user |
 
 ### Projects
-- `GET /api/projects` - List projects
-- `GET /api/project/{id}` - Get project details
-- `POST /project/new` - Create project
-- `POST /project/{id}/edit` - Update project
-- `POST /project/{id}/delete` - Delete project
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/projects` | List all projects |
+| `POST` | `/api/projects` | Create project |
+| `GET` | `/api/project/{id}` | Get project |
+| `PUT` | `/api/project/{id}` | Update project |
+| `DELETE` | `/api/project/{id}` | Delete project |
 
 ### Deployments
-- `POST /api/project/{id}/deploy` - Start deployment
-- `GET /api/deployment/{id}/status` - Get deployment status
-- `GET /api/deployment/{id}/log` - Get deployment logs
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/project/{id}/deploy` | Trigger deployment |
+| `GET` | `/api/project/{id}/deployments` | Deployment history |
+| `GET` | `/api/deployment/{id}/status` | Deployment status |
+| `GET` | `/api/deployment/{id}/log` | Deployment log |
 
-### Webhooks
-- `POST /webhook/github/{secret}` - GitHub webhook
+### Webhook
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/webhook/github/{secret}` | GitHub push webhook |
 
-## Deployment Process
+## Deployment Flow
 
-When you click deploy or trigger via webhook, CPanel:
+When a deployment is triggered (manually or via webhook), Ascend:
 
-1. **Clone/Update Repository** - Fetches latest code from GitHub
-2. **Setup Environment** - Creates .env file with your variables
-3. **Install Dependencies** - Runs npm/yarn/pnpm install
-4. **Build Project** - Executes build command
-5. **Start Application** - Launches with PM2
-6. **Configure Nginx** - Sets up reverse proxy
-7. **Enable SSL** - Creates/renews SSL certificate with Certbot
+1. Clones or fast-forwards the repository from GitHub
+2. Optionally enters a subdirectory (monorepo support)
+3. Writes the project's `.env` file
+4. Runs `npm install` (or yarn/pnpm)
+5. Runs the build command
+6. Restarts the PM2 process
+7. Writes the Nginx virtual host and reloads
+8. Obtains/renews the SSL certificate via Certbot
 
-All steps are logged in real-time and visible in the deployment logs.
+All output is streamed to a log file and exposed via the API in real time.
 
-## Scaling to Production
-
-### Using Systemd
-
-Create `/etc/systemd/system/cpanel.service`:
+## Production (systemd)
 
 ```ini
+# /etc/systemd/system/ascend.service
 [Unit]
-Description=CPanel Deployment Panel
+Description=Ascend Deployment Panel
 After=network.target
 
 [Service]
-Type=notify
 User=root
-WorkingDirectory=/opt/cpanel
-Environment="PATH=/opt/cpanel/venv/bin"
-ExecStart=/opt/cpanel/venv/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app
+WorkingDirectory=/opt/ascend
+Environment="PATH=/opt/ascend/venv/bin"
+ExecStart=/opt/ascend/venv/bin/gunicorn -w 4 -b 0.0.0.0:8716 app:app
 Restart=on-failure
-RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
 ```bash
-systemctl enable cpanel
-systemctl start cpanel
+systemctl enable ascend && systemctl start ascend
 ```
 
-### Reverse Proxy with Nginx
+## Nginx reverse proxy (optional)
+
+If you want to serve the frontend through nginx instead of directly on 8717:
 
 ```nginx
 server {
     listen 80;
-    server_name your-domain.com;
+    server_name panel.yourdomain.com;
 
+    # Next.js frontend
     location / {
-        proxy_pass http://127.0.0.1:5000;
+        proxy_pass http://127.0.0.1:8717;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Flask API
+    location /api/ {
+        proxy_pass http://127.0.0.1:8716;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
     }
 }
 ```
 
 ## Troubleshooting
 
-### Deploy fails with "Command not found"
-- Ensure all dependencies are installed: `apt-get install -y nodejs npm git nginx certbot python3-certbot-nginx`
+**Frontend can't reach the backend**
+- Check `NEXT_PUBLIC_API_URL` in `frontend/.env.local` matches the backend port (8716)
+- Ensure `CORS_ORIGIN` in `.env` matches the frontend origin
 
-### GitHub credentials not working
-- Verify your Personal Access Token is still valid
-- Check token has `repo` scope permissions
+**Deploy fails immediately**
+- Add GitHub credentials first: Settings → GitHub Credentials
+- Verify the Personal Access Token has `repo` scope
 
-### SSL certificate errors
-- Ensure domain is pointing to your VPS
-- Check email is valid for Let's Encrypt registration
-- Review Certbot logs: `certbot logs`
+**SSL certificate fails**
+- The domain must point to this VPS before running Certbot
+- Check with `dig your-domain.com`
 
-### PM2 app not starting
-- Check app logs: `pm2 logs app-name`
-- Verify start command is correct
-- Check port is available: `netstat -tlnp`
-
-## Database Schema
-
-SQLite database includes:
-- **Users** - Admin accounts
-- **Projects** - Deployment configurations
-- **Deployments** - Deployment history and logs
-- **GitHubCredentials** - Saved GitHub credentials
-
-## Security Notes
-
-1. Always use HTTPS in production
-2. Keep your admin password strong
-3. Regularly backup your database
-4. Limit VPS firewall to necessary ports
-5. Use strong GitHub Personal Access Tokens
-6. Review deployment logs for any issues
-
-## Performance Tips
-
-1. Use SSD for database and logs
-2. Set up log rotation for large deployments
-3. Monitor memory usage for build processes
-4. Cache dependencies when possible
-5. Use CDN for static files
-
-## Support & Contributing
-
-For issues, questions, or contributions:
-- Review logs in `/root/deploy_wizard.log`
-- Check deployment logs in the panel
-- Monitor system resources during builds
+**PM2 process not starting**
+- Check logs: `pm2 logs <app-name>`
+- Ensure the start command and app port are correct in project settings
 
 ## License
 
-MIT License - Feel free to use and modify for your needs
-
-## Changelog
-
-### v1.0.0
-- Initial release
-- Multi-project deployment support
-- Real-time logs streaming
-- GitHub webhook integration
-- Auto-SSL setup
-- PM2 process management
-- SQLite persistence
-- Modern Next.js frontend
-
----
-
-Made with ❤️ for developers who want simple, powerful deployments
+MIT
