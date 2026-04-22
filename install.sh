@@ -68,17 +68,38 @@ check_systemd() {
 
 # ── System packages ─────────────────────────────────────────────
 
+# Install a single apt package only if the binary is not already present.
+# Usage: apt_install <check-command> <display-name> <pkg1> [pkg2 …]
+apt_install() {
+    local cmd=$1 label=$2; shift 2
+    if command -v "$cmd" &>/dev/null; then
+        ok "$label already installed  ($($cmd --version 2>&1 | head -1))"
+    else
+        info "Installing $label…"
+        apt-get install -y -qq "$@" 2>/dev/null
+        ok "$label installed"
+    fi
+}
+
 install_system_deps() {
-    section "Installing system packages"
+    section "Checking system packages"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq \
-        python3 python3-pip python3-venv \
-        git curl wget \
-        nginx certbot python3-certbot-nginx \
-        build-essential \
-        2>/dev/null
-    ok "apt packages ready"
+
+    apt_install python3   "Python 3"  python3 python3-pip python3-venv
+    apt_install git       "Git"       git
+    apt_install curl      "curl"      curl wget
+    apt_install nginx     "Nginx"     nginx
+    apt_install certbot   "Certbot"   certbot python3-certbot-nginx
+
+    # build-essential has no single binary; check gcc
+    if command -v gcc &>/dev/null; then
+        ok "build-essential already installed  (gcc $(gcc --version | head -1 | awk '{print $NF}'))"
+    else
+        info "Installing build-essential…"
+        apt-get install -y -qq build-essential 2>/dev/null
+        ok "build-essential installed"
+    fi
 }
 
 install_node() {
@@ -90,9 +111,9 @@ install_node() {
             ok "Node.js $(node -v) already installed"
             return
         fi
-        info "Node.js $ver is too old — upgrading to $NODE_MAJOR…"
+        info "Node.js v$ver is too old (need ≥18) — upgrading to $NODE_MAJOR…"
     else
-        info "Node.js not found — installing $NODE_MAJOR…"
+        info "Node.js not found — installing v$NODE_MAJOR…"
     fi
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - -qq 2>/dev/null
     apt-get install -y -qq nodejs 2>/dev/null
@@ -102,11 +123,12 @@ install_node() {
 install_pm2() {
     section "Checking PM2"
     if command -v pm2 &>/dev/null; then
-        ok "PM2 already installed"
+        ok "PM2 already installed  ($(pm2 --version))"
         return
     fi
+    info "Installing PM2…"
     npm install -g pm2 --silent
-    ok "PM2 installed"
+    ok "PM2 $(pm2 --version) installed"
 }
 
 # ── Source code ─────────────────────────────────────────────────
