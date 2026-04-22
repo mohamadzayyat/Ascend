@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { useRouter } from 'next/router'
 import { useAuth } from '@/lib/hooks/useAuth'
 import Sidebar from '@/components/Sidebar'
@@ -12,6 +12,12 @@ export default function App({ Component, pageProps }) {
 
   const isPublic = PUBLIC_PATHS.includes(router.pathname)
 
+  useEffect(() => {
+    if (!loading && !user && !isPublic) {
+      router.replace('/login')
+    }
+  }, [loading, user, isPublic, router])
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-primary">
@@ -24,7 +30,6 @@ export default function App({ Component, pageProps }) {
   }
 
   if (!user && !isPublic) {
-    router.push('/login')
     return null
   }
 

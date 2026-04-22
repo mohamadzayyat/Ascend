@@ -8,14 +8,12 @@ const api = axios.create({
   withCredentials: true,
 })
 
+// Let callers handle 401s. _app.jsx redirects unauthenticated users to /login,
+// and useAuth() treats a 401 on /api/current-user as "not logged in" (not an error).
+// A global redirect here would fight those and cause loops on /login and /setup.
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401 && typeof window !== 'undefined') {
-      window.location.href = '/login'
-    }
-    return Promise.reject(error)
-  }
+  (error) => Promise.reject(error)
 )
 
 export const apiClient = {

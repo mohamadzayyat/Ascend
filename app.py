@@ -210,6 +210,14 @@ def load_user(user_id):
     return db.session.get(User, int(user_id))
 
 
+@login_manager.unauthorized_handler
+def unauthorized():
+    """Return JSON 401 for API requests; redirect only for HTML pages."""
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    return redirect(url_for('login'))
+
+
 # ═══════════════════════════════════════════
 # JSON Auth API (used by Next.js frontend)
 # ═══════════════════════════════════════════
