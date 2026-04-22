@@ -51,7 +51,33 @@ Ascend/
     └── styles/
 ```
 
-## Quick Start
+## Installation
+
+### One command (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mohamadzayyat/Ascend/main/install.sh | sudo bash
+```
+
+Or if you already cloned the repo:
+
+```bash
+sudo bash install.sh
+```
+
+The script handles everything automatically:
+- Installs Python 3, Node.js 20, Nginx, Certbot, PM2
+- Clones the repo into `/opt/ascend`
+- Generates a secure `SECRET_KEY`
+- Builds the Next.js frontend
+- Creates and starts `ascend-backend` + `ascend-frontend` systemd services
+- Opens firewall ports (if ufw is active)
+
+When it finishes, open `http://your-server-ip:8717` and create your admin account.
+
+---
+
+## Manual Setup
 
 ### Requirements
 
