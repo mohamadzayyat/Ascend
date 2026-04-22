@@ -1,7 +1,15 @@
-import { useState, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import useSWR from 'swr'
 import { apiClient, API_URL } from '@/lib/api'
+
+// Treats 401 as "not logged in" (data=null) rather than as an error,
+// so SWR caches null instead of thrashing with retries.
+const fetchAuth = (url) =>
+  fetch(url, { credentials: 'include' }).then((r) => {
+    if (r.status === 401) return null
+    if (!r.ok) throw new Error('Request failed')
+    return r.json()
+  })
 
 const fetchWithCreds = (url) =>
   fetch(url, { credentials: 'include' }).then((r) => {
@@ -9,21 +17,21 @@ const fetchWithCreds = (url) =>
     return r.json()
   })
 
+const AUTH_KEY = `${API_URL}/api/current-user`
+
+// All components calling useAuth() share the same SWR cache entry under
+// AUTH_KEY, so login in one component updates the user everywhere.
 export function useAuth() {
   const router = useRouter()
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    apiClient.checkAuth()
-      .then((res) => setUser(res.data))
-      .catch(() => setUser(null))
-      .finally(() => setLoading(false))
-  }, [])
+  const { data, error, mutate } = useSWR(AUTH_KEY, fetchAuth, {
+    revalidateOnFocus: false,
+    shouldRetryOnError: false,
+    dedupingInterval: 60000,
+  })
 
   const login = async (username, password) => {
     const res = await apiClient.login(username, password)
-    setUser(res.data)
+    await mutate(res.data, false)
     return res.data
   }
 
@@ -33,11 +41,17 @@ export function useAuth() {
     } catch (_) {
       // best-effort
     }
-    setUser(null)
+    await mutate(null, false)
     router.push('/login')
   }
 
-  return { user, loading, login, logout, setUser }
+  return {
+    user: data ?? null,
+    loading: data === undefined && !error,
+    login,
+    logout,
+    setUser: (u) => mutate(u, false),
+  }
 }
 
 export function useProjects() {

@@ -35,7 +35,7 @@ export default function Sidebar() {
           {/* Logo */}
           <Link href="/dashboard" className="flex items-center gap-2 mb-8 text-xl font-bold text-white hover:text-accent transition">
             <span className="text-2xl">🚀</span>
-            CPanel
+            Ascend
           </Link>
 
           {/* Navigation */}

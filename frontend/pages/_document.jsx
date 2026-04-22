@@ -5,7 +5,7 @@ export default function Document() {
     <Html lang="en">
       <Head>
         <meta charSet="utf-8" />
-        <meta name="description" content="CPanel - Deployment Management System" />
+        <meta name="description" content="Ascend - Deployment Management System" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
       <body>

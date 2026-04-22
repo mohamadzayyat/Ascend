@@ -54,7 +54,7 @@ export default function GitHubSettings() {
       <div className="mb-8">
         <h1 className="text-4xl font-bold text-white mb-2">GitHub Credentials</h1>
         <p className="text-gray-400">
-          Add a Personal Access Token so CPanel can clone your private repositories.
+          Add a Personal Access Token so Ascend can clone your private repositories.
         </p>
       </div>
 

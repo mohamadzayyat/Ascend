@@ -37,7 +37,7 @@ export default function Setup() {
       <div className="w-full max-w-md">
         <div className="bg-secondary rounded-lg shadow-2xl p-8 border border-gray-700">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold text-white mb-2">🚀 CPanel Setup</h1>
+            <h1 className="text-3xl font-bold text-white mb-2">🚀 Ascend Setup</h1>
             <p className="text-gray-400">Create your admin account</p>
           </div>
 
