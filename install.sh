@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  Ascend — One-file installer
+#  Ascend — One-file installer  (safe to re-run after any failure)
 #  Usage:  sudo bash install.sh
 #  Or:     curl -fsSL https://raw.githubusercontent.com/mohamadzayyat/Ascend/main/install.sh | sudo bash
 # ═══════════════════════════════════════════════════════════════
@@ -68,8 +68,7 @@ check_systemd() {
 
 # ── System packages ─────────────────────────────────────────────
 
-# Install a single apt package only if the binary is not already present.
-# Usage: apt_install <check-command> <display-name> <pkg1> [pkg2 …]
+# Check a binary; install apt packages only if it is missing.
 apt_install() {
     local cmd=$1 label=$2; shift 2
     if command -v "$cmd" &>/dev/null; then
@@ -86,13 +85,12 @@ install_system_deps() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
 
-    apt_install python3   "Python 3"  python3 python3-pip python3-venv
-    apt_install git       "Git"       git
-    apt_install curl      "curl"      curl wget
-    apt_install nginx     "Nginx"     nginx
-    apt_install certbot   "Certbot"   certbot python3-certbot-nginx
+    apt_install python3  "Python 3" python3 python3-pip python3-venv
+    apt_install git      "Git"      git
+    apt_install curl     "curl"     curl wget
+    apt_install nginx    "Nginx"    nginx
+    apt_install certbot  "Certbot"  certbot python3-certbot-nginx
 
-    # build-essential has no single binary; check gcc
     if command -v gcc &>/dev/null; then
         ok "build-essential already installed  (gcc $(gcc --version | head -1 | awk '{print $NF}'))"
     else
@@ -135,14 +133,24 @@ install_pm2() {
 
 get_source() {
     section "Setting up source code"
+
+    # Already running from inside a cloned repo
     if [[ "$INSTALL_DIR" != "/opt/ascend" ]]; then
-        ok "Running from existing repo at $INSTALL_DIR"
+        ok "Using existing repo at $INSTALL_DIR"
         return
+    fi
+
+    # Directory exists but has no .git → previous clone was interrupted
+    if [[ -d "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
+        warn "Incomplete directory found at $INSTALL_DIR — removing and re-cloning…"
+        rm -rf "$INSTALL_DIR"
     fi
 
     if [[ -d "$INSTALL_DIR/.git" ]]; then
         info "Existing install found — pulling latest…"
-        git -C "$INSTALL_DIR" pull --ff-only --quiet
+        # Reset any local changes so pull always succeeds
+        git -C "$INSTALL_DIR" fetch --quiet origin
+        git -C "$INSTALL_DIR" reset --hard --quiet "origin/$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD)"
         ok "Updated to latest version"
     else
         info "Cloning Ascend into $INSTALL_DIR…"
@@ -155,6 +163,13 @@ get_source() {
 
 setup_python() {
     section "Setting up Python environment"
+
+    # Recreate venv if the python binary inside it is missing (broken venv)
+    if [[ -d "$INSTALL_DIR/venv" && ! -x "$INSTALL_DIR/venv/bin/python3" ]]; then
+        warn "Broken virtual environment detected — recreating…"
+        rm -rf "$INSTALL_DIR/venv"
+    fi
+
     python3 -m venv "$INSTALL_DIR/venv"
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
@@ -187,11 +202,11 @@ EOF
 init_db() {
     section "Initialising database"
     cd "$INSTALL_DIR"
+    # db.create_all() is safe to run multiple times — skips existing tables
     venv/bin/python - <<'PYEOF'
-from app import app, db, User
+from app import app, db
 with app.app_context():
     db.create_all()
-print("  Database schema ready")
 PYEOF
     ok "Database ready at $INSTALL_DIR/ascend.db"
 }
@@ -211,12 +226,21 @@ setup_frontend_env() {
 build_frontend() {
     section "Building Next.js frontend"
     cd "$INSTALL_DIR/frontend"
-    info "Running npm install…"
+
+    info "Installing npm packages…"
+    # npm install is always safe to re-run; updates if package.json changed
     npm install --silent
-    info "Running npm run build…"
-    npm run build --silent
+
+    # Always wipe the previous build — a partial .next causes cryptic errors
+    if [[ -d ".next" ]]; then
+        info "Removing previous build artifacts…"
+        rm -rf .next
+    fi
+
+    info "Building…"
+    npm run build
     cd "$INSTALL_DIR"
-    ok "Frontend built"
+    ok "Frontend built successfully"
 }
 
 # ── Systemd services ────────────────────────────────────────────
@@ -226,7 +250,14 @@ create_services() {
     local node_bin
     node_bin=$(command -v node)
 
-    # Backend
+    # Stop services before rewriting their unit files
+    for svc in ascend-backend ascend-frontend; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            info "Stopping $svc for update…"
+            systemctl stop "$svc"
+        fi
+    done
+
     cat > /etc/systemd/system/ascend-backend.service <<EOF
 [Unit]
 Description=Ascend Backend API (Flask/Gunicorn)
@@ -252,7 +283,6 @@ SyslogIdentifier=ascend-backend
 WantedBy=multi-user.target
 EOF
 
-    # Frontend
     cat > /etc/systemd/system/ascend-frontend.service <<EOF
 [Unit]
 Description=Ascend Frontend (Next.js)
@@ -275,8 +305,8 @@ SyslogIdentifier=ascend-frontend
 WantedBy=multi-user.target
 EOF
 
-    ok "ascend-backend.service created"
-    ok "ascend-frontend.service created"
+    ok "ascend-backend.service written"
+    ok "ascend-frontend.service written"
 }
 
 start_services() {
@@ -290,13 +320,13 @@ start_services() {
     if systemctl is-active --quiet ascend-backend; then
         ok "Backend  → running on port $BACKEND_PORT"
     else
-        warn "Backend may have failed. Check: journalctl -u ascend-backend -n 50"
+        warn "Backend failed to start. Check: journalctl -u ascend-backend -n 50"
     fi
 
     if systemctl is-active --quiet ascend-frontend; then
         ok "Frontend → running on port $FRONTEND_PORT"
     else
-        warn "Frontend may have failed. Check: journalctl -u ascend-frontend -n 50"
+        warn "Frontend failed to start. Check: journalctl -u ascend-frontend -n 50"
     fi
 }
 
@@ -322,10 +352,10 @@ print_summary() {
     echo -e "║          Ascend installed successfully!           ║"
     echo -e "╚═══════════════════════════════════════════════════╝${NC}"
     echo
-    echo -e "  ${BOLD}Open your browser and go to:${NC}"
+    echo -e "  ${BOLD}Open your browser:${NC}"
     echo -e "  ${CYAN}http://$ip:$FRONTEND_PORT${NC}"
     echo
-    echo -e "  ${BOLD}Create your admin account on first visit${NC} (/setup)"
+    echo -e "  ${BOLD}First visit:${NC} go to /setup to create your admin account"
     echo
     echo -e "  ${BOLD}Service management:${NC}"
     echo -e "    systemctl status  ascend-backend ascend-frontend"
@@ -336,15 +366,15 @@ print_summary() {
     echo -e "    journalctl -u ascend-backend  -f"
     echo -e "    journalctl -u ascend-frontend -f"
     echo
-    echo -e "  ${BOLD}Config:${NC}"
-    echo -e "    $INSTALL_DIR/.env                  (backend)"
-    echo -e "    $INSTALL_DIR/frontend/.env.local   (frontend)"
+    echo -e "  ${BOLD}Config files:${NC}"
+    echo -e "    $INSTALL_DIR/.env"
+    echo -e "    $INSTALL_DIR/frontend/.env.local"
     echo
-    echo -e "  ${BOLD}Add a custom domain + SSL later:${NC}"
+    echo -e "  ${BOLD}Add a domain + SSL:${NC}"
     echo -e "    certbot --nginx -d yourdomain.com"
     echo
-    echo -e "  ${BOLD}To update Ascend in the future:${NC}"
-    echo -e "    sudo bash $INSTALL_DIR/install.sh"
+    echo -e "  ${BOLD}Re-run to update:${NC}"
+    echo -e "    curl -fsSL https://raw.githubusercontent.com/mohamadzayyat/Ascend/main/install.sh | sudo bash"
     echo
     echo -e "${BOLD}${GREEN}═══════════════════════════════════════════════════${NC}"
     echo
