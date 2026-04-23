@@ -168,6 +168,11 @@ class Project(db.Model):
     deployments = db.relationship('Deployment', backref='project', lazy=True, cascade='all, delete-orphan')
 
     def to_dict(self, include_apps=True):
+        # Aggregate disk size from whichever apps have already been measured.
+        # `disk_size_missing` tells the UI how many apps still need a recalc
+        # so it can show e.g. "2.3 GB (1 app not measured)".
+        sizes = [a.disk_size_bytes for a in self.apps if a.disk_size_bytes is not None]
+        computed = [a.disk_size_computed_at for a in self.apps if a.disk_size_computed_at is not None]
         d = {
             'id': self.id,
             'name': self.name,
@@ -179,6 +184,9 @@ class Project(db.Model):
             'webhook_secret': self.webhook_secret,
             'auto_deploy': self.auto_deploy,
             'github_hook_id': self.github_hook_id,
+            'disk_size_bytes': sum(sizes) if sizes else None,
+            'disk_size_computed_at': iso_utc(min(computed)) if computed else None,
+            'disk_size_missing': sum(1 for a in self.apps if a.disk_size_bytes is None),
             'created_at': iso_utc(self.created_at),
             'updated_at': iso_utc(self.updated_at),
         }
@@ -212,6 +220,12 @@ class App(db.Model):
     status = db.Column(db.String(50), default='created')
     last_deployment = db.Column(db.DateTime)
 
+    # Disk usage of the app's deploy directory. Populated by the file manager's
+    # "recalculate" action rather than every list call, because walking a tree
+    # with node_modules is expensive.
+    disk_size_bytes = db.Column(db.BigInteger)
+    disk_size_computed_at = db.Column(db.DateTime)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -235,6 +249,8 @@ class App(db.Model):
             'client_max_body': self.client_max_body,
             'status': self.status,
             'last_deployment': iso_utc(self.last_deployment),
+            'disk_size_bytes': self.disk_size_bytes,
+            'disk_size_computed_at': iso_utc(self.disk_size_computed_at),
             'created_at': iso_utc(self.created_at),
             'updated_at': iso_utc(self.updated_at),
         }
@@ -302,6 +318,8 @@ def migrate_schema():
                 db.session.execute(db.text(f'ALTER TABLE "{table}" ADD COLUMN {col_def}'))
         add_col('project', 'github_hook_id INTEGER')
         add_col('deployment', 'app_id INTEGER REFERENCES app(id)')
+        add_col('app', 'disk_size_bytes BIGINT')
+        add_col('app', 'disk_size_computed_at DATETIME')
         db.session.commit()
 
         # 2. Backfill Apps for legacy Projects
@@ -2787,6 +2805,63 @@ def api_app_files_rename(app_id):
     dst_p.parent.mkdir(parents=True, exist_ok=True)
     src_p.rename(dst_p)
     return jsonify({'status': 'ok', 'path': _fm_rel(dst_p, base)})
+
+
+def _walk_dir_size(path):
+    """Sum every regular file under `path` without following symlinks. Ignores
+    stat errors on individual entries (sockets, broken symlinks, perm denied)."""
+    total = 0
+    # os.walk does not follow symlinks by default.
+    for root, _dirs, files in os.walk(str(path)):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+@app.route('/api/app/<int:app_id>/files/recalculate-size', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_recalc_size(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    base = _app_deploy_dir(a)
+    size = _walk_dir_size(base) if base.exists() else 0
+    a.disk_size_bytes = size
+    a.disk_size_computed_at = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify({
+        'disk_size_bytes': size,
+        'disk_size_computed_at': iso_utc(a.disk_size_computed_at),
+    })
+
+
+@app.route('/api/project/<int:project_id>/files/recalculate-size', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_project_files_recalc_size(project_id):
+    p = Project.query.get_or_404(project_id)
+    if p.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    now = datetime.now(timezone.utc)
+    total = 0
+    per_app = []
+    for a in p.apps:
+        base = _app_deploy_dir(a)
+        size = _walk_dir_size(base) if base.exists() else 0
+        a.disk_size_bytes = size
+        a.disk_size_computed_at = now
+        total += size
+        per_app.append({'id': a.id, 'name': a.name, 'disk_size_bytes': size})
+    db.session.commit()
+    return jsonify({
+        'disk_size_bytes': total,
+        'disk_size_computed_at': iso_utc(now),
+        'apps': per_app,
+    })
 
 
 @app.route('/api/app/<int:app_id>/files/delete', methods=['POST'])

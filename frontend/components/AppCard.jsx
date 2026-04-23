@@ -3,6 +3,7 @@ import { useRouter } from 'next/router'
 import { Settings } from 'lucide-react'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
 import { relativeLocalTime } from '@/lib/time'
+import DiskUsage from '@/components/DiskUsage'
 
 const STATUS_CLASS = {
   deployed: 'bg-green-500/10 text-green-400',
@@ -82,6 +83,13 @@ export default function AppCard({ app }) {
           Last deployed {relativeLocalTime(app.last_deployment)}
         </p>
       )}
+      <div className="mt-2">
+        <DiskUsage
+          compact
+          bytes={app.disk_size_bytes}
+          computedAt={app.disk_size_computed_at}
+        />
+      </div>
     </div>
   )
 }

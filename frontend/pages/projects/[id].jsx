@@ -6,6 +6,7 @@ import { apiClient } from '@/lib/api'
 import { useProject, useProjects } from '@/lib/hooks/useAuth'
 import AppCard from '@/components/AppCard'
 import DeploymentLogs from '@/components/DeploymentLogs'
+import DiskUsage from '@/components/DiskUsage'
 import ProjectSettings from '@/components/ProjectSettings'
 
 export default function ProjectDetail() {
@@ -85,6 +86,20 @@ export default function ProjectDetail() {
         </div>
         {deployError && (
           <p className="text-red-400 text-sm mt-3">{deployError}</p>
+        )}
+        {apps.length > 0 && (
+          <div className="mt-4">
+            <DiskUsage
+              label="Project size"
+              bytes={project.disk_size_bytes}
+              computedAt={project.disk_size_computed_at}
+              missing={project.disk_size_missing}
+              onRecalculate={async () => {
+                await apiClient.recalcProjectSize(project.id)
+                mutate()
+              }}
+            />
+          </div>
         )}
       </div>
 

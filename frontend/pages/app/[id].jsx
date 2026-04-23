@@ -8,6 +8,7 @@ import AppRuntime from '@/components/AppRuntime'
 import AppSettings from '@/components/AppSettings'
 import AppFileManager from '@/components/AppFileManager'
 import DeploymentLogs from '@/components/DeploymentLogs'
+import DiskUsage from '@/components/DiskUsage'
 
 const STATUS_CLASS = {
   deployed: 'bg-green-500/20 text-green-400',
@@ -100,6 +101,16 @@ export default function AppDetail() {
           </button>
         </div>
         {deployError && <p className="text-red-400 text-sm mt-3">{deployError}</p>}
+        <div className="mt-4">
+          <DiskUsage
+            bytes={app.disk_size_bytes}
+            computedAt={app.disk_size_computed_at}
+            onRecalculate={async () => {
+              await apiClient.recalcAppSize(app.id)
+              mutate()
+            }}
+          />
+        </div>
       </div>
 
       <div className="flex gap-4 mb-8 border-b border-gray-700">

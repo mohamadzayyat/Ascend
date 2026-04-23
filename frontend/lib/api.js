@@ -91,6 +91,10 @@ export const apiClient = {
     api.post(`/api/app/${id}/files/rename`, { from, to }),
   deleteAppFile: (id, path) =>
     api.post(`/api/app/${id}/files/delete`, { path }),
+  recalcAppSize: (id) =>
+    api.post(`/api/app/${id}/files/recalculate-size`),
+  recalcProjectSize: (id) =>
+    api.post(`/api/project/${id}/files/recalculate-size`),
 }
 
 export { API_URL }
