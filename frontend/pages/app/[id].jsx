@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/router'
 import { ArrowLeft, Play } from 'lucide-react'
-import { apiClient } from '@/lib/api'
+import { apiClient, appFileApi } from '@/lib/api'
 import { useApp, useProject } from '@/lib/hooks/useAuth'
 import AppRuntime from '@/components/AppRuntime'
 import AppSettings from '@/components/AppSettings'
@@ -26,6 +26,7 @@ export default function AppDetail() {
   const [activeTab, setActiveTab] = useState('overview')
   const [deploying, setDeploying] = useState(false)
   const [deployError, setDeployError] = useState('')
+  const fileApi = useMemo(() => (app ? appFileApi(app.id) : null), [app?.id])
 
   useEffect(() => {
     if (tab && ['overview', 'deployments', 'files', 'settings'].includes(tab)) {
@@ -149,8 +150,8 @@ export default function AppDetail() {
         <DeploymentLogs appId={app.id} />
       )}
 
-      {activeTab === 'files' && (
-        <AppFileManager appId={app.id} />
+      {activeTab === 'files' && fileApi && (
+        <AppFileManager api={fileApi} />
       )}
 
       {activeTab === 'settings' && (

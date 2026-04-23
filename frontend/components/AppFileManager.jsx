@@ -26,7 +26,6 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import { apiClient } from '@/lib/api'
 
 const TEXT_EXT = new Set([
   'txt', 'md', 'json', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'css', 'scss',
@@ -113,7 +112,7 @@ function parentPath(p) {
   return i === -1 ? '' : p.slice(0, i)
 }
 
-export default function AppFileManager({ appId }) {
+export default function AppFileManager({ api }) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState([])
   const [basePath, setBasePath] = useState('')
@@ -131,11 +130,11 @@ export default function AppFileManager({ appId }) {
   const zipRef = useRef(null)
 
   const load = useCallback(async () => {
-    if (!appId) return
+    if (!api) return
     setLoading(true)
     setError('')
     try {
-      const res = await apiClient.listAppFiles(appId, path, showHidden)
+      const res = await api.list(path, showHidden)
       setEntries(res.data.entries || [])
       setBasePath(res.data.base_path || '')
       setExists(res.data.exists !== false)
@@ -145,7 +144,7 @@ export default function AppFileManager({ appId }) {
     } finally {
       setLoading(false)
     }
-  }, [appId, path, showHidden])
+  }, [api, path, showHidden])
 
   useEffect(() => { load() }, [load])
 
@@ -200,7 +199,7 @@ export default function AppFileManager({ appId }) {
   const openPreview = async (relPath, kind) => {
     setPreview({ path: relPath, kind, url: null, loading: true, error: '' })
     try {
-      const res = await apiClient.fetchAppFileBlob(appId, relPath)
+      const res = await api.fetchBlob(relPath)
       const url = URL.createObjectURL(res.data)
       setPreview((p) => (p && p.path === relPath ? { ...p, url, loading: false } : p))
     } catch (err) {
@@ -222,7 +221,7 @@ export default function AppFileManager({ appId }) {
   const openEditor = async (relPath) => {
     setEditor({ path: relPath, content: '', original: '', loading: true, saving: false, error: '', size: 0 })
     try {
-      const res = await apiClient.readAppFile(appId, relPath)
+      const res = await api.read(relPath)
       setEditor({
         path: relPath,
         content: res.data.content,
@@ -241,7 +240,7 @@ export default function AppFileManager({ appId }) {
     if (!editor) return
     setEditor((e) => ({ ...e, saving: true, error: '' }))
     try {
-      await apiClient.writeAppFile(appId, editor.path, editor.content)
+      await api.write(editor.path, editor.content)
       setEditor(null)
       flash('Saved')
       load()
@@ -256,7 +255,7 @@ export default function AppFileManager({ appId }) {
     setUploading(true)
     setError('')
     try {
-      await apiClient.uploadAppFiles(appId, path, files, { unzip })
+      await api.upload(path, files, { unzip })
       flash(unzip ? `Uploaded & unzipped ${files.length} file(s)` : `Uploaded ${files.length} file(s)`)
       load()
     } catch (err) {
@@ -285,7 +284,7 @@ export default function AppFileManager({ appId }) {
     const name = window.prompt('New folder name')
     if (!name) return
     try {
-      await apiClient.mkdirAppFiles(appId, joinPath(path, name))
+      await api.mkdir(joinPath(path, name))
       flash(`Created ${name}/`)
       load()
     } catch (err) {
@@ -300,7 +299,7 @@ export default function AppFileManager({ appId }) {
     const parent = parentPath(entry.path)
     const target = joinPath(parent, next)
     try {
-      await apiClient.renameAppFile(appId, entry.path, target)
+      await api.rename(entry.path, target)
       flash(`Renamed to ${next}`)
       load()
     } catch (err) {
@@ -312,7 +311,7 @@ export default function AppFileManager({ appId }) {
     const label = entry.is_dir ? `folder "${entry.name}" and everything in it` : `"${entry.name}"`
     if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return
     try {
-      await apiClient.deleteAppFile(appId, entry.path)
+      await api.delete(entry.path)
       flash(`Deleted ${entry.name}`)
       load()
     } catch (err) {
@@ -325,7 +324,7 @@ export default function AppFileManager({ appId }) {
       flash('Folder download not supported.')
       return
     }
-    const url = apiClient.downloadAppFileUrl(appId, entry.path)
+    const url = api.downloadUrl(entry.path)
     window.open(url, '_blank')
   }
 

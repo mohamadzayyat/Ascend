@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/router'
 import { Plus, Play } from 'lucide-react'
-import { apiClient } from '@/lib/api'
+import { apiClient, projectFileApi } from '@/lib/api'
 import { useProject, useProjects } from '@/lib/hooks/useAuth'
 import AppCard from '@/components/AppCard'
+import AppFileManager from '@/components/AppFileManager'
 import DeploymentLogs from '@/components/DeploymentLogs'
 import DiskUsage from '@/components/DiskUsage'
 import ProjectSettings from '@/components/ProjectSettings'
@@ -17,6 +18,7 @@ export default function ProjectDetail() {
   const [activeTab, setActiveTab] = useState('apps')
   const [deployingAll, setDeployingAll] = useState(false)
   const [deployError, setDeployError] = useState('')
+  const fileApi = useMemo(() => (id ? projectFileApi(id) : null), [id])
 
   if (!id) return null
   if (isLoading) {
@@ -104,7 +106,7 @@ export default function ProjectDetail() {
       </div>
 
       <div className="flex gap-4 mb-8 border-b border-gray-700">
-        {['apps', 'deployments', 'settings'].map((tab) => (
+        {['apps', 'deployments', 'files', 'settings'].map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -143,6 +145,10 @@ export default function ProjectDetail() {
 
       {activeTab === 'deployments' && (
         <DeploymentLogs projectId={project.id} />
+      )}
+
+      {activeTab === 'files' && fileApi && (
+        <AppFileManager api={fileApi} />
       )}
 
       {activeTab === 'settings' && (

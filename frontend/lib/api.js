@@ -98,5 +98,32 @@ export const apiClient = {
     api.post(`/api/project/${id}/files/recalculate-size`),
 }
 
+// Factory for a file-manager API bound to a specific scope (app or project).
+// Lets AppFileManager stay scope-agnostic — the parent page picks the prefix.
+export function makeFileApi(prefix) {
+  return {
+    list: (path = '', showHidden = false) =>
+      api.get(`${prefix}/files/list`, { params: { path, show_hidden: showHidden ? 1 : 0 } }),
+    read: (path) => api.get(`${prefix}/files/read`, { params: { path } }),
+    write: (path, content) => api.post(`${prefix}/files/write`, { path, content }),
+    downloadUrl: (path) => `${API_URL}${prefix}/files/download?path=${encodeURIComponent(path)}`,
+    fetchBlob: (path) => api.get(`${prefix}/files/download`, { params: { path }, responseType: 'blob' }),
+    upload: (path, files, { unzip = false } = {}) => {
+      const form = new FormData()
+      form.append('path', path || '')
+      if (unzip) form.append('unzip', '1')
+      for (const f of files) form.append('files', f)
+      return api.post(`${prefix}/files/upload`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+    },
+    mkdir: (path) => api.post(`${prefix}/files/mkdir`, { path }),
+    rename: (from, to) => api.post(`${prefix}/files/rename`, { from, to }),
+    delete: (path) => api.post(`${prefix}/files/delete`, { path }),
+  }
+}
+export const appFileApi = (id) => makeFileApi(`/api/app/${id}`)
+export const projectFileApi = (id) => makeFileApi(`/api/project/${id}`)
+
 export { API_URL }
 export default api
