@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import Link from 'next/link'
-import { Copy, Check, RefreshCw } from 'lucide-react'
+import { Copy, Check, RefreshCw, RotateCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
 
@@ -22,6 +22,9 @@ export default function AppRuntime({ appId }) {
   const [sslLoading, setSslLoading] = useState(false)
   const [sslResult, setSslResult] = useState(null)
   const [sslError, setSslError] = useState('')
+  const [restartLoading, setRestartLoading] = useState(false)
+  const [restartResult, setRestartResult] = useState(null)
+  const [restartError, setRestartError] = useState('')
 
   if (isLoading && !runtime) {
     return (
@@ -57,6 +60,20 @@ export default function AppRuntime({ appId }) {
       setSslError(err.response?.data?.error || err.message || 'Failed to start SSL retry')
     } finally {
       setSslLoading(false)
+    }
+  }
+
+  const restartApp = async () => {
+    setRestartLoading(true)
+    setRestartError('')
+    setRestartResult(null)
+    try {
+      const res = await apiClient.restartApp(appId)
+      setRestartResult(res.data)
+    } catch (err) {
+      setRestartError(err.response?.data?.error || err.message || 'Failed to start restart')
+    } finally {
+      setRestartLoading(false)
     }
   }
 
@@ -122,6 +139,33 @@ export default function AppRuntime({ appId }) {
             <p className="text-gray-400 text-sm">Domain</p>
             <p className="text-white">{domain}</p>
           </div>
+        )}
+      </div>
+
+      <div className="pt-4 border-t border-gray-700 mb-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-gray-400 text-sm">Process</p>
+            <p className="text-gray-500 text-xs">Write saved .env and restart PM2 without rebuilding.</p>
+          </div>
+          <button
+            type="button"
+            onClick={restartApp}
+            disabled={restartLoading}
+            className="inline-flex items-center gap-2 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
+          >
+            <RotateCw className={`w-4 h-4 ${restartLoading ? 'animate-spin' : ''}`} />
+            {restartLoading ? 'Starting...' : 'Restart App'}
+          </button>
+        </div>
+        {restartError && <p className="text-red-400 text-xs mt-2">{restartError}</p>}
+        {restartResult?.id && (
+          <p className="text-green-400 text-xs mt-2">
+            Restart started as deployment #{restartResult.id}.{' '}
+            <Link href={`/app/${appId}?tab=deployments`} className="underline">
+              View logs
+            </Link>
+          </p>
         )}
       </div>
 

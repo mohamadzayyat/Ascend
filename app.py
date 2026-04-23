@@ -984,6 +984,36 @@ def api_retry_app_ssl(app_id):
     return jsonify({'id': dep.id, 'status': 'pending'})
 
 
+@app.route('/api/app/<int:app_id>/restart', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_restart_app(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if not a.pm2_name:
+        return jsonify({'error': 'Set a PM2 name before restarting'}), 400
+
+    active = Deployment.query.filter_by(app_id=a.id, triggered_by='restart').filter(
+        Deployment.status.in_(['pending', 'running'])
+    ).first()
+    if active:
+        return jsonify({'error': 'A restart is already running for this app', 'id': active.id}), 409
+
+    dep = Deployment(
+        project_id=a.project_id,
+        app_id=a.id,
+        status='pending',
+        branch=a.project.github_branch,
+        triggered_by='restart',
+    )
+    db.session.add(dep)
+    db.session.commit()
+
+    threading.Thread(target=restart_app_bg, args=(dep.id,), daemon=True).start()
+    return jsonify({'id': dep.id, 'status': 'pending'})
+
+
 # ═══════════════════════════════════════════
 # Legacy deploy-all endpoint — deploys every app in the project
 # ═══════════════════════════════════════════
@@ -1323,6 +1353,13 @@ def _ensure_repo_cloned(project, github_username, github_token, log):
     return clone_dir
 
 
+def _app_deploy_dir(app_row):
+    deploy_dir = DEPLOYMENTS_DIR / app_row.project.folder_name
+    if app_row.subdirectory:
+        deploy_dir = deploy_dir / app_row.subdirectory.strip('/')
+    return deploy_dir
+
+
 def deploy_app_bg(deployment_id, github_username, github_token):
     """Background task: deploy a single App. Runs in its own app context."""
     with app.app_context():
@@ -1360,9 +1397,8 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                 with _repo_lock(project.id):
                     clone_dir = _ensure_repo_cloned(project, github_username, github_token, log)
 
-                deploy_dir = clone_dir
+                deploy_dir = _app_deploy_dir(app_row)
                 if app_row.subdirectory:
-                    deploy_dir = clone_dir / app_row.subdirectory.strip('/')
                     log.write(f"  Using subdirectory: {app_row.subdirectory}\n")
                     if not deploy_dir.exists():
                         raise RuntimeError(f"Subdirectory not found: {app_row.subdirectory}")
@@ -1484,6 +1520,83 @@ def retry_app_ssl_bg(deployment_id):
             try:
                 with open(log_file, 'a', encoding='utf-8') as log:
                     log.write(f"\n!!! SSL Retry Failed: {e} !!!\n")
+            except Exception:
+                pass
+
+        finally:
+            deployment.completed_at = datetime.now(timezone.utc)
+            deployment.duration_seconds = int(time.time() - start_time)
+            db.session.commit()
+
+
+def restart_app_bg(deployment_id):
+    """Background task: write saved .env and restart an existing PM2 app."""
+    with app.app_context():
+        deployment = db.session.get(Deployment, deployment_id)
+        if not deployment:
+            return
+
+        app_row = deployment.app
+        project = deployment.project
+        if not app_row:
+            deployment.status = 'failed'
+            deployment.error_message = 'Restart has no associated app'
+            db.session.commit()
+            return
+
+        log_file = LOG_DIR / f"restart_{deployment_id}_{int(time.time())}.log"
+        deployment.log_file = str(log_file)
+        deployment.status = 'running'
+        db.session.commit()
+
+        start_time = time.time()
+
+        try:
+            with open(log_file, 'w', encoding='utf-8') as log:
+                log.write(f"=== App Restart Started: {datetime.now(timezone.utc).isoformat()} ===\n")
+                log.write(f"Project: {project.name}\n")
+                log.write(f"App: {app_row.name} ({app_row.app_type})\n")
+                log.write(f"PM2 name: {app_row.pm2_name or '-'}\n\n")
+
+                if not app_row.pm2_name:
+                    raise RuntimeError('App has no PM2 name configured')
+
+                deploy_dir = _app_deploy_dir(app_row)
+                if not deploy_dir.exists():
+                    raise RuntimeError(
+                        f'Deploy directory not found: {deploy_dir}. Run a full deploy first.'
+                    )
+
+                if app_row.env_content is not None:
+                    log.write("Step 1: Writing saved .env file...\n")
+                    (deploy_dir / '.env').write_text(app_row.env_content, encoding='utf-8')
+                    log.write("  .env written\n")
+                else:
+                    log.write("Step 1: No .env content saved; leaving existing .env unchanged.\n")
+
+                log.write("\nStep 2: Restarting PM2 process...\n")
+                if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
+                    if app_row.start_command:
+                        log.write("  PM2 restart failed; attempting to start process instead...\n")
+                        if not run_cmd(
+                            ['pm2', 'start', app_row.start_command, '--name', app_row.pm2_name],
+                            log,
+                            cwd=deploy_dir,
+                        ):
+                            raise RuntimeError('PM2 restart/start failed')
+                    else:
+                        raise RuntimeError('PM2 restart failed and no start command is configured')
+
+                run_cmd(['pm2', 'save'], log, check=False)
+                log.write("\n=== App Restart Completed Successfully ===\n")
+                deployment.status = 'success'
+
+        except Exception as e:
+            deployment.status = 'failed'
+            deployment.error_message = str(e)
+            try:
+                with open(log_file, 'a', encoding='utf-8') as log:
+                    log.write(f"\n!!! App Restart Failed: {e} !!!\n")
             except Exception:
                 pass
 
