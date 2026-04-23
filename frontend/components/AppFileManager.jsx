@@ -305,31 +305,31 @@ export default function AppFileManager({ appId }) {
         </div>
       </div>
 
-      <div className="flex items-center gap-1 text-sm mb-2 flex-wrap">
+      <div className="flex items-center gap-1 text-sm mb-4 flex-wrap bg-primary/50 rounded px-2 py-2">
         <button
           type="button"
           onClick={() => setPath('')}
-          className={`inline-flex items-center gap-1 px-2 py-1 rounded hover:bg-primary ${path ? 'text-gray-300' : 'text-accent'}`}
+          title={basePath}
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded cursor-pointer hover:bg-gray-700 hover:underline transition ${path ? 'text-gray-200' : 'text-accent font-semibold'}`}
         >
           <Home className="w-3.5 h-3.5" /> root
         </button>
-        {breadcrumbs.map((c, i) => (
-          <span key={c.path} className="inline-flex items-center gap-1">
-            <ChevronRight className="w-3.5 h-3.5 text-gray-500" />
-            <button
-              type="button"
-              onClick={() => setPath(c.path)}
-              className={`px-2 py-1 rounded hover:bg-primary ${i === breadcrumbs.length - 1 ? 'text-accent' : 'text-gray-300'}`}
-            >
-              {c.name}
-            </button>
-          </span>
-        ))}
+        {breadcrumbs.map((c, i) => {
+          const isLast = i === breadcrumbs.length - 1
+          return (
+            <span key={c.path} className="inline-flex items-center gap-1">
+              <ChevronRight className="w-3.5 h-3.5 text-gray-500" />
+              <button
+                type="button"
+                onClick={() => setPath(c.path)}
+                className={`px-2 py-1 rounded cursor-pointer hover:bg-gray-700 hover:underline transition ${isLast ? 'text-accent font-semibold' : 'text-gray-200'}`}
+              >
+                {c.name}
+              </button>
+            </span>
+          )
+        })}
       </div>
-
-      {basePath && (
-        <p className="text-gray-500 text-xs font-mono mb-4 break-all">{basePath}{path ? `/${path}` : ''}</p>
-      )}
 
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded p-3 mb-3 text-red-300 text-sm">{error}</div>
