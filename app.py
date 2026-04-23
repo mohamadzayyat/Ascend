@@ -1383,10 +1383,16 @@ def _write_app_env(app_row, deploy_dir, log):
 def _pm2_start_command(app_row):
     # Run arbitrary start commands through bash so commands like
     # "npm run start:prod" behave the same as they do in a terminal.
+    # PM2 does not load .env files by itself, so source it here and make
+    # sure the configured app port is exported for frameworks like Nest.
+    command = app_row.start_command
+    if app_row.app_port:
+        command = f'export PORT={app_row.app_port}; {command}'
+    command = f'set -a; [ -f .env ] && . ./.env; set +a; {command}'
     return [
         'pm2', 'start', 'bash',
         '--name', app_row.pm2_name,
-        '--', '-lc', f'exec {app_row.start_command}',
+        '--', '-lc', f'exec bash -lc {json.dumps(command)}',
     ]
 
 
@@ -1622,12 +1628,13 @@ def restart_app_bg(deployment_id):
                     log.write("Step 1: No .env content saved; leaving existing .env unchanged.\n")
 
                 log.write("\nStep 2: Restarting PM2 process...\n")
-                if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
-                    if app_row.start_command:
-                        log.write("  PM2 restart failed; attempting to start process instead...\n")
-                        if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
-                            raise RuntimeError('PM2 restart/start failed')
-                    else:
+                if app_row.start_command:
+                    log.write("  Recreating PM2 process so .env and PORT are loaded cleanly...\n")
+                    run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
+                    if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
+                        raise RuntimeError('PM2 restart/start failed')
+                else:
+                    if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
                         raise RuntimeError('PM2 restart failed and no start command is configured')
 
                 run_cmd(['pm2', 'save'], log, check=False)
