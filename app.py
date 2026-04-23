@@ -19,6 +19,7 @@ import threading
 import secrets
 import socket
 import ipaddress
+import tempfile
 import platform
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +31,7 @@ import psutil
 psutil.cpu_percent(interval=None)
 _net_sample = {'t': None, 'sent': 0, 'recv': 0}
 
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash, send_file
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash, send_file, after_this_request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect
@@ -2722,6 +2723,8 @@ def _fm_safe_extract_zip(zip_path, target_dir, base):
 def _fm_handle_list(scope):
     relpath = request.args.get('path', '')
     show_hidden = request.args.get('show_hidden') in ('1', 'true', 'yes')
+    search = (request.args.get('search') or '').strip().lower()
+    search_limit = 250
     try:
         base, target = _fm_resolve(scope, relpath, must_exist=False)
     except ValueError as exc:
@@ -2740,18 +2743,38 @@ def _fm_handle_list(scope):
         return jsonify({'error': 'Path is not a directory'}), 400
 
     entries = []
-    for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-        if not show_hidden and child.name in HIDDEN_NAMES:
-            continue
-        entry = _fm_entry(child, base)
-        if entry:
-            entries.append(entry)
+    if search:
+        count = 0
+        for child in sorted(target.rglob('*'), key=lambda p: (not p.is_dir(), str(p).lower())):
+            if child == target:
+                continue
+            rel = _fm_rel(child, base)
+            parts = [part for part in rel.split('/') if part]
+            if not show_hidden and any(part in HIDDEN_NAMES for part in parts):
+                continue
+            if search not in child.name.lower() and search not in rel.lower():
+                continue
+            entry = _fm_entry(child, base)
+            if entry:
+                entries.append(entry)
+                count += 1
+                if count >= search_limit:
+                    break
+    else:
+        for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            if not show_hidden and child.name in HIDDEN_NAMES:
+                continue
+            entry = _fm_entry(child, base)
+            if entry:
+                entries.append(entry)
 
     return jsonify({
         'base_path': str(base),
         'path': _fm_rel(target, base),
         'exists': True,
         'entries': entries,
+        'search': search,
+        'search_limited': bool(search and len(entries) >= search_limit),
     })
 
 
@@ -2894,22 +2917,124 @@ def _fm_handle_rename(scope):
 
 def _fm_handle_delete(scope):
     data = request.get_json(silent=True) or {}
-    relpath = data.get('path', '')
-    if not relpath:
-        return jsonify({'error': 'path required'}), 400
+    relpath = data.get('path')
+    relpaths = data.get('paths')
+    if relpaths is None:
+        relpaths = [relpath] if relpath else []
+    if not isinstance(relpaths, list) or not relpaths:
+        return jsonify({'error': 'path or paths required'}), 400
+
+    deleted = []
     try:
-        base, target = _fm_resolve(scope, relpath)
+        base = _fm_scope_base(scope)
+        targets = []
+        for item in relpaths:
+            _, target = _fm_resolve(scope, item)
+            if target == base:
+                return jsonify({'error': 'Cannot delete root'}), 400
+            targets.append((item, target))
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     except FileNotFoundError:
         return jsonify({'error': 'Not found'}), 404
-    if target == base:
-        return jsonify({'error': 'Cannot delete root'}), 400
-    if target.is_dir():
-        shutil.rmtree(target)
-    else:
-        target.unlink()
-    return jsonify({'status': 'ok'})
+
+    for item, target in sorted(targets, key=lambda t: len(str(t[1])), reverse=True):
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        deleted.append(item)
+    return jsonify({'status': 'ok', 'deleted': deleted})
+
+
+def _fm_archive_name(name):
+    cleaned = re.sub(r'[^A-Za-z0-9._-]+', '-', (name or '').strip()).strip('.-')
+    if not cleaned:
+        cleaned = f'archive-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}'
+    if not cleaned.lower().endswith('.zip'):
+        cleaned += '.zip'
+    return cleaned
+
+
+def _fm_collect_archive_targets(scope, relpaths):
+    if not isinstance(relpaths, list) or not relpaths:
+        raise ValueError('paths required')
+    base = _fm_scope_base(scope)
+    targets = []
+    seen = set()
+    for item in relpaths:
+        _, target = _fm_resolve(scope, item)
+        if target == base:
+            raise ValueError('Cannot archive root')
+        key = str(target)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(target)
+    return base, targets
+
+
+def _fm_write_zip(zip_path, base, targets):
+    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        for target in targets:
+            if target.is_dir():
+                children = list(target.rglob('*'))
+                if not children:
+                    zf.writestr(f"{_fm_rel(target, base).rstrip('/')}/", '')
+                    continue
+                for child in children:
+                    if child.is_dir():
+                        continue
+                    zf.write(child, arcname=_fm_rel(child, base))
+            else:
+                zf.write(target, arcname=_fm_rel(target, base))
+
+
+def _fm_handle_archive(scope):
+    data = request.get_json(silent=True) or {}
+    relpaths = data.get('paths')
+    mode = (data.get('mode') or 'download').strip().lower()
+    current_path = data.get('current_path', '')
+    output_name = _fm_archive_name(data.get('output_name'))
+
+    try:
+        base, targets = _fm_collect_archive_targets(scope, relpaths)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'Not found'}), 404
+
+    if mode == 'create':
+        try:
+            _, target_dir = _fm_resolve(scope, current_path, must_exist=False)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if not target_dir.is_dir():
+            return jsonify({'error': 'Target is not a directory'}), 400
+        zip_path = (target_dir / output_name).resolve()
+        try:
+            zip_path.relative_to(base)
+        except ValueError:
+            return jsonify({'error': 'Archive path escapes scope directory'}), 400
+        _fm_write_zip(zip_path, base, targets)
+        return jsonify({
+            'status': 'ok',
+            'created': _fm_rel(zip_path, base),
+            'output_name': output_name,
+        })
+
+    temp_dir = tempfile.mkdtemp(prefix='ascend-fm-')
+    zip_path = Path(temp_dir) / output_name
+    _fm_write_zip(zip_path, base, targets)
+    @after_this_request
+    def _cleanup_archive(response):
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return response
+    return send_file(str(zip_path), as_attachment=True, download_name=output_name)
 
 
 # ── App-scoped routes ──────────────────────────────────────────────
@@ -2966,6 +3091,14 @@ def api_app_files_rename(app_id):
     return err or _fm_handle_rename(a)
 
 
+@app.route('/api/app/<int:app_id>/files/archive', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_archive(app_id):
+    a, err = _fm_owned_app(app_id)
+    return err or _fm_handle_archive(a)
+
+
 # ── Project-scoped routes (browse the cloned repo root) ───────────
 @app.route('/api/project/<int:project_id>/files/list')
 @login_required
@@ -3018,6 +3151,14 @@ def api_project_files_mkdir(project_id):
 def api_project_files_rename(project_id):
     p, err = _fm_owned_project(project_id)
     return err or _fm_handle_rename(p)
+
+
+@app.route('/api/project/<int:project_id>/files/archive', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_project_files_archive(project_id):
+    p, err = _fm_owned_project(project_id)
+    return err or _fm_handle_archive(p)
 
 
 @app.route('/api/project/<int:project_id>/files/delete', methods=['POST'])

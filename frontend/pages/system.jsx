@@ -3,7 +3,7 @@ import { useSystem, useProjects } from '@/lib/hooks/useAuth'
 import { absoluteLocalTime } from '@/lib/time'
 
 function formatUptime(ms) {
-  if (!ms || ms <= 0) return '—'
+  if (!ms || ms <= 0) return '-'
   const s = Math.floor(ms / 1000)
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
@@ -23,9 +23,7 @@ function StatusBadge({ status }) {
       : status === 'errored'
       ? 'bg-red-500/20 text-red-400'
       : 'bg-yellow-500/20 text-yellow-400'
-  return (
-    <span className={`px-2 py-1 rounded text-xs font-semibold ${cls}`}>{status || 'unknown'}</span>
-  )
+  return <span className={`px-2 py-1 rounded text-xs font-semibold ${cls}`}>{status || 'unknown'}</span>
 }
 
 function CertBadge({ status }) {
@@ -40,11 +38,24 @@ function CertBadge({ status }) {
   return <span className={`px-2 py-1 rounded text-xs font-semibold ${cls}`}>{status || 'unknown'}</span>
 }
 
+function KpiCard({ title, value, subtitle, accent, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-left bg-secondary border border-gray-700 rounded-lg p-5 hover:border-gray-500 hover:bg-primary/40 transition"
+    >
+      <div className="text-sm text-gray-400 mb-2">{title}</div>
+      <div className={`text-3xl font-bold ${accent}`}>{value}</div>
+      <div className="text-sm text-gray-500 mt-2">{subtitle}</div>
+    </button>
+  )
+}
+
 export default function System() {
   const { pm2, ports, nginxSites, certificates, certificateScheduler, isLoading } = useSystem()
   const { projects } = useProjects()
 
-  // Set of pm2 process names / ports already managed by an Ascend app
   const allApps = useMemo(() => projects.flatMap((p) => p.apps || []), [projects])
   const managed = useMemo(
     () => new Set(allApps.filter((a) => a.pm2_name).map((a) => a.pm2_name)),
@@ -55,23 +66,69 @@ export default function System() {
     [allApps]
   )
 
+  const stats = useMemo(() => ({
+    pm2: pm2.length,
+    unmanagedPm2: pm2.filter((p) => !managed.has(p.name)).length,
+    ports: ports.length,
+    ascendPortsCount: ports.filter((p) => ascendPorts.has(p.port)).length,
+    certificates: certificates.length,
+    expiringCertificates: certificates.filter((c) => ['warning', 'critical', 'expired'].includes(c.status)).length,
+    nginxSites: nginxSites.length,
+    sslSites: nginxSites.filter((s) => s.ssl).length,
+  }), [pm2, managed, ports, ascendPorts, certificates, nginxSites])
+
+  const jumpTo = (id) => {
+    const el = document.getElementById(id)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
     <div className="p-8 max-w-7xl">
       <div className="mb-8">
         <h1 className="text-4xl font-bold text-white mb-2">System</h1>
         <p className="text-gray-400">
-          Read-only view of everything running on this server — PM2 processes, listening ports, and Nginx sites.
+          Read-only view of everything running on this server: PM2 processes, listening ports, SSL certificates, and Nginx sites.
         </p>
       </div>
 
-      {/* PM2 Processes */}
-      <section className="mb-10">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+        <KpiCard
+          title="PM2"
+          value={stats.pm2}
+          subtitle={`${stats.unmanagedPm2} unmanaged`}
+          accent="text-green-400"
+          onClick={() => jumpTo('system-pm2')}
+        />
+        <KpiCard
+          title="Ports"
+          value={stats.ports}
+          subtitle={`${stats.ascendPortsCount} mapped to Ascend`}
+          accent="text-blue-400"
+          onClick={() => jumpTo('system-ports')}
+        />
+        <KpiCard
+          title="SSL"
+          value={stats.certificates}
+          subtitle={`${stats.expiringCertificates} need attention`}
+          accent={stats.expiringCertificates > 0 ? 'text-yellow-400' : 'text-emerald-400'}
+          onClick={() => jumpTo('system-ssl')}
+        />
+        <KpiCard
+          title="Nginx"
+          value={stats.nginxSites}
+          subtitle={`${stats.sslSites} with SSL`}
+          accent="text-cyan-400"
+          onClick={() => jumpTo('system-nginx')}
+        />
+      </div>
+
+      <section id="system-pm2" className="mb-10 scroll-mt-6">
         <h2 className="text-xl font-bold text-white mb-4">
           PM2 Processes <span className="text-gray-500 text-sm font-normal">({pm2.length})</span>
         </h2>
         <div className="bg-secondary rounded-lg border border-gray-700 overflow-hidden">
           {isLoading && pm2.length === 0 ? (
-            <div className="p-6 text-gray-400">Loading…</div>
+            <div className="p-6 text-gray-400">Loading...</div>
           ) : pm2.length === 0 ? (
             <div className="p-6 text-gray-400">No PM2 processes found. Is PM2 installed and running as root?</div>
           ) : (
@@ -93,7 +150,7 @@ export default function System() {
                   <tr key={p.name} className="border-t border-gray-700">
                     <td className="px-4 py-3 text-white font-mono">{p.name}</td>
                     <td className="px-4 py-3"><StatusBadge status={p.status} /></td>
-                    <td className="px-4 py-3 text-gray-300">{p.port || '—'}</td>
+                    <td className="px-4 py-3 text-gray-300">{p.port || '-'}</td>
                     <td className="px-4 py-3 text-gray-300">{p.cpu}%</td>
                     <td className="px-4 py-3 text-gray-300">{p.memory_mb} MB</td>
                     <td className="px-4 py-3 text-gray-300">{formatUptime(p.uptime_ms)}</td>
@@ -113,8 +170,7 @@ export default function System() {
         </div>
       </section>
 
-      {/* Listening Ports */}
-      <section className="mb-10">
+      <section id="system-ports" className="mb-10 scroll-mt-6">
         <h2 className="text-xl font-bold text-white mb-4">
           Listening Ports <span className="text-gray-500 text-sm font-normal">({ports.length})</span>
         </h2>
@@ -137,12 +193,10 @@ export default function System() {
                   <tr key={p.port} className="border-t border-gray-700">
                     <td className="px-4 py-3 text-white font-mono">{p.port}</td>
                     <td className="px-4 py-3 text-gray-300 font-mono">{p.address}</td>
-                    <td className="px-4 py-3 text-gray-300">{p.process || '—'}</td>
-                    <td className="px-4 py-3 text-gray-500 font-mono">{p.pid ?? '—'}</td>
+                    <td className="px-4 py-3 text-gray-300">{p.process || '-'}</td>
+                    <td className="px-4 py-3 text-gray-500 font-mono">{p.pid ?? '-'}</td>
                     <td className="px-4 py-3 text-xs">
-                      {ascendPorts.has(p.port) && (
-                        <span className="text-green-400">Ascend project</span>
-                      )}
+                      {ascendPorts.has(p.port) && <span className="text-green-400">Ascend project</span>}
                     </td>
                   </tr>
                 ))}
@@ -152,8 +206,7 @@ export default function System() {
         </div>
       </section>
 
-      {/* SSL Certificates */}
-      <section className="mb-10">
+      <section id="system-ssl" className="mb-10 scroll-mt-6">
         <h2 className="text-xl font-bold text-white mb-4">
           SSL Certificates <span className="text-gray-500 text-sm font-normal">({certificates.length})</span>
         </h2>
@@ -166,9 +219,7 @@ export default function System() {
               <span className="text-yellow-400">not detected</span>
             )}
             {certificateScheduler.methods?.length > 0 && (
-              <span className="text-gray-500">
-                {' '}({certificateScheduler.methods.map((m) => m.name).join(', ')})
-              </span>
+              <span className="text-gray-500"> ({certificateScheduler.methods.map((m) => m.name).join(', ')})</span>
             )}
           </div>
           {certificates.length === 0 ? (
@@ -237,8 +288,7 @@ export default function System() {
         </div>
       </section>
 
-      {/* Nginx Sites */}
-      <section className="mb-10">
+      <section id="system-nginx" className="mb-10 scroll-mt-6">
         <h2 className="text-xl font-bold text-white mb-4">
           Nginx Sites <span className="text-gray-500 text-sm font-normal">({nginxSites.length})</span>
         </h2>
@@ -261,11 +311,11 @@ export default function System() {
                   <tr key={s.name} className="border-t border-gray-700">
                     <td className="px-4 py-3 text-white font-mono">{s.name}</td>
                     <td className="px-4 py-3 text-gray-300">
-                      {s.server_names.length ? s.server_names.join(', ') : '—'}
+                      {s.server_names.length ? s.server_names.join(', ') : '-'}
                     </td>
-                    <td className="px-4 py-3 text-gray-300 font-mono">{s.listen_ports.join(', ') || '—'}</td>
+                    <td className="px-4 py-3 text-gray-300 font-mono">{s.listen_ports.join(', ') || '-'}</td>
                     <td className="px-4 py-3 text-gray-300 font-mono text-xs">
-                      {s.proxy_targets.length ? s.proxy_targets.join(', ') : '—'}
+                      {s.proxy_targets.length ? s.proxy_targets.join(', ') : '-'}
                     </td>
                     <td className="px-4 py-3">
                       {s.ssl ? (

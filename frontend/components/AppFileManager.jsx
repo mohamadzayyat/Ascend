@@ -21,6 +21,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   Terminal,
   Trash2,
   Upload,
@@ -120,6 +121,10 @@ export default function AppFileManager({ api }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [showHidden, setShowHidden] = useState(false)
+  const [search, setSearch] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const [searchLimited, setSearchLimited] = useState(false)
+  const [selected, setSelected] = useState(() => new Set())
   const [menu, setMenu] = useState(null) // { x, y, entry }
   const [editor, setEditor] = useState(null) // { path, content, original, saving, error, size }
   const [preview, setPreview] = useState(null) // { path, kind, url, loading, error }
@@ -134,19 +139,29 @@ export default function AppFileManager({ api }) {
     setLoading(true)
     setError('')
     try {
-      const res = await api.list(path, showHidden)
+      const res = await api.list(path, showHidden, search)
       setEntries(res.data.entries || [])
       setBasePath(res.data.base_path || '')
       setExists(res.data.exists !== false)
+      setSearchLimited(!!res.data.search_limited)
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Failed to list files')
       setEntries([])
     } finally {
       setLoading(false)
     }
-  }, [api, path, showHidden])
+  }, [api, path, showHidden, search])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput.trim()), 200)
+    return () => clearTimeout(timer)
+  }, [searchInput])
+
+  useEffect(() => {
+    setSelected(new Set())
+  }, [path, search, showHidden])
 
   // close right-click menu on any outside interaction
   useEffect(() => {
@@ -178,6 +193,13 @@ export default function AppFileManager({ api }) {
     }
     return crumbs
   }, [path])
+
+  const visibleSelectableEntries = useMemo(() => entries.filter((entry) => entry.path), [entries])
+  const selectedEntries = useMemo(
+    () => visibleSelectableEntries.filter((entry) => selected.has(entry.path)),
+    [visibleSelectableEntries, selected],
+  )
+  const allSelected = visibleSelectableEntries.length > 0 && selectedEntries.length === visibleSelectableEntries.length
 
   const openEntry = (entry) => {
     if (entry.is_dir) {
@@ -319,13 +341,83 @@ export default function AppFileManager({ api }) {
     }
   }
 
-  const downloadEntry = (entry) => {
+  const downloadEntry = async (entry) => {
     if (entry.is_dir) {
-      flash('Folder download not supported.')
+      try {
+        const res = await api.archiveDownload([entry.path], path, `${entry.name}.zip`)
+        saveBlob(res.data, `${entry.name}.zip`)
+        flash(`Downloaded ${entry.name}.zip`)
+      } catch (err) {
+        setError(err.response?.data?.error || 'Folder zip download failed')
+      }
       return
     }
     const url = api.downloadUrl(entry.path)
     window.open(url, '_blank')
+  }
+
+  const saveBlob = (blob, name) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  const toggleSelection = (entry, checked) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(entry.path)
+      else next.delete(entry.path)
+      return next
+    })
+  }
+
+  const toggleSelectAll = (checked) => {
+    setSelected(checked ? new Set(visibleSelectableEntries.map((entry) => entry.path)) : new Set())
+  }
+
+  const bulkDelete = async () => {
+    if (!selectedEntries.length) return
+    if (!window.confirm(`Delete ${selectedEntries.length} selected item(s)? This cannot be undone.`)) return
+    try {
+      await api.deleteMany(selectedEntries.map((entry) => entry.path))
+      flash(`Deleted ${selectedEntries.length} item(s)`)
+      setSelected(new Set())
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Bulk delete failed')
+    }
+  }
+
+  const bulkDownloadZip = async () => {
+    if (!selectedEntries.length) return
+    try {
+      const outputName = path ? `${path.split('/').pop() || 'selection'}.zip` : 'selection.zip'
+      const res = await api.archiveDownload(selectedEntries.map((entry) => entry.path), path, outputName)
+      saveBlob(res.data, outputName)
+      flash(`Downloaded ${selectedEntries.length} item(s) as zip`)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Zip download failed')
+    }
+  }
+
+  const bulkCreateZip = async () => {
+    if (!selectedEntries.length) return
+    const suggested = `${path ? path.split('/').pop() || 'selection' : 'selection'}-${Date.now()}.zip`
+    const outputName = window.prompt('Zip file name', suggested)
+    if (!outputName) return
+    try {
+      await api.archiveCreate(selectedEntries.map((entry) => entry.path), path, outputName)
+      flash(`Created ${outputName}`)
+      setSelected(new Set())
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Create zip failed')
+    }
   }
 
   const onContextMenu = (e, entry) => {
@@ -336,8 +428,23 @@ export default function AppFileManager({ api }) {
   return (
     <div className="bg-secondary rounded-lg border border-gray-700 p-6">
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
-        <h2 className="text-xl font-bold text-white">Files</h2>
+        <div className="min-w-[240px] flex-1">
+          <h2 className="text-xl font-bold text-white">Files</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Browse, edit, upload, search, and archive files inside this deployment directory.
+          </p>
+        </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative">
+            <Search className="w-4 h-4 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search files"
+              className="w-56 pl-9 pr-3 py-2 rounded bg-primary border border-gray-600 text-white placeholder-gray-500 text-sm outline-none focus:border-accent"
+            />
+          </div>
           <label className="flex items-center gap-2 text-gray-400 text-sm cursor-pointer select-none">
             <input
               type="checkbox"
@@ -384,6 +491,37 @@ export default function AppFileManager({ api }) {
         </div>
       </div>
 
+      {selectedEntries.length > 0 && (
+        <div className="mb-4 flex items-center justify-between gap-3 flex-wrap rounded border border-accent/30 bg-accent/10 px-4 py-3">
+          <div className="text-sm text-gray-200">
+            {selectedEntries.length} selected
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={bulkDownloadZip}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <Download className="w-4 h-4" /> Download zip
+            </button>
+            <button
+              type="button"
+              onClick={bulkCreateZip}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <FileArchive className="w-4 h-4" /> Create zip here
+            </button>
+            <button
+              type="button"
+              onClick={bulkDelete}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-red-300 text-sm"
+            >
+              <Trash2 className="w-4 h-4" /> Delete
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-1 text-sm mb-4 flex-wrap bg-primary/50 rounded px-2 py-2">
         <button
           type="button"
@@ -416,6 +554,11 @@ export default function AppFileManager({ api }) {
       {status && (
         <div className="bg-green-500/10 border border-green-500/30 rounded p-3 mb-3 text-green-300 text-sm">{status}</div>
       )}
+      {search && searchLimited && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-3 mb-3 text-yellow-300 text-sm">
+          Search results limited to the first 250 matches.
+        </div>
+      )}
 
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
@@ -437,6 +580,15 @@ export default function AppFileManager({ api }) {
           <table className="w-full text-sm">
             <thead className="bg-primary/50 text-gray-400 text-xs uppercase">
               <tr>
+                <th className="w-10 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={(e) => toggleSelectAll(e.target.checked)}
+                    className="accent-accent"
+                    aria-label="Select all"
+                  />
+                </th>
                 <th className="text-left font-semibold px-3 py-2">Name</th>
                 <th className="text-right font-semibold px-3 py-2 w-28">Size</th>
                 <th className="text-right font-semibold px-3 py-2 w-48">Modified</th>
@@ -449,7 +601,7 @@ export default function AppFileManager({ api }) {
                   className="hover:bg-primary/40 cursor-pointer border-t border-gray-800"
                   onClick={() => setPath(parentPath(path))}
                 >
-                  <td className="px-3 py-2 text-gray-300" colSpan={4}>
+                  <td className="px-3 py-2 text-gray-300" colSpan={5}>
                     <span className="inline-flex items-center gap-2">
                       <Folder className="w-4 h-4 text-gray-500" /> ..
                     </span>
@@ -467,6 +619,15 @@ export default function AppFileManager({ api }) {
                   onContextMenu={(e) => onContextMenu(e, entry)}
                   className="hover:bg-primary/40 cursor-pointer border-t border-gray-800"
                 >
+                  <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selected.has(entry.path)}
+                      onChange={(e) => toggleSelection(entry, e.target.checked)}
+                      className="accent-accent"
+                      aria-label={`Select ${entry.name}`}
+                    />
+                  </td>
                   <td className="px-3 py-2">
                     <span className="inline-flex items-center gap-2 text-gray-200">
                       <Icon className={`w-4 h-4 ${color}`} />
@@ -527,6 +688,14 @@ export default function AppFileManager({ api }) {
                 Download
               </MenuItem>
             </>
+          )}
+          {menu.entry.is_dir && (
+            <MenuItem
+              icon={<FileArchive className="w-4 h-4" />}
+              onClick={() => { setMenu(null); downloadEntry(menu.entry) }}
+            >
+              Download zip
+            </MenuItem>
           )}
           <MenuItem
             icon={<Edit3 className="w-4 h-4" />}
