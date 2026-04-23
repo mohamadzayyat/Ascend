@@ -266,7 +266,7 @@ export default function AppFileManager({ appId }) {
               onChange={(e) => setShowHidden(e.target.checked)}
               className="accent-accent"
             />
-            Hidden / node_modules
+            Show node_modules / .git
           </label>
           <button
             type="button"

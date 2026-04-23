@@ -2604,8 +2604,7 @@ def api_app_files_list(app_id):
 
     entries = []
     for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-        name = child.name
-        if not show_hidden and (name.startswith('.') or name in HIDDEN_NAMES):
+        if not show_hidden and child.name in HIDDEN_NAMES:
             continue
         entry = _fm_entry(child, base)
         if entry:
