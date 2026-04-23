@@ -1219,6 +1219,11 @@ def _public_panel_url():
             proto = request.headers.get('X-Forwarded-Proto', 'http')
             host = request.headers.get('X-Forwarded-Host') or request.headers.get('Host')
             if host:
+                forwarded_port = request.headers.get('X-Forwarded-Port')
+                if forwarded_port and ':' not in host:
+                    default_port = '443' if proto == 'https' else '80'
+                    if forwarded_port != default_port:
+                        host = f'{host}:{forwarded_port}'
                 return f'{proto}://{host}'
     except RuntimeError:
         # Outside of a request context
