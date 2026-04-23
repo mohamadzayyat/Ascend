@@ -119,6 +119,11 @@ export default function AppRuntime({ appId }) {
           ) : (
             <p className="text-gray-500">—</p>
           )}
+          {port && port_listening === false && (
+            <p className="text-red-400 text-xs mt-1">
+              Nginx will return 502 until the app listens on this port.
+            </p>
+          )}
         </div>
 
         {pm2 && (

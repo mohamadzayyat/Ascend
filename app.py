@@ -1360,6 +1360,53 @@ def _app_deploy_dir(app_row):
     return deploy_dir
 
 
+def _env_with_app_port(app_row):
+    content = app_row.env_content or ''
+    if app_row.app_port and not re.search(r'(?m)^\s*PORT\s*=', content):
+        suffix = '' if not content or content.endswith('\n') else '\n'
+        content = f'{content}{suffix}PORT={app_row.app_port}\n'
+    return content
+
+
+def _write_app_env(app_row, deploy_dir, log):
+    content = _env_with_app_port(app_row)
+    if not content:
+        log.write("  No .env content saved; leaving existing .env unchanged.\n")
+        return
+    (deploy_dir / '.env').write_text(content, encoding='utf-8')
+    if app_row.app_port and not re.search(r'(?m)^\s*PORT\s*=', app_row.env_content or ''):
+        log.write(f"  .env written (added PORT={app_row.app_port})\n")
+    else:
+        log.write("  .env written\n")
+
+
+def _pm2_start_command(app_row):
+    # Run arbitrary start commands through bash so commands like
+    # "npm run start:prod" behave the same as they do in a terminal.
+    return [
+        'pm2', 'start', 'bash',
+        '--name', app_row.pm2_name,
+        '--', '-lc', f'exec {app_row.start_command}',
+    ]
+
+
+def _wait_for_app_port(app_row, log, timeout=20):
+    if not app_row.app_port:
+        return True
+    log.write(f"  Waiting for app to listen on 127.0.0.1:{app_row.app_port}...\n")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _is_port_listening(app_row.app_port):
+            log.write("  App port is listening.\n")
+            return True
+        time.sleep(1)
+    log.write(
+        f"  App did not bind to port {app_row.app_port} within {timeout}s. "
+        "Check that the app reads PORT from .env or update the app port setting.\n"
+    )
+    return False
+
+
 def deploy_app_bg(deployment_id, github_username, github_token):
     """Background task: deploy a single App. Runs in its own app context."""
     with app.app_context():
@@ -1405,8 +1452,10 @@ def deploy_app_bg(deployment_id, github_username, github_token):
 
                 if app_row.env_content:
                     log.write("\nStep 2: Writing .env file...\n")
-                    (deploy_dir / '.env').write_text(app_row.env_content, encoding='utf-8')
-                    log.write("  .env written\n")
+                    _write_app_env(app_row, deploy_dir, log)
+                elif app_row.app_port:
+                    log.write("\nStep 2: Writing .env file...\n")
+                    _write_app_env(app_row, deploy_dir, log)
 
                 if (deploy_dir / 'package.json').exists():
                     pm = app_row.package_manager or 'npm'
@@ -1422,13 +1471,12 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                 if app_row.start_command and app_row.pm2_name:
                     log.write(f"\nStep 5: Starting with PM2 as '{app_row.pm2_name}'...\n")
                     run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
-                    if not run_cmd(
-                        ['pm2', 'start', app_row.start_command,
-                         '--name', app_row.pm2_name],
-                        log, cwd=deploy_dir
-                    ):
+                    if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
                         raise RuntimeError("pm2 start failed")
                     run_cmd(['pm2', 'save'], log)
+                    if not _wait_for_app_port(app_row, log):
+                        run_cmd(['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'], log, check=False)
+                        raise RuntimeError(f"App did not start listening on port {app_row.app_port}")
 
                 if app_row.domain:
                     log.write("\nStep 6: Configuring Nginx...\n")
@@ -1567,10 +1615,9 @@ def restart_app_bg(deployment_id):
                         f'Deploy directory not found: {deploy_dir}. Run a full deploy first.'
                     )
 
-                if app_row.env_content is not None:
+                if app_row.env_content is not None or app_row.app_port:
                     log.write("Step 1: Writing saved .env file...\n")
-                    (deploy_dir / '.env').write_text(app_row.env_content, encoding='utf-8')
-                    log.write("  .env written\n")
+                    _write_app_env(app_row, deploy_dir, log)
                 else:
                     log.write("Step 1: No .env content saved; leaving existing .env unchanged.\n")
 
@@ -1578,16 +1625,15 @@ def restart_app_bg(deployment_id):
                 if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
                     if app_row.start_command:
                         log.write("  PM2 restart failed; attempting to start process instead...\n")
-                        if not run_cmd(
-                            ['pm2', 'start', app_row.start_command, '--name', app_row.pm2_name],
-                            log,
-                            cwd=deploy_dir,
-                        ):
+                        if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
                             raise RuntimeError('PM2 restart/start failed')
                     else:
                         raise RuntimeError('PM2 restart failed and no start command is configured')
 
                 run_cmd(['pm2', 'save'], log, check=False)
+                if not _wait_for_app_port(app_row, log):
+                    run_cmd(['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'], log, check=False)
+                    raise RuntimeError(f"App did not start listening on port {app_row.app_port}")
                 log.write("\n=== App Restart Completed Successfully ===\n")
                 deployment.status = 'success'
 
