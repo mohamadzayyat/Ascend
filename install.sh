@@ -246,9 +246,29 @@ setup_python() {
 setup_backend_env() {
     section "Configuring backend"
     local env_file="$INSTALL_DIR/.env"
+    local public_ip
+    public_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+    if [[ -z "$public_ip" ]]; then
+        public_ip="your-server-ip"
+    fi
+    local panel_public_url="http://$public_ip:$PANEL_PORT"
+
+    upsert_env() {
+        local key="$1"
+        local value="$2"
+        if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
+        else
+            echo "${key}=${value}" >> "$env_file"
+        fi
+    }
 
     if [[ -f "$env_file" ]]; then
-        ok ".env already exists — keeping current config"
+        upsert_env "HOST" "127.0.0.1"
+        upsert_env "PORT" "$BACKEND_PORT"
+        upsert_env "CORS_ORIGIN" "http://localhost:$PANEL_PORT"
+        upsert_env "PANEL_PUBLIC_URL" "$panel_public_url"
+        ok ".env updated (PANEL_PUBLIC_URL=$panel_public_url)"
         return
     fi
 
@@ -261,6 +281,7 @@ FLASK_ENV=production
 HOST=127.0.0.1
 PORT=$BACKEND_PORT
 CORS_ORIGIN=http://localhost:$PANEL_PORT
+PANEL_PUBLIC_URL=$panel_public_url
 SQLALCHEMY_DATABASE_URI=sqlite:////$INSTALL_DIR/ascend.db
 EOF
     chmod 600 "$env_file"

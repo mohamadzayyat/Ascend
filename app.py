@@ -609,6 +609,17 @@ def api_delete_project(project_id):
     return jsonify({'status': 'deleted'})
 
 
+@app.route('/api/project/<int:project_id>/github-webhook/sync', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_sync_project_github_webhook(project_id):
+    project = Project.query.get_or_404(project_id)
+    if project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    result = _sync_github_webhook(project)
+    return jsonify(result)
+
+
 # ═══════════════════════════════════════════
 # App API (the actual deployable units)
 # ═══════════════════════════════════════════

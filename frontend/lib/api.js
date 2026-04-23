@@ -29,6 +29,7 @@ export const apiClient = {
   createProject: (data) => api.post('/api/projects', data),
   updateProject: (id, data) => api.put(`/api/project/${id}`, data),
   deleteProject: (id) => api.delete(`/api/project/${id}`),
+  syncProjectWebhook: (id) => api.post(`/api/project/${id}/github-webhook/sync`),
 
   // Apps (deployment units inside a project)
   listApps: (projectId) => api.get(`/api/project/${projectId}/apps`),

@@ -11,6 +11,7 @@ export default function ProjectSettings({ project, onUpdate }) {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [webhookInfo, setWebhookInfo] = useState(null)
+  const [syncingWebhook, setSyncingWebhook] = useState(false)
 
   const [formData, setFormData] = useState({
     name: project?.name || '',
@@ -60,6 +61,20 @@ export default function ProjectSettings({ project, onUpdate }) {
     }
   }
 
+  const handleSyncWebhook = async () => {
+    setSyncingWebhook(true)
+    setError('')
+    setWebhookInfo(null)
+    try {
+      const res = await apiClient.syncProjectWebhook(project.id)
+      setWebhookInfo(res.data)
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to sync GitHub webhook')
+    } finally {
+      setSyncingWebhook(false)
+    }
+  }
+
   const input = (label, name, type = 'text', placeholder = '', hint = '') => (
     <div>
       <label className="block text-sm font-medium text-gray-300 mb-2">{label}</label>
@@ -104,13 +119,12 @@ export default function ProjectSettings({ project, onUpdate }) {
           {webhookInfo && (
             <span className="block mt-1 text-xs">
               GitHub webhook: <span className="font-mono">{webhookInfo.status}</span>
-              {webhookInfo.message && <> — {webhookInfo.message}</>}
+              {webhookInfo.message && <> - {webhookInfo.message}</>}
             </span>
           )}
         </div>
       )}
 
-      {/* Basic Info */}
       <div className="bg-secondary rounded-lg border border-gray-700 p-6">
         <h3 className="text-lg font-bold text-white mb-4">Basic Information</h3>
         <div className="space-y-4">
@@ -129,7 +143,6 @@ export default function ProjectSettings({ project, onUpdate }) {
         </div>
       </div>
 
-      {/* GitHub Settings */}
       <div className="bg-secondary rounded-lg border border-gray-700 p-6">
         <h3 className="text-lg font-bold text-white mb-4">GitHub</h3>
         <div className="space-y-4">
@@ -139,23 +152,42 @@ export default function ProjectSettings({ project, onUpdate }) {
           {check('Enable webhook endpoint', 'enable_webhook')}
           {project?.webhook_secret && (
             <div>
-              <p className="text-xs text-gray-500 mb-1">Webhook URL (paste into GitHub → Settings → Webhooks)</p>
+              <p className="text-xs text-gray-500 mb-1">Webhook URL (paste into GitHub Settings Webhooks)</p>
               <p className="text-xs font-mono text-gray-400 break-all bg-primary p-3 rounded">
                 {typeof window !== 'undefined' ? window.location.origin : ''}/webhook/github/{project.webhook_secret}
               </p>
+              {webhookInfo && (
+                <div className="text-xs mt-2">
+                  <p className="text-green-400">
+                    GitHub webhook: <span className="font-mono">{webhookInfo.status}</span>
+                  </p>
+                  {webhookInfo.url && (
+                    <p className="text-gray-400 font-mono break-all mt-1">{webhookInfo.url}</p>
+                  )}
+                  {webhookInfo.reason && <p className="text-yellow-400 mt-1">{webhookInfo.reason}</p>}
+                  {webhookInfo.message && <p className="text-red-400 mt-1">{webhookInfo.message}</p>}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={handleSyncWebhook}
+                disabled={syncingWebhook || !formData.auto_deploy || !formData.enable_webhook}
+                className="mt-3 px-3 py-2 bg-primary hover:bg-gray-700 border border-gray-600 text-white text-sm rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {syncingWebhook ? 'Syncing...' : 'Sync GitHub Webhook'}
+              </button>
             </div>
           )}
         </div>
       </div>
 
-      {/* Actions */}
       <div className="flex items-center justify-between">
         <button
           type="submit"
           disabled={loading}
           className="px-6 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {loading ? 'Saving…' : 'Save Changes'}
+          {loading ? 'Saving...' : 'Save Changes'}
         </button>
 
         <button
@@ -164,7 +196,7 @@ export default function ProjectSettings({ project, onUpdate }) {
           disabled={deleting}
           className="px-6 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-600/50 font-semibold rounded-lg transition disabled:opacity-50"
         >
-          {deleting ? 'Deleting…' : 'Delete Project'}
+          {deleting ? 'Deleting...' : 'Delete Project'}
         </button>
       </div>
     </form>
