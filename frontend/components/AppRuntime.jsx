@@ -25,6 +25,9 @@ export default function AppRuntime({ appId }) {
   const [restartLoading, setRestartLoading] = useState(false)
   const [restartResult, setRestartResult] = useState(null)
   const [restartError, setRestartError] = useState('')
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsError, setLogsError] = useState('')
+  const [pm2Logs, setPm2Logs] = useState('')
 
   if (isLoading && !runtime) {
     return (
@@ -77,6 +80,19 @@ export default function AppRuntime({ appId }) {
     }
   }
 
+  const loadPm2Logs = async () => {
+    setLogsLoading(true)
+    setLogsError('')
+    try {
+      const res = await apiClient.getAppPm2Logs(appId, 160)
+      setPm2Logs(res.data?.logs?.combined || 'No PM2 log output returned.')
+    } catch (err) {
+      setLogsError(err.response?.data?.error || err.message || 'Failed to load PM2 logs')
+    } finally {
+      setLogsLoading(false)
+    }
+  }
+
   return (
     <div className="bg-secondary rounded-lg border border-gray-700 p-6">
       <h2 className="text-xl font-bold text-white mb-4">Runtime</h2>
@@ -85,6 +101,7 @@ export default function AppRuntime({ appId }) {
         <div>
           <p className="text-gray-400 text-sm">PM2 status</p>
           {pm2 ? (
+            <>
             <p className="text-white">
               <span
                 className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mr-2 ${
@@ -99,6 +116,17 @@ export default function AppRuntime({ appId }) {
               </span>
               PID {pm2.pid || '—'}
             </p>
+            {(pm2.restarts > 0 || port_listening === false) && (
+              <button
+                type="button"
+                onClick={loadPm2Logs}
+                disabled={logsLoading}
+                className="text-accent hover:text-blue-400 text-xs mt-1 disabled:opacity-50"
+              >
+                {logsLoading ? 'Loading logs...' : 'View PM2 logs'}
+              </button>
+            )}
+            </>
           ) : (
             <p className="text-gray-500">Not running under PM2</p>
           )}
@@ -146,6 +174,17 @@ export default function AppRuntime({ appId }) {
           </div>
         )}
       </div>
+
+      {(logsError || pm2Logs) && (
+        <div className="mb-4">
+          {logsError && <p className="text-red-400 text-xs mb-2">{logsError}</p>}
+          {pm2Logs && (
+            <div className="bg-black/40 rounded-lg border border-gray-700 p-3 max-h-72 overflow-auto">
+              <pre className="text-xs text-gray-300 whitespace-pre-wrap break-words">{pm2Logs}</pre>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="pt-4 border-t border-gray-700 mb-4">
         <div className="flex items-center justify-between gap-3">

@@ -60,6 +60,7 @@ export const apiClient = {
   suggestAppPort: (start = 3000, excludeAppId = null) =>
     api.get('/api/system/suggest-port', { params: { start, exclude_app_id: excludeAppId } }),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
+  getAppPm2Logs: (id, lines = 120) => api.get(`/api/app/${id}/pm2-logs`, { params: { lines } }),
 }
 
 export { API_URL }

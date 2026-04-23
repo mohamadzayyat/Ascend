@@ -1899,6 +1899,33 @@ def _load_pm2_processes():
         return []
 
 
+def _load_pm2_logs(pm2_name, lines=120):
+    if not pm2_name:
+        return {'stdout': '', 'stderr': '', 'combined': ''}
+    try:
+        n = max(20, min(int(lines or 120), 500))
+    except (TypeError, ValueError):
+        n = 120
+    try:
+        result = subprocess.run(
+            ['pm2', 'logs', pm2_name, '--lines', str(n), '--nostream'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        return {'stdout': '', 'stderr': str(e), 'combined': str(e)}
+
+    stdout = result.stdout or ''
+    stderr = result.stderr or ''
+    combined = (stdout + ('\n' if stdout and stderr else '') + stderr).strip()
+    return {
+        'stdout': stdout[-20000:],
+        'stderr': stderr[-20000:],
+        'combined': combined[-30000:],
+    }
+
+
 def _load_listening_ports():
     try:
         result = subprocess.run(['ss', '-tlnp'], capture_output=True, timeout=5)
@@ -2040,6 +2067,21 @@ def api_app_runtime(app_id):
         'webhook_path': webhook_path,
         'domain': a.domain,
         'status': a.status,
+    })
+
+
+@app.route('/api/app/<int:app_id>/pm2-logs')
+@login_required
+def api_app_pm2_logs(app_id):
+    a = db.session.get(App, app_id)
+    if not a or a.project.user_id != current_user.id:
+        return jsonify({'error': 'Not found'}), 404
+    if not a.pm2_name:
+        return jsonify({'error': 'App has no PM2 name configured'}), 400
+    lines = request.args.get('lines', 120)
+    return jsonify({
+        'pm2_name': a.pm2_name,
+        'logs': _load_pm2_logs(a.pm2_name, lines=lines),
     })
 
 
