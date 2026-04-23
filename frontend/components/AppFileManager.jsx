@@ -229,6 +229,7 @@ export default function AppFileManager({ api }) {
   const [menu, setMenu] = useState(null)
   const [editorTabs, setEditorTabs] = useState([])
   const [activeEditorPath, setActiveEditorPath] = useState(null)
+  const [editorMinimized, setEditorMinimized] = useState(false)
   const [preview, setPreview] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
@@ -351,6 +352,7 @@ export default function AppFileManager({ api }) {
 
   const openEditor = async (relPath) => {
     setActiveEditorPath(relPath)
+    setEditorMinimized(false)
     setEditorTabs((tabs) => (tabs.some((tab) => tab.path === relPath) ? tabs : [...tabs, makeEditorTab(relPath)]))
     try {
       const res = await api.read(relPath)
@@ -380,6 +382,7 @@ export default function AppFileManager({ api }) {
         const nextActive = next[idx] || next[idx - 1] || next[0] || null
         setActiveEditorPath(nextActive?.path || null)
       }
+      if (next.length === 0) setEditorMinimized(false)
       return next
     })
   }
@@ -942,6 +945,29 @@ export default function AppFileManager({ api }) {
         )}
       </div>
 
+      {activeEditor && (
+        <div className="mt-6">
+          <CodeEditorPanel
+            tabs={editorTabs}
+            activePath={activeEditorPath}
+            minimized={editorMinimized}
+            onActivate={(nextPath) => {
+              setActiveEditorPath(nextPath)
+              setEditorMinimized(false)
+            }}
+            onMinimize={() => setEditorMinimized((v) => !v)}
+            onCloseTab={closeEditorTab}
+            onChange={(content) => updateEditorTab(activeEditorPath, (tab) => ({ ...tab, content }))}
+            onSave={() => saveEditorTab(activeEditorPath)}
+            onCloseAll={() => {
+              setEditorTabs([])
+              setActiveEditorPath(null)
+              setEditorMinimized(false)
+            }}
+          />
+        </div>
+      )}
+
       {menu && (
         <div
           style={{ left: menu.x, top: menu.y }}
@@ -1062,21 +1088,6 @@ export default function AppFileManager({ api }) {
         </div>
       )}
 
-      {activeEditor && (
-        <CodeEditorModal
-          tabs={editorTabs}
-          activePath={activeEditorPath}
-          onActivate={setActiveEditorPath}
-          onCloseTab={closeEditorTab}
-          onChange={(content) => updateEditorTab(activeEditorPath, (tab) => ({ ...tab, content }))}
-          onSave={() => saveEditorTab(activeEditorPath)}
-          onCloseAll={() => {
-            setEditorTabs([])
-            setActiveEditorPath(null)
-          }}
-        />
-      )}
-
       {preview && (
         <PreviewModal
           preview={preview}
@@ -1147,7 +1158,7 @@ function MenuItem({ icon, children, onClick, disabled, danger }) {
   )
 }
 
-function CodeEditorModal({ tabs, activePath, onActivate, onCloseTab, onChange, onSave, onCloseAll }) {
+function CodeEditorPanel({ tabs, activePath, minimized, onActivate, onMinimize, onCloseTab, onChange, onSave, onCloseAll }) {
   const activeTab = tabs.find((tab) => tab.path === activePath) || tabs[0] || null
   const textareaRef = useRef(null)
   const gutterRef = useRef(null)
@@ -1176,11 +1187,7 @@ function CodeEditorModal({ tabs, activePath, onActivate, onCloseTab, onChange, o
   if (!activeTab) return null
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onMouseDown={onCloseAll}>
-      <div
-        className="bg-secondary border border-gray-700 rounded-lg w-full max-w-6xl h-[85vh] flex flex-col"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
+    <div className="bg-secondary border border-gray-700 rounded-lg overflow-hidden">
         <div className="border-b border-gray-700">
           <div className="flex items-center justify-between px-3 pt-3 gap-3">
             <div>
@@ -1196,7 +1203,10 @@ function CodeEditorModal({ tabs, activePath, onActivate, onCloseTab, onChange, o
               >
                 <Save className="w-4 h-4" /> {activeTab.saving ? 'Saving...' : 'Save'}
               </button>
-              <button type="button" onClick={onCloseAll} className="p-1.5 hover:bg-gray-700 rounded text-gray-400">
+              <button type="button" onClick={onMinimize} className="p-1.5 hover:bg-gray-700 rounded text-gray-400" title={minimized ? 'Expand editor' : 'Minimize editor'}>
+                <ChevronRight className={`w-4 h-4 transition ${minimized ? '-rotate-90' : 'rotate-90'}`} />
+              </button>
+              <button type="button" onClick={onCloseAll} className="p-1.5 hover:bg-gray-700 rounded text-gray-400" title="Close editor">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1237,7 +1247,8 @@ function CodeEditorModal({ tabs, activePath, onActivate, onCloseTab, onChange, o
           <div className="bg-red-500/10 border-b border-red-500/30 px-3 py-2 text-red-300 text-sm">{activeTab.error}</div>
         )}
 
-        <div className="flex-1 overflow-hidden">
+        {!minimized && (
+        <div className="h-[55vh] overflow-hidden">
           {activeTab.loading ? (
             <div className="h-full flex items-center justify-center text-gray-400 text-sm">Loading...</div>
           ) : (
@@ -1273,7 +1284,7 @@ function CodeEditorModal({ tabs, activePath, onActivate, onCloseTab, onChange, o
             </div>
           )}
         </div>
-      </div>
+        )}
     </div>
   )
 }
