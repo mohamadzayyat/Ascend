@@ -55,6 +55,8 @@ export const apiClient = {
   getListeningPorts: () => api.get('/api/system/ports'),
   getNginxSites: () => api.get('/api/system/nginx'),
   checkDomainDns: (domain) => api.get('/api/system/dns-check', { params: { domain } }),
+  suggestAppPort: (start = 3000, excludeAppId = null) =>
+    api.get('/api/system/suggest-port', { params: { start, exclude_app_id: excludeAppId } }),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
 }
 

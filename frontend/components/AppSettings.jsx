@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useRouter } from 'next/router'
+import { RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import DomainDnsCheck from '@/components/DomainDnsCheck'
 
@@ -10,6 +11,8 @@ export default function AppSettings({ app, onUpdate }) {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
   const [dnsStatus, setDnsStatus] = useState('idle')
+  const [portLoading, setPortLoading] = useState(false)
+  const [portHint, setPortHint] = useState('')
 
   const [formData, setFormData] = useState({
     name: app?.name || '',
@@ -60,6 +63,20 @@ export default function AppSettings({ app, onUpdate }) {
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to delete app')
       setDeleting(false)
+    }
+  }
+
+  const suggestPort = async () => {
+    setPortLoading(true)
+    setPortHint('')
+    try {
+      const res = await apiClient.suggestAppPort(3000, app.id)
+      setFormData((prev) => ({ ...prev, app_port: String(res.data.port) }))
+      setPortHint(`Suggested next free port: ${res.data.port}`)
+    } catch (err) {
+      setPortHint(err.response?.data?.error || 'Could not suggest a free port')
+    } finally {
+      setPortLoading(false)
     }
   }
 
@@ -146,7 +163,32 @@ export default function AppSettings({ app, onUpdate }) {
             enabled={formData.enable_ssl}
             onStatus={(status) => setDnsStatus(status)}
           />
-          {input('App Port', 'app_port', 'number', '3000', 'Port this app listens on. We check it isn\'t already taken before saving.')}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                name="app_port"
+                value={formData.app_port ?? ''}
+                onChange={handleChange}
+                placeholder="3000"
+                className="flex-1 px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+              <button
+                type="button"
+                onClick={suggestPort}
+                disabled={portLoading}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-primary border border-gray-600 text-gray-300 hover:text-white hover:border-gray-500 transition disabled:opacity-50"
+                title="Suggest free port"
+              >
+                <RefreshCw className={`w-4 h-4 ${portLoading ? 'animate-spin' : ''}`} />
+                Suggest
+              </button>
+            </div>
+            <p className={`text-xs mt-1 ${portHint.startsWith('Could not') ? 'text-red-400' : 'text-gray-500'}`}>
+              {portHint || 'Ascend checks saved apps and live listeners before suggesting a port.'}
+            </p>
+          </div>
           {input('Client Max Body Size', 'client_max_body', 'text', '100M')}
           {check('Enable SSL with Certbot', 'enable_ssl')}
         </div>

@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useProject } from '@/lib/hooks/useAuth'
 import DomainDnsCheck from '@/components/DomainDnsCheck'
@@ -28,11 +28,38 @@ export default function NewApp() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [dnsStatus, setDnsStatus] = useState('idle')
+  const [portTouched, setPortTouched] = useState(false)
+  const [portLoading, setPortLoading] = useState(false)
+  const [portHint, setPortHint] = useState('')
 
   const onChange = (e) => {
     const { name, value, type, checked } = e.target
+    if (name === 'app_port') setPortTouched(true)
     setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }))
   }
+
+  const suggestPort = async ({ force = false } = {}) => {
+    if (!force && (portTouched || formData.app_port)) return
+    setPortLoading(true)
+    setPortHint('')
+    try {
+      const res = await apiClient.suggestAppPort(3000)
+      setFormData((prev) => {
+        if (!force && (portTouched || prev.app_port)) return prev
+        return { ...prev, app_port: String(res.data.port) }
+      })
+      setPortHint(`Suggested next free port: ${res.data.port}`)
+      if (force) setPortTouched(false)
+    } catch (err) {
+      setPortHint(err.response?.data?.error || 'Could not suggest a free port')
+    } finally {
+      setPortLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (projectId) suggestPort()
+  }, [projectId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onSubmit = async (e) => {
     e.preventDefault()
@@ -143,7 +170,32 @@ export default function NewApp() {
               enabled={formData.enable_ssl}
               onStatus={(status) => setDnsStatus(status)}
             />
-            {input('App Port', 'app_port', 'number', '3000', 'The port this app listens on. Ascend will refuse if it\'s already taken.')}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  name="app_port"
+                  value={formData.app_port}
+                  onChange={onChange}
+                  placeholder="3000"
+                  className="flex-1 px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+                <button
+                  type="button"
+                  onClick={() => suggestPort({ force: true })}
+                  disabled={portLoading}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-primary border border-gray-600 text-gray-300 hover:text-white hover:border-gray-500 transition disabled:opacity-50"
+                  title="Suggest free port"
+                >
+                  <RefreshCw className={`w-4 h-4 ${portLoading ? 'animate-spin' : ''}`} />
+                  Suggest
+                </button>
+              </div>
+              <p className={`text-xs mt-1 ${portHint.startsWith('Could not') ? 'text-red-400' : 'text-gray-500'}`}>
+                {portHint || 'Ascend suggests the next free port and refuses ports already in use.'}
+              </p>
+            </div>
             {input('Client Max Body', 'client_max_body', 'text', '100M')}
             {check('Enable SSL with Certbot', 'enable_ssl')}
           </div>

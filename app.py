@@ -633,6 +633,39 @@ def _check_port_conflict(port, exclude_app_id=None):
     return None
 
 
+def _used_app_ports(exclude_app_id=None):
+    used = {
+        p
+        for (p,) in App.query.with_entities(App.app_port).filter(App.app_port.isnot(None)).all()
+        if p
+    }
+    if exclude_app_id:
+        current = db.session.get(App, exclude_app_id)
+        if current and current.app_port:
+            used.discard(current.app_port)
+    for row in _cached('ports', _SYSTEM_TTL, _load_listening_ports):
+        if row.get('port'):
+            used.add(row['port'])
+    for site in _cached('nginx', _SYSTEM_TTL, _load_nginx_sites):
+        used.update(site.get('listen_ports', []))
+    return used
+
+
+def _suggest_app_port(start=3000, end=65535, exclude_app_id=None):
+    try:
+        start = int(start)
+    except (TypeError, ValueError):
+        start = 3000
+    start = max(1, min(start, 65535))
+    end = max(start, min(int(end or 65535), 65535))
+
+    used = _used_app_ports(exclude_app_id=exclude_app_id)
+    for port in range(start, end + 1):
+        if port not in used:
+            return port
+    return None
+
+
 def _normalize_domain(domain):
     domain = (domain or '').strip().lower()
     domain = re.sub(r'^https?://', '', domain)
@@ -1647,6 +1680,21 @@ def api_system_nginx():
 def api_system_dns_check():
     domain = request.args.get('domain', '')
     return jsonify(_check_domain_points_to_server(domain))
+
+
+@app.route('/api/system/suggest-port')
+@login_required
+def api_system_suggest_port():
+    start = request.args.get('start', 3000)
+    exclude_app_id = _parse_port(request.args.get('exclude_app_id'))
+    port = _suggest_app_port(start=start, exclude_app_id=exclude_app_id)
+    if not port:
+        return jsonify({'error': 'No free port found in the requested range'}), 409
+    try:
+        normalized_start = int(start)
+    except (TypeError, ValueError):
+        normalized_start = 3000
+    return jsonify({'port': port, 'start': normalized_start})
 
 
 @app.route('/api/app/<int:app_id>/runtime')
