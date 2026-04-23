@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ClipboardPaste,
   ChevronRight,
+  Copy,
   Download,
   Edit3,
   Eye,
@@ -13,6 +15,7 @@ import {
   FileLock,
   FileText,
   FileVideo,
+  FilePlus,
   Folder,
   FolderPlus,
   Home,
@@ -21,6 +24,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Scissors,
   Search,
   Terminal,
   Trash2,
@@ -113,6 +117,88 @@ function parentPath(p) {
   return i === -1 ? '' : p.slice(0, i)
 }
 
+function baseName(p) {
+  if (!p) return ''
+  const parts = p.split('/').filter(Boolean)
+  return parts[parts.length - 1] || ''
+}
+
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function editorLanguage(path) {
+  const lower = (path || '').toLowerCase()
+  const ext = lower.includes('.') ? lower.split('.').pop() : ''
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs'].includes(ext)) return 'js'
+  if (['json'].includes(ext)) return 'json'
+  if (['css', 'scss', 'sass', 'less'].includes(ext)) return 'css'
+  if (['html', 'htm', 'xml'].includes(ext)) return 'markup'
+  if (['md', 'markdown'].includes(ext)) return 'md'
+  if (['py'].includes(ext)) return 'py'
+  if (['sh', 'bash', 'zsh', 'env'].includes(ext) || lower.endsWith('/.env') || baseName(lower) === '.env') return 'sh'
+  return 'plain'
+}
+
+function highlightText(text, path) {
+  const lang = editorLanguage(path)
+  let html = escapeHtml(text)
+
+  if (lang === 'js') {
+    html = html
+      .replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span class="fm-str">$1</span>')
+      .replace(/\b(const|let|var|function|return|async|await|import|from|export|default|if|else|for|while|switch|case|break|continue|try|catch|throw|class|new|extends|typeof)\b/g, '<span class="fm-key">$1</span>')
+      .replace(/\b(true|false|null|undefined)\b/g, '<span class="fm-lit">$1</span>')
+      .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="fm-num">$1</span>')
+      .replace(/(\/\/.*?$)/gm, '<span class="fm-com">$1</span>')
+    return html
+  }
+  if (lang === 'json') {
+    html = html
+      .replace(/("(?:[^"\\]|\\.)*")(\s*:)/g, '<span class="fm-prop">$1</span>$2')
+      .replace(/:\s*("(?:[^"\\]|\\.)*")/g, ': <span class="fm-str">$1</span>')
+      .replace(/\b(true|false|null)\b/g, '<span class="fm-lit">$1</span>')
+      .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="fm-num">$1</span>')
+    return html
+  }
+  if (lang === 'css') {
+    html = html
+      .replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="fm-com">$1</span>')
+      .replace(/([.#]?[a-zA-Z_-][\w-]*)(\s*\{)/g, '<span class="fm-prop">$1</span>$2')
+      .replace(/\b(color|background|display|position|padding|margin|border|font|width|height|grid|flex)\b/g, '<span class="fm-key">$1</span>')
+      .replace(/(:\s*)([^;}{]+)/g, '$1<span class="fm-str">$2</span>')
+    return html
+  }
+  if (lang === 'markup') {
+    html = html
+      .replace(/(&lt;\/?)([a-zA-Z0-9:-]+)/g, '$1<span class="fm-key">$2</span>')
+      .replace(/([a-zA-Z-:]+)=(&quot;.*?&quot;)/g, '<span class="fm-prop">$1</span>=<span class="fm-str">$2</span>')
+    return html
+  }
+  if (lang === 'md') {
+    html = html
+      .replace(/^(#{1,6}\s.*)$/gm, '<span class="fm-key">$1</span>')
+      .replace(/(`[^`]+`)/g, '<span class="fm-str">$1</span>')
+      .replace(/(\*\*[^*]+\*\*|__[^_]+__)/g, '<span class="fm-lit">$1</span>')
+      .replace(/(\[[^\]]+\]\([^)]+\))/g, '<span class="fm-prop">$1</span>')
+    return html
+  }
+  if (lang === 'py' || lang === 'sh') {
+    html = html
+      .replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '<span class="fm-str">$1</span>')
+      .replace(/\b(def|class|return|if|elif|else|for|while|try|except|import|from|as|pass|break|continue|lambda|echo|export|fi|then|do|done)\b/g, '<span class="fm-key">$1</span>')
+      .replace(/\b(true|false|none|null)\b/gi, '<span class="fm-lit">$1</span>')
+      .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="fm-num">$1</span>')
+      .replace(/(#.*?$)/gm, '<span class="fm-com">$1</span>')
+    return html
+  }
+
+  return html
+}
+
 export default function AppFileManager({ api }) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState([])
@@ -125,6 +211,7 @@ export default function AppFileManager({ api }) {
   const [searchInput, setSearchInput] = useState('')
   const [searchLimited, setSearchLimited] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
+  const [clipboard, setClipboard] = useState(null) // { mode, path, name, is_dir }
   const [menu, setMenu] = useState(null) // { x, y, entry }
   const [editor, setEditor] = useState(null) // { path, content, original, saving, error, size }
   const [preview, setPreview] = useState(null) // { path, kind, url, loading, error }
@@ -314,6 +401,20 @@ export default function AppFileManager({ api }) {
     }
   }
 
+  const newFile = async () => {
+    const name = window.prompt('New file name')
+    if (!name) return
+    const target = joinPath(path, name)
+    try {
+      await api.write(target, '')
+      flash(`Created ${name}`)
+      load()
+      openEditor(target)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to create file')
+    }
+  }
+
   const renameEntry = async (entry) => {
     const current = entry.name
     const next = window.prompt(`Rename "${current}" to:`, current)
@@ -326,6 +427,50 @@ export default function AppFileManager({ api }) {
       load()
     } catch (err) {
       setError(err.response?.data?.error || 'Rename failed')
+    }
+  }
+
+  const moveEntry = async (entry) => {
+    const next = window.prompt(`Move "${entry.name}" to path:`, joinPath(path, entry.name))
+    if (!next || next === entry.path) return
+    try {
+      await api.rename(entry.path, next)
+      flash(`Moved to ${next}`)
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Move failed')
+    }
+  }
+
+  const copyEntry = (entry) => {
+    setClipboard({ mode: 'copy', path: entry.path, name: entry.name, is_dir: entry.is_dir })
+    flash(`Copied ${entry.name}`)
+  }
+
+  const cutEntry = (entry) => {
+    setClipboard({ mode: 'cut', path: entry.path, name: entry.name, is_dir: entry.is_dir })
+    flash(`Cut ${entry.name}`)
+  }
+
+  const pasteClipboard = async () => {
+    if (!clipboard) return
+    const destination = joinPath(path, clipboard.name)
+    if (destination === clipboard.path) {
+      setError('Already in this folder')
+      return
+    }
+    try {
+      if (clipboard.mode === 'cut') {
+        await api.rename(clipboard.path, destination)
+        flash(`Moved ${clipboard.name}`)
+        setClipboard(null)
+      } else {
+        await api.copy(clipboard.path, destination)
+        flash(`Pasted ${clipboard.name}`)
+      }
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Paste failed')
     }
   }
 
@@ -464,10 +609,26 @@ export default function AppFileManager({ api }) {
           </button>
           <button
             type="button"
+            onClick={newFile}
+            className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+          >
+            <FilePlus className="w-4 h-4" /> New file
+          </button>
+          <button
+            type="button"
             onClick={newFolder}
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
           >
             <FolderPlus className="w-4 h-4" /> New folder
+          </button>
+          <button
+            type="button"
+            onClick={pasteClipboard}
+            disabled={!clipboard}
+            className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
+            title={clipboard ? `Paste ${clipboard.name}` : 'Copy or cut something first'}
+          >
+            <ClipboardPaste className="w-4 h-4" /> Paste
           </button>
           <button
             type="button"
@@ -517,6 +678,30 @@ export default function AppFileManager({ api }) {
               className="inline-flex items-center gap-1 px-3 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-red-300 text-sm"
             >
               <Trash2 className="w-4 h-4" /> Delete
+            </button>
+          </div>
+        </div>
+      )}
+
+      {clipboard && (
+        <div className="mb-4 flex items-center justify-between gap-3 flex-wrap rounded border border-gray-700 bg-primary/40 px-4 py-3">
+          <div className="text-sm text-gray-200">
+            {clipboard.mode === 'cut' ? 'Cut' : 'Copied'}: <span className="font-mono text-xs">{clipboard.path}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={pasteClipboard}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <ClipboardPaste className="w-4 h-4" /> Paste here
+            </button>
+            <button
+              type="button"
+              onClick={() => setClipboard(null)}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <X className="w-4 h-4" /> Clear
             </button>
           </div>
         </div>
@@ -698,10 +883,35 @@ export default function AppFileManager({ api }) {
             </MenuItem>
           )}
           <MenuItem
+            icon={<Copy className="w-4 h-4" />}
+            onClick={() => { const e = menu.entry; setMenu(null); copyEntry(e) }}
+          >
+            Copy
+          </MenuItem>
+          <MenuItem
+            icon={<Scissors className="w-4 h-4" />}
+            onClick={() => { const e = menu.entry; setMenu(null); cutEntry(e) }}
+          >
+            Cut
+          </MenuItem>
+          <MenuItem
+            icon={<ClipboardPaste className="w-4 h-4" />}
+            onClick={() => { setMenu(null); pasteClipboard() }}
+            disabled={!clipboard}
+          >
+            Paste here
+          </MenuItem>
+          <MenuItem
             icon={<Edit3 className="w-4 h-4" />}
             onClick={() => { const e = menu.entry; setMenu(null); renameEntry(e) }}
           >
             Rename
+          </MenuItem>
+          <MenuItem
+            icon={<ChevronRight className="w-4 h-4" />}
+            onClick={() => { const e = menu.entry; setMenu(null); moveEntry(e) }}
+          >
+            Move
           </MenuItem>
           <MenuItem
             icon={<Trash2 className="w-4 h-4" />}
@@ -714,7 +924,7 @@ export default function AppFileManager({ api }) {
       )}
 
       {editor && (
-        <EditorModal
+        <CodeEditorModal
           editor={editor}
           onChange={(content) => setEditor((e) => ({ ...e, content }))}
           onSave={saveEditor}
@@ -862,6 +1072,108 @@ function EditorModal({ editor, onChange, onSave, onClose }) {
               spellCheck={false}
               className="w-full h-full bg-primary text-gray-100 font-mono text-sm p-4 resize-none outline-none border-0"
             />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CodeEditorModal({ editor, onChange, onSave, onClose }) {
+  const dirty = editor.content !== editor.original
+  const textareaRef = useRef(null)
+  const gutterRef = useRef(null)
+  const highlightRef = useRef(null)
+  const lineCount = Math.max(1, editor.content.split('\n').length)
+  const highlighted = `${highlightText(editor.content, editor.path)}\n`
+
+  const onKeyDown = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault()
+      onSave()
+    }
+  }
+
+  const syncScroll = () => {
+    const top = textareaRef.current?.scrollTop || 0
+    const left = textareaRef.current?.scrollLeft || 0
+    if (gutterRef.current) gutterRef.current.scrollTop = top
+    if (highlightRef.current) {
+      highlightRef.current.scrollTop = top
+      highlightRef.current.scrollLeft = left
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onMouseDown={onClose}>
+      <div
+        className="bg-secondary border border-gray-700 rounded-lg w-full max-w-5xl h-[80vh] flex flex-col"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-700 p-3">
+          <div>
+            <p className="font-mono text-sm text-gray-300 truncate">
+              {editor.path}{dirty ? ' *' : ''}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              {editorLanguage(editor.path)} mode
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={!dirty || editor.saving || editor.loading}
+              className="inline-flex items-center gap-1 px-3 py-1.5 bg-accent hover:bg-blue-600 rounded text-white text-sm disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" /> {editor.saving ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 hover:bg-gray-700 rounded text-gray-400"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+        {editor.error && (
+          <div className="bg-red-500/10 border-b border-red-500/30 px-3 py-2 text-red-300 text-sm">{editor.error}</div>
+        )}
+        <div className="flex-1 overflow-hidden">
+          {editor.loading ? (
+            <div className="h-full flex items-center justify-center text-gray-400 text-sm">Loading...</div>
+          ) : (
+            <div className="h-full flex bg-primary text-sm font-mono">
+              <div
+                ref={gutterRef}
+                className="w-14 shrink-0 overflow-hidden border-r border-gray-800 bg-black/20 text-right text-gray-500 select-none"
+              >
+                <div className="px-3 py-4 leading-6">
+                  {Array.from({ length: lineCount }, (_, i) => (
+                    <div key={i + 1}>{i + 1}</div>
+                  ))}
+                </div>
+              </div>
+              <div className="relative flex-1 overflow-hidden">
+                <pre
+                  ref={highlightRef}
+                  aria-hidden="true"
+                  className="absolute inset-0 m-0 overflow-auto px-4 py-4 leading-6 text-gray-100 pointer-events-none whitespace-pre"
+                  dangerouslySetInnerHTML={{ __html: highlighted }}
+                />
+                <textarea
+                  ref={textareaRef}
+                  value={editor.content}
+                  onChange={(e) => onChange(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  onScroll={syncScroll}
+                  spellCheck={false}
+                  wrap="off"
+                  className="absolute inset-0 w-full h-full bg-transparent text-transparent caret-white px-4 py-4 resize-none outline-none border-0 leading-6 overflow-auto whitespace-pre"
+                />
+              </div>
+            </div>
           )}
         </div>
       </div>

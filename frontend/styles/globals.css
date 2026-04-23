@@ -73,3 +73,27 @@ body {
 .spinner {
   animation: spin 1s linear infinite;
 }
+
+.fm-key {
+  color: #60a5fa;
+}
+
+.fm-str {
+  color: #86efac;
+}
+
+.fm-num {
+  color: #fca5a5;
+}
+
+.fm-com {
+  color: #6b7280;
+}
+
+.fm-lit {
+  color: #c084fc;
+}
+
+.fm-prop {
+  color: #fbbf24;
+}
