@@ -3,14 +3,25 @@ import {
   ChevronRight,
   Download,
   Edit3,
+  Eye,
   File as FileIcon,
+  FileArchive,
+  FileAudio,
+  FileCode,
+  FileImage,
+  FileJson,
+  FileLock,
+  FileText,
+  FileVideo,
   Folder,
   FolderPlus,
   Home,
   MoreHorizontal,
+  Palette,
   Plus,
   RefreshCw,
   Save,
+  Terminal,
   Trash2,
   Upload,
   X,
@@ -22,15 +33,56 @@ const TEXT_EXT = new Set([
   'sass', 'less', 'html', 'htm', 'xml', 'yml', 'yaml', 'toml', 'ini', 'env',
   'sh', 'bash', 'zsh', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'hpp',
   'sql', 'php', 'vue', 'svelte', 'conf', 'log', 'gitignore', 'dockerfile',
-  'prettierrc', 'eslintrc', 'babelrc', 'editorconfig', 'lock',
+  'prettierrc', 'eslintrc', 'babelrc', 'editorconfig', 'lock', 'csv', 'tsv',
+  'patch', 'diff', 'rst',
 ])
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'])
+const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'mkv', 'ogv', 'm4v'])
+const AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'])
+const ARCHIVE_EXT = new Set(['zip', 'tar', 'gz', 'tgz', 'rar', '7z', 'bz2', 'xz'])
+const CODE_EXT = new Set([
+  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'rb', 'go', 'rs', 'java',
+  'c', 'h', 'cpp', 'hpp', 'php', 'vue', 'svelte', 'sql', 'kt', 'swift',
+])
+const SHELL_EXT = new Set(['sh', 'bash', 'zsh', 'ps1', 'bat', 'cmd', 'fish'])
+const STYLE_EXT = new Set(['css', 'scss', 'sass', 'less'])
+const DATA_EXT = new Set(['json', 'yaml', 'yml', 'toml', 'xml', 'ini', 'conf'])
 
-function isTextFile(name) {
-  if (!name) return false
+function fileKind(name) {
+  if (!name) return 'other'
   const lower = name.toLowerCase()
-  if (!lower.includes('.')) return true // extensionless usually text (Dockerfile, Makefile)
-  const ext = lower.split('.').pop()
-  return TEXT_EXT.has(ext)
+  const ext = lower.includes('.') ? lower.split('.').pop() : ''
+  if (IMAGE_EXT.has(ext)) return 'image'
+  if (VIDEO_EXT.has(ext)) return 'video'
+  if (AUDIO_EXT.has(ext)) return 'audio'
+  if (ext === 'pdf') return 'pdf'
+  if (!ext || TEXT_EXT.has(ext)) return 'text'
+  return 'other'
+}
+
+function isPreviewable(name) {
+  return ['image', 'video', 'audio', 'pdf'].includes(fileKind(name))
+}
+
+function iconMeta(name) {
+  const lower = name.toLowerCase()
+  const ext = lower.includes('.') ? lower.split('.').pop() : ''
+  if (IMAGE_EXT.has(ext)) return { Icon: FileImage, color: 'text-purple-400' }
+  if (VIDEO_EXT.has(ext)) return { Icon: FileVideo, color: 'text-pink-400' }
+  if (AUDIO_EXT.has(ext)) return { Icon: FileAudio, color: 'text-pink-300' }
+  if (ARCHIVE_EXT.has(ext)) return { Icon: FileArchive, color: 'text-yellow-400' }
+  if (CODE_EXT.has(ext)) return { Icon: FileCode, color: 'text-blue-400' }
+  if (SHELL_EXT.has(ext)) return { Icon: Terminal, color: 'text-green-400' }
+  if (STYLE_EXT.has(ext)) return { Icon: Palette, color: 'text-cyan-400' }
+  if (DATA_EXT.has(ext)) return { Icon: FileJson, color: 'text-orange-400' }
+  if (lower === '.env' || lower.startsWith('.env.')) return { Icon: FileLock, color: 'text-emerald-400' }
+  if (ext === 'pdf') return { Icon: FileText, color: 'text-red-400' }
+  if (['md', 'markdown'].includes(ext)) return { Icon: FileText, color: 'text-gray-300' }
+  if (['txt', 'log', 'rst', 'csv', 'tsv'].includes(ext)) return { Icon: FileText, color: 'text-gray-400' }
+  if (['dockerfile', 'makefile'].includes(lower) || lower === 'readme' || lower === 'license') {
+    return { Icon: FileText, color: 'text-gray-300' }
+  }
+  return { Icon: FileIcon, color: 'text-gray-400' }
 }
 
 function formatSize(bytes) {
@@ -71,6 +123,7 @@ export default function AppFileManager({ appId }) {
   const [showHidden, setShowHidden] = useState(false)
   const [menu, setMenu] = useState(null) // { x, y, entry }
   const [editor, setEditor] = useState(null) // { path, content, original, saving, error, size }
+  const [preview, setPreview] = useState(null) // { path, kind, url, loading, error }
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [status, setStatus] = useState('')
@@ -132,11 +185,38 @@ export default function AppFileManager({ appId }) {
       setPath(entry.path)
       return
     }
-    if (!isTextFile(entry.name)) {
-      flash('Binary file — use Download from right-click.')
+    const kind = fileKind(entry.name)
+    if (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'pdf') {
+      openPreview(entry.path, kind)
       return
     }
-    openEditor(entry.path)
+    if (kind === 'text') {
+      openEditor(entry.path)
+      return
+    }
+    flash('Binary file — use Download from right-click.')
+  }
+
+  const openPreview = async (relPath, kind) => {
+    setPreview({ path: relPath, kind, url: null, loading: true, error: '' })
+    try {
+      const res = await apiClient.fetchAppFileBlob(appId, relPath)
+      const url = URL.createObjectURL(res.data)
+      setPreview((p) => (p && p.path === relPath ? { ...p, url, loading: false } : p))
+    } catch (err) {
+      setPreview((p) =>
+        p && p.path === relPath
+          ? { ...p, loading: false, error: err.response?.data?.error || 'Failed to load preview' }
+          : p,
+      )
+    }
+  }
+
+  const closePreview = () => {
+    setPreview((p) => {
+      if (p?.url) URL.revokeObjectURL(p.url)
+      return null
+    })
   }
 
   const openEditor = async (relPath) => {
@@ -377,7 +457,11 @@ export default function AppFileManager({ appId }) {
                   </td>
                 </tr>
               )}
-              {entries.map((entry) => (
+              {entries.map((entry) => {
+                const { Icon, color } = entry.is_dir
+                  ? { Icon: Folder, color: 'text-accent' }
+                  : iconMeta(entry.name)
+                return (
                 <tr
                   key={entry.path}
                   onClick={() => openEntry(entry)}
@@ -386,11 +470,7 @@ export default function AppFileManager({ appId }) {
                 >
                   <td className="px-3 py-2">
                     <span className="inline-flex items-center gap-2 text-gray-200">
-                      {entry.is_dir ? (
-                        <Folder className="w-4 h-4 text-accent" />
-                      ) : (
-                        <FileIcon className="w-4 h-4 text-gray-400" />
-                      )}
+                      <Icon className={`w-4 h-4 ${color}`} />
                       {entry.name}
                     </span>
                   </td>
@@ -407,7 +487,8 @@ export default function AppFileManager({ appId }) {
                     </button>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         )}
@@ -421,10 +502,22 @@ export default function AppFileManager({ appId }) {
         >
           {!menu.entry.is_dir && (
             <>
+              {isPreviewable(menu.entry.name) && (
+                <MenuItem
+                  icon={<Eye className="w-4 h-4" />}
+                  onClick={() => {
+                    const e = menu.entry
+                    setMenu(null)
+                    openPreview(e.path, fileKind(e.name))
+                  }}
+                >
+                  Preview
+                </MenuItem>
+              )}
               <MenuItem
                 icon={<Edit3 className="w-4 h-4" />}
                 onClick={() => { setMenu(null); openEditor(menu.entry.path) }}
-                disabled={!isTextFile(menu.entry.name)}
+                disabled={fileKind(menu.entry.name) !== 'text'}
               >
                 Edit
               </MenuItem>
@@ -460,6 +553,77 @@ export default function AppFileManager({ appId }) {
           onClose={() => setEditor(null)}
         />
       )}
+
+      {preview && (
+        <PreviewModal
+          preview={preview}
+          onClose={closePreview}
+          onDownload={() => downloadEntry({ path: preview.path, name: preview.path.split('/').pop(), is_dir: false })}
+        />
+      )}
+    </div>
+  )
+}
+
+function PreviewModal({ preview, onClose, onDownload }) {
+  const fileName = preview.path.split('/').pop()
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-black/80 flex items-center justify-center p-4"
+      onMouseDown={onClose}
+    >
+      <div
+        className="bg-secondary border border-gray-700 rounded-lg w-full max-w-5xl max-h-[90vh] flex flex-col"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-700 p-3 gap-3">
+          <p className="font-mono text-sm text-gray-300 truncate">{preview.path}</p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onDownload}
+              className="inline-flex items-center gap-1 px-3 py-1.5 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <Download className="w-4 h-4" /> Download
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 hover:bg-gray-700 rounded text-gray-400"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto flex items-center justify-center bg-primary/40 p-4 min-h-[40vh]">
+          {preview.loading ? (
+            <div className="text-gray-400 text-sm">Loading preview…</div>
+          ) : preview.error ? (
+            <div className="text-red-400 text-sm">{preview.error}</div>
+          ) : preview.kind === 'image' ? (
+            <img
+              src={preview.url}
+              alt={fileName}
+              className="max-w-full max-h-[75vh] object-contain"
+            />
+          ) : preview.kind === 'video' ? (
+            <video
+              src={preview.url}
+              controls
+              className="max-w-full max-h-[75vh]"
+            />
+          ) : preview.kind === 'audio' ? (
+            <audio src={preview.url} controls className="w-full max-w-xl" />
+          ) : preview.kind === 'pdf' ? (
+            <iframe
+              src={preview.url}
+              title={fileName}
+              className="w-full h-[75vh] bg-white rounded"
+            />
+          ) : null}
+        </div>
+      </div>
     </div>
   )
 }

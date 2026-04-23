@@ -74,6 +74,8 @@ export const apiClient = {
     api.post(`/api/app/${id}/files/write`, { path, content }),
   downloadAppFileUrl: (id, path) =>
     `${API_URL}/api/app/${id}/files/download?path=${encodeURIComponent(path)}`,
+  fetchAppFileBlob: (id, path) =>
+    api.get(`/api/app/${id}/files/download`, { params: { path }, responseType: 'blob' }),
   uploadAppFiles: (id, path, files, { unzip = false } = {}) => {
     const form = new FormData()
     form.append('path', path || '')
