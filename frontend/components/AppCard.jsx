@@ -1,9 +1,9 @@
 import Link from 'next/link'
 import { Play, Settings } from 'lucide-react'
 import { useState } from 'react'
-import { formatDistanceToNow } from 'date-fns'
 import { apiClient } from '@/lib/api'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
+import { relativeLocalTime } from '@/lib/time'
 
 const STATUS_CLASS = {
   deployed: 'bg-green-500/10 text-green-400',
@@ -82,7 +82,7 @@ export default function AppCard({ app, onDeployStarted }) {
       )}
       {app.last_deployment && (
         <p className="text-xs text-gray-500 mb-3">
-          Last deployed {formatDistanceToNow(new Date(app.last_deployment), { addSuffix: true })}
+          Last deployed {relativeLocalTime(app.last_deployment)}
         </p>
       )}
 

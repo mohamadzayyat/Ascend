@@ -3,6 +3,7 @@ import { Trash2, Plus, Github } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import useSWR from 'swr'
 import { API_URL } from '@/lib/api'
+import { localDate } from '@/lib/time'
 
 const fetchWithCreds = (url) =>
   fetch(url, { credentials: 'include' }).then((r) => r.json())
@@ -137,7 +138,7 @@ export default function GitHubSettings() {
                 <div>
                   <p className="text-white font-medium">{c.username}</p>
                   <p className="text-xs text-gray-500 mt-1">
-                    Added {new Date(c.created_at).toLocaleDateString()}
+                    Added {localDate(c.created_at)}
                   </p>
                 </div>
                 <button

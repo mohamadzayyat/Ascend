@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useDeployment, useProjectDeployments, useAppDeployments } from '@/lib/hooks/useAuth'
-import { formatDistanceToNow } from 'date-fns'
+import { absoluteLocalTime, relativeLocalTime } from '@/lib/time'
 
 function statusClass(status) {
   if (status === 'success') return 'bg-green-500/20 text-green-400'
@@ -128,7 +128,9 @@ export default function DeploymentLogs({ projectId, appId }) {
                 <td className="px-4 py-3 text-gray-300 text-sm font-mono">{d.branch || '—'}</td>
                 <td className="px-4 py-3 text-gray-400 text-sm capitalize">{d.triggered_by || '—'}</td>
                 <td className="px-4 py-3 text-gray-400 text-sm">
-                  {formatDistanceToNow(new Date(d.started_at), { addSuffix: true })}
+                  <span title={absoluteLocalTime(d.started_at)}>
+                    {relativeLocalTime(d.started_at)}
+                  </span>
                 </td>
                 <td className="px-4 py-3 text-gray-400 text-sm">
                   {d.duration_seconds != null

@@ -3,6 +3,7 @@ import { useAuth, useProjects } from '@/lib/hooks/useAuth'
 import StatCard from '@/components/StatCard'
 import ProjectCard from '@/components/ProjectCard'
 import { Activity, AlertCircle, CheckCircle, Boxes } from 'lucide-react'
+import { localDate, parseApiTime } from '@/lib/time'
 
 export default function Dashboard() {
   const { user } = useAuth()
@@ -18,7 +19,7 @@ export default function Dashboard() {
 
   const recentApps = allApps
     .filter((a) => a.last_deployment)
-    .sort((a, b) => new Date(b.last_deployment) - new Date(a.last_deployment))
+    .sort((a, b) => parseApiTime(b.last_deployment) - parseApiTime(a.last_deployment))
     .slice(0, 5)
 
   if (!user) return <div>Loading...</div>
@@ -110,7 +111,7 @@ export default function Dashboard() {
                       </span>
                     </td>
                     <td className="px-6 py-3 text-gray-400 text-sm">
-                      {new Date(a.last_deployment).toLocaleDateString()}
+                      {localDate(a.last_deployment)}
                     </td>
                   </tr>
                 ))}

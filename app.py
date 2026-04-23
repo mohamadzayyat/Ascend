@@ -79,6 +79,21 @@ CORS(app,
 # Database Models
 # ═══════════════════════════════════════════
 
+def iso_utc(dt):
+    """Serialize datetimes as explicit UTC so browsers show correct local time.
+
+    SQLite drops tzinfo when storing DateTime values, but all app timestamps are
+    written in UTC. If tzinfo is missing, treat it as UTC instead of local time.
+    """
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace('+00:00', 'Z')
+
+
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(120), unique=True, nullable=False)
@@ -162,8 +177,8 @@ class Project(db.Model):
             'webhook_secret': self.webhook_secret,
             'auto_deploy': self.auto_deploy,
             'github_hook_id': self.github_hook_id,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'created_at': iso_utc(self.created_at),
+            'updated_at': iso_utc(self.updated_at),
         }
         if include_apps:
             d['apps'] = [a.to_dict() for a in self.apps]
@@ -217,9 +232,9 @@ class App(db.Model):
             'enable_ssl': self.enable_ssl,
             'client_max_body': self.client_max_body,
             'status': self.status,
-            'last_deployment': self.last_deployment.isoformat() if self.last_deployment else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'last_deployment': iso_utc(self.last_deployment),
+            'created_at': iso_utc(self.created_at),
+            'updated_at': iso_utc(self.updated_at),
         }
 
 
@@ -251,8 +266,8 @@ class Deployment(db.Model):
             'commit_hash': self.commit_hash,
             'triggered_by': self.triggered_by,
             'error_message': self.error_message,
-            'started_at': self.started_at.isoformat(),
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'started_at': iso_utc(self.started_at),
+            'completed_at': iso_utc(self.completed_at),
             'duration_seconds': self.duration_seconds,
         }
 
@@ -1299,7 +1314,7 @@ def api_github_credentials():
     return jsonify([{
         'id': c.id,
         'username': c.username,
-        'created_at': c.created_at.isoformat()
+        'created_at': iso_utc(c.created_at)
     } for c in creds])
 
 
