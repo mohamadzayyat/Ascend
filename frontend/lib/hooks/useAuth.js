@@ -157,11 +157,32 @@ export function useSystem() {
     refreshInterval: 30000,
     dedupingInterval: 10000,
   })
+  const certificates = useSWR(`${API_URL}/api/system/certificates`, fetchWithCreds, {
+    refreshInterval: 60000,
+    dedupingInterval: 30000,
+  })
   return {
     pm2: pm2.data?.processes || [],
     ports: ports.data?.ports || [],
     nginxSites: nginx.data?.sites || [],
+    certificates: certificates.data?.certificates || [],
+    certificateScheduler: certificates.data?.scheduler || { scheduled: false, methods: [] },
     isLoading: !pm2.data && !pm2.error,
+  }
+}
+
+export function useCertificates() {
+  const { data, error, mutate } = useSWR(
+    `${API_URL}/api/system/certificates`,
+    fetchWithCreds,
+    { refreshInterval: 60000, dedupingInterval: 30000 }
+  )
+  return {
+    certificates: data?.certificates || [],
+    scheduler: data?.scheduler || { scheduled: false, methods: [] },
+    isLoading: !error && !data,
+    isError: !!error,
+    mutate,
   }
 }
 

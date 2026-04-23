@@ -1,20 +1,32 @@
 import Link from 'next/link'
-import { useAuth, useProjects } from '@/lib/hooks/useAuth'
+import { useAuth, useProjects, useCertificates } from '@/lib/hooks/useAuth'
 import StatCard from '@/components/StatCard'
 import ProjectCard from '@/components/ProjectCard'
-import { Activity, AlertCircle, CheckCircle, Boxes } from 'lucide-react'
-import { localDate, parseApiTime } from '@/lib/time'
+import { Activity, AlertCircle, CheckCircle, Boxes, ShieldCheck } from 'lucide-react'
+import { absoluteLocalTime, localDate, parseApiTime } from '@/lib/time'
+
+function certStatusClass(status) {
+  if (status === 'ok') return 'bg-green-500/20 text-green-400'
+  if (status === 'warning') return 'bg-yellow-500/20 text-yellow-400'
+  if (status === 'critical' || status === 'expired') return 'bg-red-500/20 text-red-400'
+  return 'bg-gray-500/20 text-gray-400'
+}
 
 export default function Dashboard() {
   const { user } = useAuth()
   const { projects, isLoading } = useProjects()
+  const { certificates, scheduler } = useCertificates()
 
   const allApps = projects.flatMap((p) => p.apps || [])
+  const riskyCertificates = certificates
+    .filter((c) => c.status === 'expired' || c.status === 'critical' || c.status === 'warning')
+    .slice(0, 6)
   const stats = {
     projects: projects.length,
     apps: allApps.length,
     deployed: allApps.filter((a) => a.status === 'deployed').length,
     errors: allApps.filter((a) => a.status === 'error').length,
+    riskyCerts: certificates.filter((c) => c.status === 'expired' || c.status === 'critical' || c.status === 'warning').length,
   }
 
   const recentApps = allApps
@@ -40,6 +52,73 @@ export default function Dashboard() {
           color="bg-green-500/10 text-green-400" />
         <StatCard title="Errors" value={stats.errors} icon={<AlertCircle className="w-6 h-6" />}
           color="bg-red-500/10 text-red-400" />
+      </div>
+
+      <div className="mb-8 bg-secondary rounded-lg border border-gray-700 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-700 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-accent" />
+              SSL Report
+            </h2>
+            <p className="text-sm text-gray-400 mt-1">
+              {certificates.length} certificate{certificates.length === 1 ? '' : 's'} found on this server.
+              {' '}
+              Auto renewal scheduler: {scheduler.scheduled ? 'detected' : 'not detected'}.
+            </p>
+          </div>
+          <Link href="/system" className="text-accent hover:underline text-sm font-semibold">
+            View all
+          </Link>
+        </div>
+        {certificates.length === 0 ? (
+          <div className="px-6 py-5 text-gray-400 text-sm">No Let&apos;s Encrypt certificates found yet.</div>
+        ) : riskyCertificates.length === 0 ? (
+          <div className="px-6 py-5 text-green-400 text-sm">
+            All detected certificates are outside the 30-day warning window.
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-primary text-gray-400 text-xs uppercase">
+              <tr>
+                <th className="px-6 py-3 text-left">Domain</th>
+                <th className="px-6 py-3 text-left">Expires</th>
+                <th className="px-6 py-3 text-left">Auto renew</th>
+                <th className="px-6 py-3 text-left">Owner</th>
+              </tr>
+            </thead>
+            <tbody>
+              {riskyCertificates.map((cert) => (
+                <tr key={cert.name} className="border-t border-gray-700">
+                  <td className="px-6 py-3">
+                    <div className="text-white font-medium">{cert.primary_domain}</div>
+                    <div className="text-xs text-gray-500">{cert.name}</div>
+                  </td>
+                  <td className="px-6 py-3">
+                    <span className={`px-2 py-1 rounded text-xs font-semibold ${certStatusClass(cert.status)}`}>
+                      {cert.days_remaining == null
+                        ? 'unknown'
+                        : cert.days_remaining < 0
+                        ? 'expired'
+                        : `${cert.days_remaining}d left`}
+                    </span>
+                    <div className="text-xs text-gray-500 mt-1">{absoluteLocalTime(cert.expires_at)}</div>
+                  </td>
+                  <td className="px-6 py-3 text-sm">
+                    {cert.auto_renewable ? (
+                      <span className="text-green-400">yes</span>
+                    ) : (
+                      <span className="text-yellow-400">check needed</span>
+                    )}
+                  </td>
+                  <td className="px-6 py-3 text-gray-300 text-sm">
+                    {cert.managed_by_ascend ? 'Ascend app' : 'Server-level'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="mb-8">

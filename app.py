@@ -2042,6 +2042,212 @@ def _load_nginx_sites():
     return sites
 
 
+def _parse_openssl_date(value):
+    if not value:
+        return None
+    text = value.strip()
+    if text.startswith('notAfter=') or text.startswith('notBefore='):
+        text = text.split('=', 1)[1].strip()
+    for fmt in ('%b %d %H:%M:%S %Y %Z', '%b %d %H:%M:%S %Y GMT'):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _load_certbot_scheduler():
+    methods = []
+    for timer in ('certbot.timer', 'snap.certbot.renew.timer'):
+        try:
+            enabled = subprocess.run(
+                ['systemctl', 'is-enabled', timer],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            active = subprocess.run(
+                ['systemctl', 'is-active', timer],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        if enabled.returncode == 0 or active.returncode == 0:
+            methods.append({
+                'type': 'systemd',
+                'name': timer,
+                'enabled': enabled.stdout.strip() or 'unknown',
+                'active': active.stdout.strip() or 'unknown',
+            })
+
+    for cron_path in ('/etc/cron.d/certbot', '/etc/cron.daily/certbot'):
+        if os.path.exists(cron_path):
+            methods.append({
+                'type': 'cron',
+                'name': cron_path,
+                'enabled': 'present',
+                'active': 'present',
+            })
+
+    return {
+        'scheduled': bool(methods),
+        'methods': methods,
+    }
+
+
+def _parse_renewal_config(path):
+    info = {
+        'exists': False,
+        'path': path,
+        'authenticator': None,
+        'installer': None,
+        'renew_hook': None,
+        'deploy_hook': None,
+    }
+    if not os.path.isfile(path):
+        return info
+    info['exists'] = True
+    try:
+        with open(path, 'r', errors='replace') as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = [x.strip() for x in line.split('=', 1)]
+                if key in info:
+                    info[key] = value
+    except OSError:
+        pass
+    return info
+
+
+def _certificate_status(days_remaining):
+    if days_remaining is None:
+        return 'unknown'
+    if days_remaining < 0:
+        return 'expired'
+    if days_remaining <= 7:
+        return 'critical'
+    if days_remaining <= 30:
+        return 'warning'
+    return 'ok'
+
+
+def _load_letsencrypt_certificates():
+    live_dir = '/etc/letsencrypt/live'
+    scheduler = _load_certbot_scheduler()
+    if not os.path.isdir(live_dir):
+        return {'certificates': [], 'scheduler': scheduler}
+
+    app_domains = {}
+    try:
+        for app_row in App.query.filter(App.domain.isnot(None)).all():
+            if app_row.domain:
+                app_domains[app_row.domain.lower()] = {
+                    'app_id': app_row.id,
+                    'app_name': app_row.name,
+                    'project_id': app_row.project_id,
+                    'project_name': app_row.project.name if app_row.project else None,
+                }
+    except Exception:
+        app_domains = {}
+
+    nginx_sites = _load_nginx_sites()
+    site_by_domain = {}
+    for site in nginx_sites:
+        for name in site.get('server_names') or []:
+            site_by_domain.setdefault(name.lower(), []).append(site.get('name'))
+
+    certificates = []
+    now = datetime.now(timezone.utc)
+    for name in sorted(os.listdir(live_dir)):
+        cert_dir = os.path.join(live_dir, name)
+        cert_path = os.path.join(cert_dir, 'cert.pem')
+        fullchain_path = os.path.join(cert_dir, 'fullchain.pem')
+        if not os.path.isdir(cert_dir) or not os.path.exists(cert_path):
+            continue
+
+        try:
+            result = subprocess.run(
+                ['openssl', 'x509', '-in', cert_path, '-noout', '-dates', '-issuer', '-subject', '-ext', 'subjectAltName'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            result = None
+
+        output = result.stdout if result and result.returncode == 0 else ''
+        not_before = None
+        not_after = None
+        issuer = ''
+        subject = ''
+        domains = []
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith('notBefore='):
+                not_before = _parse_openssl_date(line)
+            elif line.startswith('notAfter='):
+                not_after = _parse_openssl_date(line)
+            elif line.startswith('issuer='):
+                issuer = line.split('=', 1)[1].strip()
+            elif line.startswith('subject='):
+                subject = line.split('=', 1)[1].strip()
+            elif 'DNS:' in line:
+                domains.extend([d.strip() for d in re.findall(r'DNS:([^,\s]+)', line)])
+
+        if not domains:
+            cn_match = re.search(r'CN\s*=\s*([^,]+)', subject)
+            if cn_match:
+                domains = [cn_match.group(1).strip()]
+
+        days_remaining = None
+        if not_after:
+            days_remaining = int((not_after - now).total_seconds() // 86400)
+
+        renewal = _parse_renewal_config(os.path.join('/etc/letsencrypt/renewal', f'{name}.conf'))
+        managed_apps = []
+        nginx_site_names = set()
+        for domain in domains:
+            app_info = app_domains.get(domain.lower())
+            if app_info and app_info not in managed_apps:
+                managed_apps.append(app_info)
+            for site_name in site_by_domain.get(domain.lower(), []):
+                nginx_site_names.add(site_name)
+
+        auto_renewable = bool(renewal.get('exists') and scheduler.get('scheduled'))
+        certificates.append({
+            'name': name,
+            'domains': domains,
+            'primary_domain': domains[0] if domains else name,
+            'not_before': iso_utc(not_before),
+            'expires_at': iso_utc(not_after),
+            'days_remaining': days_remaining,
+            'status': _certificate_status(days_remaining),
+            'issuer': issuer,
+            'cert_path': cert_path,
+            'fullchain_path': fullchain_path,
+            'renewal_config': renewal,
+            'certbot_managed': bool(renewal.get('exists')),
+            'auto_renewable': auto_renewable,
+            'renewal_note': 'Certbot renewal config and scheduler detected' if auto_renewable else (
+                'Renewal config exists, but no certbot timer/cron was detected' if renewal.get('exists')
+                else 'No certbot renewal config found'
+            ),
+            'managed_by_ascend': bool(managed_apps),
+            'apps': managed_apps,
+            'nginx_sites': sorted(nginx_site_names),
+        })
+
+    certificates.sort(key=lambda c: (c['days_remaining'] is None, c['days_remaining'] or 999999))
+    return {
+        'certificates': certificates,
+        'scheduler': scheduler,
+    }
+
+
 def _is_port_listening(port):
     try:
         result = subprocess.run(
@@ -2075,6 +2281,12 @@ def api_system_nginx():
     return jsonify({
         'sites': _cached('nginx', _SYSTEM_TTL, _load_nginx_sites),
     })
+
+
+@app.route('/api/system/certificates')
+@login_required
+def api_system_certificates():
+    return jsonify(_cached('certificates', 60, _load_letsencrypt_certificates))
 
 
 @app.route('/api/system/dns-check')

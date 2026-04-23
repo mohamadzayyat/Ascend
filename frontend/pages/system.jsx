@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { useSystem, useProjects } from '@/lib/hooks/useAuth'
+import { absoluteLocalTime } from '@/lib/time'
 
 function formatUptime(ms) {
   if (!ms || ms <= 0) return '—'
@@ -27,8 +28,20 @@ function StatusBadge({ status }) {
   )
 }
 
+function CertBadge({ status }) {
+  const cls =
+    status === 'ok'
+      ? 'bg-green-500/20 text-green-400'
+      : status === 'warning'
+      ? 'bg-yellow-500/20 text-yellow-400'
+      : status === 'critical' || status === 'expired'
+      ? 'bg-red-500/20 text-red-400'
+      : 'bg-gray-500/20 text-gray-400'
+  return <span className={`px-2 py-1 rounded text-xs font-semibold ${cls}`}>{status || 'unknown'}</span>
+}
+
 export default function System() {
-  const { pm2, ports, nginxSites, isLoading } = useSystem()
+  const { pm2, ports, nginxSites, certificates, certificateScheduler, isLoading } = useSystem()
   const { projects } = useProjects()
 
   // Set of pm2 process names / ports already managed by an Ascend app
@@ -139,6 +152,91 @@ export default function System() {
         </div>
       </section>
 
+      {/* SSL Certificates */}
+      <section className="mb-10">
+        <h2 className="text-xl font-bold text-white mb-4">
+          SSL Certificates <span className="text-gray-500 text-sm font-normal">({certificates.length})</span>
+        </h2>
+        <div className="bg-secondary rounded-lg border border-gray-700 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-700 text-sm text-gray-400">
+            Certbot auto-renewal scheduler:{' '}
+            {certificateScheduler.scheduled ? (
+              <span className="text-green-400">detected</span>
+            ) : (
+              <span className="text-yellow-400">not detected</span>
+            )}
+            {certificateScheduler.methods?.length > 0 && (
+              <span className="text-gray-500">
+                {' '}({certificateScheduler.methods.map((m) => m.name).join(', ')})
+              </span>
+            )}
+          </div>
+          {certificates.length === 0 ? (
+            <div className="p-6 text-gray-400">No Let&apos;s Encrypt certificates found in /etc/letsencrypt/live.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="bg-primary text-gray-400 text-xs uppercase">
+                <tr>
+                  <th className="text-left px-4 py-3">Certificate</th>
+                  <th className="text-left px-4 py-3">Domains</th>
+                  <th className="text-left px-4 py-3">Expires</th>
+                  <th className="text-left px-4 py-3">Renewal</th>
+                  <th className="text-left px-4 py-3">Used by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {certificates.map((cert) => (
+                  <tr key={cert.name} className="border-t border-gray-700 align-top">
+                    <td className="px-4 py-3">
+                      <div className="text-white font-mono">{cert.name}</div>
+                      <div className="mt-2"><CertBadge status={cert.status} /></div>
+                    </td>
+                    <td className="px-4 py-3 text-gray-300">
+                      {cert.domains?.length ? cert.domains.join(', ') : cert.primary_domain}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="text-gray-200">{absoluteLocalTime(cert.expires_at)}</div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {cert.days_remaining == null
+                          ? 'unknown'
+                          : cert.days_remaining < 0
+                          ? `${Math.abs(cert.days_remaining)}d expired`
+                          : `${cert.days_remaining}d remaining`}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {cert.auto_renewable ? (
+                        <span className="text-green-400 text-xs font-semibold">auto-renewable</span>
+                      ) : cert.certbot_managed ? (
+                        <span className="text-yellow-400 text-xs font-semibold">config exists, scheduler missing</span>
+                      ) : (
+                        <span className="text-red-400 text-xs font-semibold">not certbot-managed</span>
+                      )}
+                      <div className="text-xs text-gray-500 mt-1">
+                        {cert.renewal_config?.authenticator || 'unknown authenticator'}
+                        {cert.renewal_config?.installer ? ` / ${cert.renewal_config.installer}` : ''}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-xs">
+                      {cert.managed_by_ascend ? (
+                        <div className="text-green-400">
+                          {cert.apps.map((a) => `${a.project_name} / ${a.app_name}`).join(', ')}
+                        </div>
+                      ) : (
+                        <div className="text-yellow-400">Unmanaged by Ascend</div>
+                      )}
+                      {cert.nginx_sites?.length > 0 && (
+                        <div className="text-gray-500 mt-1">Nginx: {cert.nginx_sites.join(', ')}</div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+
       {/* Nginx Sites */}
       <section className="mb-10">
         <h2 className="text-xl font-bold text-white mb-4">
@@ -185,7 +283,7 @@ export default function System() {
       </section>
 
       <p className="text-gray-500 text-sm">
-        Data refreshes automatically: PM2 every 5s, ports every 10s, Nginx every 30s.
+        Data refreshes automatically: PM2 every 5s, ports every 10s, Nginx every 30s, SSL certificates every 60s.
       </p>
     </div>
   )

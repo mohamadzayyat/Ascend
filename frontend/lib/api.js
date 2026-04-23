@@ -57,6 +57,7 @@ export const apiClient = {
   getPm2Processes: () => api.get('/api/system/pm2'),
   getListeningPorts: () => api.get('/api/system/ports'),
   getNginxSites: () => api.get('/api/system/nginx'),
+  getCertificates: () => api.get('/api/system/certificates'),
   checkDomainDns: (domain) => api.get('/api/system/dns-check', { params: { domain } }),
   suggestAppPort: (start = 3000, excludeAppId = null) =>
     api.get('/api/system/suggest-port', { params: { start, exclude_app_id: excludeAppId } }),
