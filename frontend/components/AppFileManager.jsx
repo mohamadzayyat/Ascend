@@ -1194,7 +1194,7 @@ function CodeEditorPanel({ tabs, activePath, minimized, onActivate, onMinimize, 
 
   if (minimized) {
     return (
-      <div className="fixed z-30 bottom-4 right-4 md:left-[18rem] md:right-4">
+      <div className="fixed z-30 bottom-0 right-0 md:left-64">
         <div className="ml-auto flex max-w-xl items-center gap-3 rounded-lg border border-gray-700 bg-secondary/95 px-3 py-2 shadow-2xl backdrop-blur">
           <button
             type="button"
@@ -1222,9 +1222,9 @@ function CodeEditorPanel({ tabs, activePath, minimized, onActivate, onMinimize, 
     )
   }
 
-  return (
+    return (
     <div
-      className="fixed inset-x-4 bottom-4 top-4 z-30 overflow-hidden rounded-xl border border-gray-700 bg-secondary shadow-2xl md:left-[18rem]"
+      className="fixed inset-y-0 right-0 left-0 z-30 overflow-hidden border-l border-gray-700 bg-secondary shadow-2xl md:left-64"
       onMouseDown={(e) => e.stopPropagation()}
     >
         <div className="border-b border-gray-700">
