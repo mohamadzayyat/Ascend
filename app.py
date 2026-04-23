@@ -583,11 +583,7 @@ def api_update_project(project_id):
     db.session.commit()
 
     webhook_result = None
-    if (
-        project.auto_deploy != prev_auto_deploy
-        or 'github_url' in data
-        or 'enable_webhook' in data
-    ):
+    if project.auto_deploy or prev_auto_deploy or 'enable_webhook' in data:
         webhook_result = _sync_github_webhook(project)
 
     body = project.to_dict()
@@ -1188,11 +1184,14 @@ def _sync_github_webhook(project):
     }
     payload = {'name': 'web', 'active': True, 'events': ['push'], 'config': config}
 
-    if project.github_hook_id:
-        status, resp = _github_api(
-            'PATCH', f'/repos/{owner}/{repo}/hooks/{project.github_hook_id}',
+    def patch_hook(hook_id):
+        return _github_api(
+            'PATCH', f'/repos/{owner}/{repo}/hooks/{hook_id}',
             cred.token, payload,
         )
+
+    if project.github_hook_id:
+        status, resp = patch_hook(project.github_hook_id)
         if status == 200:
             return {'status': 'updated', 'hook_id': project.github_hook_id, 'url': hook_url}
         if status == 404:
@@ -1200,6 +1199,27 @@ def _sync_github_webhook(project):
             db.session.commit()
         else:
             return {'status': 'update_failed', 'code': status, 'message': (resp or {}).get('message')}
+
+    # If the stored hook id is missing/stale, find an existing hook for this
+    # project secret and update it instead of creating duplicates.
+    status, hooks = _github_api('GET', f'/repos/{owner}/{repo}/hooks', cred.token)
+    if status == 200 and isinstance(hooks, list):
+        expected_suffix = f'/webhook/github/{project.webhook_secret}'
+        for hook in hooks:
+            cfg = hook.get('config') or {}
+            existing_url = cfg.get('url') or ''
+            if existing_url.endswith(expected_suffix):
+                hook_id = hook.get('id')
+                patch_status, patch_resp = patch_hook(hook_id)
+                if patch_status == 200:
+                    project.github_hook_id = hook_id
+                    db.session.commit()
+                    return {'status': 'updated', 'hook_id': hook_id, 'url': hook_url}
+                return {
+                    'status': 'update_failed',
+                    'code': patch_status,
+                    'message': (patch_resp or {}).get('message'),
+                }
 
     status, resp = _github_api('POST', f'/repos/{owner}/{repo}/hooks', cred.token, payload)
     if status in (200, 201) and isinstance(resp, dict) and 'id' in resp:
