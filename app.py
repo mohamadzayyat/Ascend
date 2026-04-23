@@ -12,6 +12,8 @@ import json
 import time
 import hmac
 import hashlib
+import shutil
+import zipfile
 import subprocess
 import threading
 import secrets
@@ -2507,6 +2509,311 @@ def api_app_pm2_logs(app_id):
         'pm2_name': a.pm2_name,
         'logs': _load_pm2_logs(a.pm2_name, lines=lines),
     })
+
+
+# ═══════════════════════════════════════════
+# File Manager (per-app)
+# ═══════════════════════════════════════════
+
+MAX_EDIT_FILE_BYTES = 2 * 1024 * 1024  # 2MB cap for read/write through the editor
+HIDDEN_NAMES = {'node_modules', '.git'}
+
+
+def _fm_owned_app(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return None, (jsonify({'error': 'Unauthorized'}), 403)
+    return a, None
+
+
+def _fm_resolve(app_row, relpath, must_exist=True):
+    """Resolve `relpath` under the app's deploy dir and confirm it stays inside.
+
+    Returns (base, target). Raises ValueError on escape, FileNotFoundError if
+    must_exist and the target does not exist.
+    """
+    base = _app_deploy_dir(app_row).resolve()
+    rel = (relpath or '').replace('\\', '/').lstrip('/')
+    target = (base / rel).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise ValueError('Path escapes app directory')
+    if must_exist and not target.exists():
+        raise FileNotFoundError(str(target))
+    return base, target
+
+
+def _fm_entry(p, base):
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    is_dir = p.is_dir()
+    rel = str(p.relative_to(base)).replace('\\', '/')
+    return {
+        'name': p.name,
+        'path': rel,
+        'is_dir': is_dir,
+        'size': None if is_dir else st.st_size,
+        'mtime': iso_utc(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)),
+    }
+
+
+def _fm_rel(target, base):
+    return '' if target == base else str(target.relative_to(base)).replace('\\', '/')
+
+
+def _fm_safe_extract_zip(zip_path, target_dir, base):
+    target_dir = target_dir.resolve()
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            member_path = (target_dir / member.filename).resolve()
+            try:
+                member_path.relative_to(target_dir)
+                member_path.relative_to(base)
+            except ValueError:
+                raise ValueError(f'Unsafe entry: {member.filename}')
+        zf.extractall(target_dir)
+
+
+@app.route('/api/app/<int:app_id>/files/list')
+@login_required
+def api_app_files_list(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    relpath = request.args.get('path', '')
+    show_hidden = request.args.get('show_hidden') in ('1', 'true', 'yes')
+    try:
+        base, target = _fm_resolve(a, relpath, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    if not base.exists():
+        return jsonify({
+            'base_path': str(base),
+            'path': '',
+            'exists': False,
+            'entries': [],
+        })
+    if not target.exists():
+        return jsonify({'error': 'Path not found'}), 404
+    if not target.is_dir():
+        return jsonify({'error': 'Path is not a directory'}), 400
+
+    entries = []
+    for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        name = child.name
+        if not show_hidden and (name.startswith('.') or name in HIDDEN_NAMES):
+            continue
+        entry = _fm_entry(child, base)
+        if entry:
+            entries.append(entry)
+
+    return jsonify({
+        'base_path': str(base),
+        'path': _fm_rel(target, base),
+        'exists': True,
+        'entries': entries,
+    })
+
+
+@app.route('/api/app/<int:app_id>/files/read')
+@login_required
+def api_app_files_read(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    try:
+        base, target = _fm_resolve(a, request.args.get('path', ''))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'File not found'}), 404
+    if not target.is_file():
+        return jsonify({'error': 'Not a file'}), 400
+    size = target.stat().st_size
+    if size > MAX_EDIT_FILE_BYTES:
+        return jsonify({
+            'error': f'File is {size} bytes; editor limit is {MAX_EDIT_FILE_BYTES}. Download it instead.'
+        }), 413
+    try:
+        content = target.read_text(encoding='utf-8')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'File is not UTF-8 text. Use download instead.'}), 415
+    return jsonify({'path': _fm_rel(target, base), 'content': content, 'size': size})
+
+
+@app.route('/api/app/<int:app_id>/files/write', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_write(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    relpath = data.get('path', '')
+    content = data.get('content', '')
+    if not relpath:
+        return jsonify({'error': 'path required'}), 400
+    if not isinstance(content, str):
+        return jsonify({'error': 'content must be a string'}), 400
+    if len(content.encode('utf-8')) > MAX_EDIT_FILE_BYTES:
+        return jsonify({'error': 'Content exceeds editor limit'}), 413
+    try:
+        base, target = _fm_resolve(a, relpath, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if target == base:
+        return jsonify({'error': 'Invalid path'}), 400
+    if target.exists() and target.is_dir():
+        return jsonify({'error': 'Path is a directory'}), 400
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding='utf-8')
+    return jsonify({'status': 'ok', 'path': _fm_rel(target, base), 'size': target.stat().st_size})
+
+
+@app.route('/api/app/<int:app_id>/files/download')
+@login_required
+def api_app_files_download(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    try:
+        _, target = _fm_resolve(a, request.args.get('path', ''))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'File not found'}), 404
+    if not target.is_file():
+        return jsonify({'error': 'Not a file'}), 400
+    return send_file(str(target), as_attachment=True, download_name=target.name)
+
+
+@app.route('/api/app/<int:app_id>/files/upload', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_upload(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    relpath = request.form.get('path', '')
+    unzip = request.form.get('unzip') in ('1', 'true', 'yes')
+    try:
+        base, target_dir = _fm_resolve(a, relpath, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if not target_dir.is_dir():
+        return jsonify({'error': 'Target is not a directory'}), 400
+
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'No files uploaded'}), 400
+
+    written = []
+    for f in files:
+        if not f.filename:
+            continue
+        safe_name = Path(f.filename.replace('\\', '/')).name
+        if not safe_name or safe_name in ('.', '..'):
+            return jsonify({'error': f'Invalid filename: {f.filename}'}), 400
+        dest = (target_dir / safe_name).resolve()
+        try:
+            dest.relative_to(base)
+        except ValueError:
+            return jsonify({'error': f'Invalid filename: {f.filename}'}), 400
+        f.save(str(dest))
+        if unzip and safe_name.lower().endswith('.zip'):
+            try:
+                _fm_safe_extract_zip(dest, target_dir, base)
+            except (ValueError, zipfile.BadZipFile) as exc:
+                dest.unlink(missing_ok=True)
+                return jsonify({'error': f'Failed to unzip {safe_name}: {exc}'}), 400
+            dest.unlink(missing_ok=True)
+            written.append({'name': safe_name, 'unzipped': True})
+            continue
+        written.append({'name': safe_name, 'unzipped': False})
+
+    return jsonify({'status': 'ok', 'files': written})
+
+
+@app.route('/api/app/<int:app_id>/files/mkdir', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_mkdir(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    relpath = data.get('path', '')
+    if not relpath:
+        return jsonify({'error': 'path required'}), 400
+    try:
+        base, target = _fm_resolve(a, relpath, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if target == base:
+        return jsonify({'error': 'Invalid path'}), 400
+    if target.exists():
+        return jsonify({'error': 'Already exists'}), 409
+    target.mkdir(parents=True)
+    return jsonify({'status': 'ok', 'path': _fm_rel(target, base)})
+
+
+@app.route('/api/app/<int:app_id>/files/rename', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_rename(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    src = data.get('from', '')
+    dst = data.get('to', '')
+    if not src or not dst:
+        return jsonify({'error': 'from and to required'}), 400
+    try:
+        base, src_p = _fm_resolve(a, src)
+        _, dst_p = _fm_resolve(a, dst, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'Source not found'}), 404
+    if src_p == base or dst_p == base:
+        return jsonify({'error': 'Invalid path'}), 400
+    if dst_p.exists():
+        return jsonify({'error': 'Destination exists'}), 409
+    dst_p.parent.mkdir(parents=True, exist_ok=True)
+    src_p.rename(dst_p)
+    return jsonify({'status': 'ok', 'path': _fm_rel(dst_p, base)})
+
+
+@app.route('/api/app/<int:app_id>/files/delete', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_delete(app_id):
+    a, err = _fm_owned_app(app_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    relpath = data.get('path', '')
+    if not relpath:
+        return jsonify({'error': 'path required'}), 400
+    try:
+        base, target = _fm_resolve(a, relpath)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'Not found'}), 404
+    if target == base:
+        return jsonify({'error': 'Cannot delete root'}), 400
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    return jsonify({'status': 'ok'})
 
 
 # ═══════════════════════════════════════════

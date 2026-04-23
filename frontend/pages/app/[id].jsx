@@ -6,6 +6,7 @@ import { apiClient } from '@/lib/api'
 import { useApp, useProject } from '@/lib/hooks/useAuth'
 import AppRuntime from '@/components/AppRuntime'
 import AppSettings from '@/components/AppSettings'
+import AppFileManager from '@/components/AppFileManager'
 import DeploymentLogs from '@/components/DeploymentLogs'
 
 const STATUS_CLASS = {
@@ -26,7 +27,7 @@ export default function AppDetail() {
   const [deployError, setDeployError] = useState('')
 
   useEffect(() => {
-    if (tab && ['overview', 'deployments', 'settings'].includes(tab)) {
+    if (tab && ['overview', 'deployments', 'files', 'settings'].includes(tab)) {
       setActiveTab(tab)
     }
   }, [tab])
@@ -102,7 +103,7 @@ export default function AppDetail() {
       </div>
 
       <div className="flex gap-4 mb-8 border-b border-gray-700">
-        {['overview', 'deployments', 'settings'].map((t) => (
+        {['overview', 'deployments', 'files', 'settings'].map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
@@ -135,6 +136,10 @@ export default function AppDetail() {
 
       {activeTab === 'deployments' && (
         <DeploymentLogs appId={app.id} />
+      )}
+
+      {activeTab === 'files' && (
+        <AppFileManager appId={app.id} />
       )}
 
       {activeTab === 'settings' && (
