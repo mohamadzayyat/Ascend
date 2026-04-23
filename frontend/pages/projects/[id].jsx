@@ -147,8 +147,10 @@ export default function ProjectDetail() {
         <DeploymentLogs projectId={project.id} />
       )}
 
-      {activeTab === 'files' && fileApi && (
-        <AppFileManager api={fileApi} />
+      {fileApi && (
+        <div className={activeTab === 'files' ? 'block' : 'hidden'}>
+          <AppFileManager api={fileApi} scopeKey={`project:${project.id}`} />
+        </div>
       )}
 
       {activeTab === 'settings' && (

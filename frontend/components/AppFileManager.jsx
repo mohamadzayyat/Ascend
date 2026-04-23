@@ -211,7 +211,7 @@ function makeEditorTab(path) {
   }
 }
 
-export default function AppFileManager({ api }) {
+export default function AppFileManager({ api, scopeKey = 'default' }) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState([])
   const [basePath, setBasePath] = useState('')
@@ -236,6 +236,34 @@ export default function AppFileManager({ api }) {
   const [status, setStatus] = useState('')
   const uploadRef = useRef(null)
   const zipRef = useRef(null)
+  const editorStorageKey = `ascend:file-editor:${scopeKey}`
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const raw = window.localStorage.getItem(editorStorageKey)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed.editorTabs)) setEditorTabs(parsed.editorTabs)
+      if (parsed.activeEditorPath) setActiveEditorPath(parsed.activeEditorPath)
+      if (typeof parsed.editorMinimized === 'boolean') setEditorMinimized(parsed.editorMinimized)
+    } catch {
+      // Ignore bad persisted state and start fresh.
+    }
+  }, [editorStorageKey])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(editorStorageKey, JSON.stringify({
+        editorTabs,
+        activeEditorPath,
+        editorMinimized,
+      }))
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [editorStorageKey, editorTabs, activeEditorPath, editorMinimized])
 
   const load = useCallback(async () => {
     if (!api) return

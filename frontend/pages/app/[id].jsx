@@ -150,8 +150,10 @@ export default function AppDetail() {
         <DeploymentLogs appId={app.id} />
       )}
 
-      {activeTab === 'files' && fileApi && (
-        <AppFileManager api={fileApi} />
+      {fileApi && (
+        <div className={activeTab === 'files' ? 'block' : 'hidden'}>
+          <AppFileManager api={fileApi} scopeKey={`app:${app.id}`} />
+        </div>
       )}
 
       {activeTab === 'settings' && (
