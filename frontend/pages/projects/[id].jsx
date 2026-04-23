@@ -119,7 +119,7 @@ export default function ProjectDetail() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {apps.map((a) => (
-                <AppCard key={a.id} app={a} onDeployStarted={() => mutate()} />
+                <AppCard key={a.id} app={a} />
               ))}
             </div>
           )}

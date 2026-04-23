@@ -1,7 +1,6 @@
 import Link from 'next/link'
-import { Play, Settings } from 'lucide-react'
-import { useState } from 'react'
-import { apiClient } from '@/lib/api'
+import { useRouter } from 'next/router'
+import { Settings } from 'lucide-react'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
 import { relativeLocalTime } from '@/lib/time'
 
@@ -12,42 +11,40 @@ const STATUS_CLASS = {
   created: 'bg-blue-500/10 text-blue-400',
 }
 
-export default function AppCard({ app, onDeployStarted }) {
-  const [deploying, setDeploying] = useState(false)
-  const [error, setError] = useState('')
+export default function AppCard({ app }) {
+  const router = useRouter()
   const { runtime } = useAppRuntime(app.id)
-
-  const handleDeploy = async () => {
-    setDeploying(true)
-    setError('')
-    try {
-      const res = await apiClient.deployApp(app.id)
-      if (onDeployStarted) onDeployStarted(res.data.id, app.id)
-    } catch (err) {
-      setError(err.response?.data?.error || 'Failed to start deployment')
-    } finally {
-      setDeploying(false)
-    }
-  }
-
   const statusClass = STATUS_CLASS[app.status] || 'bg-gray-500/10 text-gray-400'
   const pm2 = runtime?.pm2
 
+  const openApp = () => router.push(`/app/${app.id}`)
+  const onKey = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      openApp()
+    }
+  }
+
   return (
-    <div className="bg-secondary rounded-lg border border-gray-700 p-5 hover:border-accent transition">
+    <div
+      role="link"
+      tabIndex={0}
+      onClick={openApp}
+      onKeyDown={onKey}
+      className="bg-secondary rounded-lg border border-gray-700 p-5 hover:border-accent transition cursor-pointer"
+    >
       <div className="flex items-start justify-between mb-4">
         <div className="flex-1 min-w-0">
-          <Link href={`/app/${app.id}`}>
-            <h3 className="text-base font-bold text-white hover:text-accent transition cursor-pointer">
-              {app.name}
-            </h3>
-          </Link>
+          <h3 className="text-base font-bold text-white hover:text-accent transition">
+            {app.name}
+          </h3>
           <p className="text-xs text-gray-500 capitalize mt-0.5">
             {app.app_type}{app.subdirectory ? ` · ${app.subdirectory}` : ''}
           </p>
         </div>
         <Link
           href={`/app/${app.id}?tab=settings`}
+          onClick={(e) => e.stopPropagation()}
           className="p-2 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-primary transition"
           title="App settings"
         >
@@ -78,24 +75,13 @@ export default function AppCard({ app, onDeployStarted }) {
       </div>
 
       {app.domain && (
-        <p className="text-xs text-gray-400 mb-3 truncate">{app.domain}</p>
+        <p className="text-xs text-gray-400 mb-1 truncate">{app.domain}</p>
       )}
       {app.last_deployment && (
-        <p className="text-xs text-gray-500 mb-3">
+        <p className="text-xs text-gray-500">
           Last deployed {relativeLocalTime(app.last_deployment)}
         </p>
       )}
-
-      {error && <p className="text-xs text-red-400 mb-2">{error}</p>}
-
-      <button
-        onClick={handleDeploy}
-        disabled={deploying || app.status === 'deploying'}
-        className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-accent hover:bg-blue-600 text-white text-sm font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        <Play className="w-4 h-4" />
-        {app.status === 'deploying' ? 'Deploying…' : deploying ? 'Starting…' : 'Deploy'}
-      </button>
     </div>
   )
 }

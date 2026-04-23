@@ -73,10 +73,22 @@ export function useSetupStatus() {
   }
 }
 
+// Auto-refresh while any app is in flight so the UI updates the second a
+// background deploy flips status from 'deploying' to 'deployed'/'error',
+// then stops polling once everything has settled.
+const hasDeployingApp = (project) =>
+  Array.isArray(project?.apps) && project.apps.some((a) => a.status === 'deploying')
+const anyProjectDeploying = (projects) =>
+  Array.isArray(projects) && projects.some(hasDeployingApp)
+
 export function useProjects() {
   const { data: projects, error, mutate } = useSWR(
     `${API_URL}/api/projects`,
-    fetchWithCreds
+    fetchWithCreds,
+    {
+      refreshInterval: (data) => (anyProjectDeploying(data) ? 3000 : 0),
+      dedupingInterval: 1000,
+    }
   )
 
   return {
@@ -90,7 +102,11 @@ export function useProjects() {
 export function useProject(id) {
   const { data: project, error, mutate } = useSWR(
     id ? `${API_URL}/api/project/${id}` : null,
-    fetchWithCreds
+    fetchWithCreds,
+    {
+      refreshInterval: (data) => (hasDeployingApp(data) ? 3000 : 0),
+      dedupingInterval: 1000,
+    }
   )
 
   return {
@@ -130,7 +146,11 @@ export function useDeployment(id) {
 export function useApp(appId) {
   const { data, error, mutate } = useSWR(
     appId ? `${API_URL}/api/app/${appId}` : null,
-    fetchWithCreds
+    fetchWithCreds,
+    {
+      refreshInterval: (a) => (a?.status === 'deploying' ? 3000 : 0),
+      dedupingInterval: 1000,
+    }
   )
   return { app: data, isLoading: !data && !error, isError: !!error, mutate }
 }
