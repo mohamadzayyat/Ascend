@@ -950,6 +950,40 @@ def api_app_deployments(app_id):
     return jsonify([d.to_dict() for d in deployments])
 
 
+@app.route('/api/app/<int:app_id>/ssl/retry', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_retry_app_ssl(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if not a.domain:
+        return jsonify({'error': 'Set a domain before retrying SSL'}), 400
+    if not a.app_port:
+        return jsonify({'error': 'Set an app port before retrying SSL'}), 400
+    if not a.enable_ssl:
+        return jsonify({'error': 'Enable SSL in app settings before retrying'}), 400
+
+    active = Deployment.query.filter_by(app_id=a.id, triggered_by='ssl-retry').filter(
+        Deployment.status.in_(['pending', 'running'])
+    ).first()
+    if active:
+        return jsonify({'error': 'An SSL retry is already running for this app', 'id': active.id}), 409
+
+    dep = Deployment(
+        project_id=a.project_id,
+        app_id=a.id,
+        status='pending',
+        branch=a.project.github_branch,
+        triggered_by='ssl-retry',
+    )
+    db.session.add(dep)
+    db.session.commit()
+
+    threading.Thread(target=retry_app_ssl_bg, args=(dep.id,), daemon=True).start()
+    return jsonify({'id': dep.id, 'status': 'pending'})
+
+
 # ═══════════════════════════════════════════
 # Legacy deploy-all endpoint — deploys every app in the project
 # ═══════════════════════════════════════════
@@ -1382,6 +1416,74 @@ def deploy_app_bg(deployment_id, github_username, github_token):
             try:
                 with open(log_file, 'a', encoding='utf-8') as log:
                     log.write(f"\n!!! Deployment Failed: {e} !!!\n")
+            except Exception:
+                pass
+
+        finally:
+            deployment.completed_at = datetime.now(timezone.utc)
+            deployment.duration_seconds = int(time.time() - start_time)
+            db.session.commit()
+
+
+def retry_app_ssl_bg(deployment_id):
+    """Background task: retry only Nginx/SSL for an existing App."""
+    with app.app_context():
+        deployment = db.session.get(Deployment, deployment_id)
+        if not deployment:
+            return
+
+        app_row = deployment.app
+        project = deployment.project
+        if not app_row:
+            deployment.status = 'failed'
+            deployment.error_message = 'SSL retry has no associated app'
+            db.session.commit()
+            return
+
+        log_file = LOG_DIR / f"ssl_retry_{deployment_id}_{int(time.time())}.log"
+        deployment.log_file = str(log_file)
+        deployment.status = 'running'
+        db.session.commit()
+
+        start_time = time.time()
+
+        try:
+            with open(log_file, 'w', encoding='utf-8') as log:
+                log.write(f"=== SSL Retry Started: {datetime.now(timezone.utc).isoformat()} ===\n")
+                log.write(f"Project: {project.name}\n")
+                log.write(f"App: {app_row.name} ({app_row.app_type})\n")
+                log.write(f"Domain: {app_row.domain or '-'}\n")
+                log.write(f"Port: {app_row.app_port or '-'}\n\n")
+
+                if not app_row.domain:
+                    raise RuntimeError('App has no domain configured')
+                if not app_row.app_port:
+                    raise RuntimeError('App has no app port configured')
+                if not app_row.enable_ssl:
+                    raise RuntimeError('SSL is disabled for this app. Enable SSL in app settings first.')
+
+                dns = _check_domain_points_to_server(app_row.domain)
+                if not dns.get('ok'):
+                    log.write(f"DNS check failed: {dns.get('error')}\n")
+                    raise RuntimeError(dns.get('error') or 'Domain DNS does not point to this server')
+                log.write(
+                    "DNS check passed: "
+                    f"{', '.join(dns.get('domain_ips') or [])} -> "
+                    f"{', '.join(dns.get('server_ips') or [])}\n\n"
+                )
+
+                if not setup_nginx_config(app_row, log):
+                    raise RuntimeError('SSL retry failed - see log above')
+
+                log.write("\n=== SSL Retry Completed Successfully ===\n")
+                deployment.status = 'success'
+
+        except Exception as e:
+            deployment.status = 'failed'
+            deployment.error_message = str(e)
+            try:
+                with open(log_file, 'a', encoding='utf-8') as log:
+                    log.write(f"\n!!! SSL Retry Failed: {e} !!!\n")
             except Exception:
                 pass
 

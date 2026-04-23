@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { Copy, Check } from 'lucide-react'
+import Link from 'next/link'
+import { Copy, Check, RefreshCw } from 'lucide-react'
+import { apiClient } from '@/lib/api'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
 
 function formatUptime(ms) {
@@ -17,6 +19,9 @@ function formatUptime(ms) {
 export default function AppRuntime({ appId }) {
   const { runtime, isLoading } = useAppRuntime(appId)
   const [copied, setCopied] = useState(false)
+  const [sslLoading, setSslLoading] = useState(false)
+  const [sslResult, setSslResult] = useState(null)
+  const [sslError, setSslError] = useState('')
 
   if (isLoading && !runtime) {
     return (
@@ -39,6 +44,20 @@ export default function AppRuntime({ appId }) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch (_) {}
+  }
+
+  const retrySsl = async () => {
+    setSslLoading(true)
+    setSslError('')
+    setSslResult(null)
+    try {
+      const res = await apiClient.retryAppSsl(appId)
+      setSslResult(res.data)
+    } catch (err) {
+      setSslError(err.response?.data?.error || err.message || 'Failed to start SSL retry')
+    } finally {
+      setSslLoading(false)
+    }
   }
 
   return (
@@ -105,6 +124,35 @@ export default function AppRuntime({ appId }) {
           </div>
         )}
       </div>
+
+      {domain && (
+        <div className="pt-4 border-t border-gray-700 mb-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-gray-400 text-sm">SSL</p>
+              <p className="text-gray-500 text-xs">Retry certificate issuance without rebuilding the app.</p>
+            </div>
+            <button
+              type="button"
+              onClick={retrySsl}
+              disabled={sslLoading}
+              className="inline-flex items-center gap-2 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${sslLoading ? 'animate-spin' : ''}`} />
+              {sslLoading ? 'Starting...' : 'Retry SSL'}
+            </button>
+          </div>
+          {sslError && <p className="text-red-400 text-xs mt-2">{sslError}</p>}
+          {sslResult?.id && (
+            <p className="text-green-400 text-xs mt-2">
+              SSL retry started as deployment #{sslResult.id}.{' '}
+              <Link href={`/app/${appId}?tab=deployments`} className="underline">
+                View logs
+              </Link>
+            </p>
+          )}
+        </div>
+      )}
 
       {webhookUrl && (
         <div className="pt-4 border-t border-gray-700">

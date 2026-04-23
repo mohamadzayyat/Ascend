@@ -37,6 +37,7 @@ export const apiClient = {
   updateApp: (id, data) => api.put(`/api/app/${id}`, data),
   deleteApp: (id) => api.delete(`/api/app/${id}`),
   deployApp: (id) => api.post(`/api/app/${id}/deploy`),
+  retryAppSsl: (id) => api.post(`/api/app/${id}/ssl/retry`),
   getAppDeployments: (id) => api.get(`/api/app/${id}/deployments`),
 
   // Deployments
