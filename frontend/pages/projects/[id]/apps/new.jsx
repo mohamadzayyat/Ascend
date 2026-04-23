@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useProject } from '@/lib/hooks/useAuth'
+import DomainDnsCheck from '@/components/DomainDnsCheck'
 
 export default function NewApp() {
   const router = useRouter()
@@ -26,6 +27,7 @@ export default function NewApp() {
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [dnsStatus, setDnsStatus] = useState('idle')
 
   const onChange = (e) => {
     const { name, value, type, checked } = e.target
@@ -136,6 +138,11 @@ export default function NewApp() {
           <h2 className="text-lg font-bold text-white mb-4">Domain & Port</h2>
           <div className="space-y-4">
             {input('Domain', 'domain', 'text', 'api.example.com')}
+            <DomainDnsCheck
+              domain={formData.domain}
+              enabled={formData.enable_ssl}
+              onStatus={(status) => setDnsStatus(status)}
+            />
             {input('App Port', 'app_port', 'number', '3000', 'The port this app listens on. Ascend will refuse if it\'s already taken.')}
             {input('Client Max Body', 'client_max_body', 'text', '100M')}
             {check('Enable SSL with Certbot', 'enable_ssl')}
@@ -157,7 +164,7 @@ export default function NewApp() {
         <div className="flex gap-3">
           <button
             type="submit"
-            disabled={loading || !formData.name}
+            disabled={loading || !formData.name || dnsStatus === 'checking' || dnsStatus === 'error'}
             className="px-6 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Creating…' : 'Create App'}

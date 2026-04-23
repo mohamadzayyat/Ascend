@@ -54,6 +54,7 @@ export const apiClient = {
   getPm2Processes: () => api.get('/api/system/pm2'),
   getListeningPorts: () => api.get('/api/system/ports'),
   getNginxSites: () => api.get('/api/system/nginx'),
+  checkDomainDns: (domain) => api.get('/api/system/dns-check', { params: { domain } }),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
 }
 

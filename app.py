@@ -15,6 +15,8 @@ import hashlib
 import subprocess
 import threading
 import secrets
+import socket
+import ipaddress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -631,6 +633,125 @@ def _check_port_conflict(port, exclude_app_id=None):
     return None
 
 
+def _normalize_domain(domain):
+    domain = (domain or '').strip().lower()
+    domain = re.sub(r'^https?://', '', domain)
+    domain = domain.split('/')[0].split(':')[0].strip().strip('.')
+    return domain or None
+
+
+def _is_public_ip(value):
+    try:
+        ip = ipaddress.ip_address(value)
+        return ip.is_global
+    except ValueError:
+        return False
+
+
+def _load_server_public_ips():
+    configured = (
+        os.environ.get('ASCEND_PUBLIC_IPS')
+        or os.environ.get('PANEL_PUBLIC_IPS')
+        or os.environ.get('PANEL_PUBLIC_IP')
+        or ''
+    )
+    ips = {
+        item.strip()
+        for item in configured.replace(';', ',').split(',')
+        if item.strip()
+    }
+
+    for cmd in (['hostname', '-I'], ['ip', '-o', 'addr', 'show', 'scope', 'global']):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                for token in re.findall(r'(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])|[0-9a-fA-F:]{3,}', result.stdout):
+                    token = token.split('/')[0]
+                    if _is_public_ip(token):
+                        ips.add(token)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Last resort for NAT/cloud hosts. Cached by _cached(), so this will not run often.
+    if not ips:
+        for url in ('https://api.ipify.org', 'https://api64.ipify.org'):
+            try:
+                with _urlreq.urlopen(url, timeout=3) as resp:
+                    ip = resp.read().decode('utf-8', errors='replace').strip()
+                    if _is_public_ip(ip):
+                        ips.add(ip)
+            except Exception:
+                pass
+
+    return sorted(ips)
+
+
+def _resolve_domain_ips(domain):
+    domain = _normalize_domain(domain)
+    if not domain:
+        return []
+    resolved = set()
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            for item in socket.getaddrinfo(domain, None, family, socket.SOCK_STREAM):
+                resolved.add(item[4][0])
+        except socket.gaierror:
+            pass
+    return sorted(resolved)
+
+
+def _check_domain_points_to_server(domain):
+    domain = _normalize_domain(domain)
+    if not domain:
+        return {'ok': True, 'domain': None, 'domain_ips': [], 'server_ips': []}
+
+    domain_ips = _resolve_domain_ips(domain)
+    server_ips = _cached('server_public_ips', 60, _load_server_public_ips)
+    matches = sorted(set(domain_ips) & set(server_ips))
+
+    if not domain_ips:
+        return {
+            'ok': False,
+            'domain': domain,
+            'domain_ips': [],
+            'server_ips': server_ips,
+            'error': f'{domain} does not resolve to any A/AAAA record yet.',
+        }
+    if not server_ips:
+        return {
+            'ok': False,
+            'domain': domain,
+            'domain_ips': domain_ips,
+            'server_ips': [],
+            'error': 'Could not determine this server public IP. Set ASCEND_PUBLIC_IPS in .env.',
+        }
+    if not matches:
+        return {
+            'ok': False,
+            'domain': domain,
+            'domain_ips': domain_ips,
+            'server_ips': server_ips,
+            'error': (
+                f'{domain} resolves to {", ".join(domain_ips)}, but this server is '
+                f'{", ".join(server_ips)}. Point the domain DNS to this server before enabling SSL.'
+            ),
+        }
+    return {
+        'ok': True,
+        'domain': domain,
+        'domain_ips': domain_ips,
+        'server_ips': server_ips,
+        'matches': matches,
+    }
+
+
+def _domain_validation_response(domain):
+    check = _check_domain_points_to_server(domain)
+    if check.get('ok'):
+        return None
+    return jsonify({'error': check['error'], 'dns': check}), 409
+
+
 def _app_fields_from_dict(data, allow_all=True):
     """Extract App fields from request JSON, validated/cleaned."""
     out = {}
@@ -639,7 +760,8 @@ def _app_fields_from_dict(data, allow_all=True):
                   'env_content', 'domain', 'client_max_body']:
         if field in data:
             val = data[field]
-            out[field] = (val.strip() if isinstance(val, str) else val) or None
+            val = (val.strip() if isinstance(val, str) else val) or None
+            out[field] = _normalize_domain(val) if field == 'domain' else val
     if 'enable_ssl' in data:
         out['enable_ssl'] = bool(data['enable_ssl'])
     if 'app_port' in data and allow_all:
@@ -675,6 +797,10 @@ def api_create_app(project_id):
         conflict = _check_port_conflict(port)
         if conflict:
             return jsonify({'error': conflict}), 409
+    if fields.get('domain') and fields.get('enable_ssl', True):
+        dns_error = _domain_validation_response(fields['domain'])
+        if dns_error:
+            return dns_error
 
     new_app = App(project_id=project.id, name=name)
     for k, v in fields.items():
@@ -711,6 +837,12 @@ def api_update_app(app_id):
         conflict = _check_port_conflict(fields['app_port'], exclude_app_id=a.id)
         if conflict:
             return jsonify({'error': conflict}), 409
+    next_domain = fields['domain'] if 'domain' in fields else a.domain
+    next_enable_ssl = fields['enable_ssl'] if 'enable_ssl' in fields else a.enable_ssl
+    if next_domain and next_enable_ssl:
+        dns_error = _domain_validation_response(next_domain)
+        if dns_error:
+            return dns_error
 
     for k, v in fields.items():
         setattr(a, k, v)
@@ -1196,6 +1328,11 @@ def deploy_app_bg(deployment_id, github_username, github_token):
 
                 if app_row.domain:
                     log.write("\nStep 6: Configuring Nginx...\n")
+                    if app_row.enable_ssl:
+                        dns = _check_domain_points_to_server(app_row.domain)
+                        if not dns.get('ok'):
+                            log.write(f"  DNS check failed: {dns.get('error')}\n")
+                            raise RuntimeError(dns.get('error') or 'Domain DNS does not point to this server')
                     if not setup_nginx_config(app_row, log):
                         raise RuntimeError("Nginx configuration failed — see log above")
 
@@ -1323,7 +1460,6 @@ def setup_nginx_config(app_row, log_file):
             cert = subprocess.run([
                 'certbot', '--nginx',
                 '-d', app_row.domain,
-                '-d', f'www.{app_row.domain}',
                 '--non-interactive', '--agree-tos',
                 '-m', f'admin@{app_row.domain}',
             ], capture_output=True)
@@ -1504,6 +1640,13 @@ def api_system_nginx():
     return jsonify({
         'sites': _cached('nginx', _SYSTEM_TTL, _load_nginx_sites),
     })
+
+
+@app.route('/api/system/dns-check')
+@login_required
+def api_system_dns_check():
+    domain = request.args.get('domain', '')
+    return jsonify(_check_domain_points_to_server(domain))
 
 
 @app.route('/api/app/<int:app_id>/runtime')

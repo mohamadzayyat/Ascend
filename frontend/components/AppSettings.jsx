@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/router'
 import { apiClient } from '@/lib/api'
+import DomainDnsCheck from '@/components/DomainDnsCheck'
 
 export default function AppSettings({ app, onUpdate }) {
   const router = useRouter()
@@ -8,6 +9,7 @@ export default function AppSettings({ app, onUpdate }) {
   const [deleting, setDeleting] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  const [dnsStatus, setDnsStatus] = useState('idle')
 
   const [formData, setFormData] = useState({
     name: app?.name || '',
@@ -139,6 +141,11 @@ export default function AppSettings({ app, onUpdate }) {
         <h3 className="text-lg font-bold text-white mb-4">Domain & Port</h3>
         <div className="space-y-4">
           {input('Domain', 'domain', 'text', 'example.com')}
+          <DomainDnsCheck
+            domain={formData.domain}
+            enabled={formData.enable_ssl}
+            onStatus={(status) => setDnsStatus(status)}
+          />
           {input('App Port', 'app_port', 'number', '3000', 'Port this app listens on. We check it isn\'t already taken before saving.')}
           {input('Client Max Body Size', 'client_max_body', 'text', '100M')}
           {check('Enable SSL with Certbot', 'enable_ssl')}
@@ -163,7 +170,7 @@ export default function AppSettings({ app, onUpdate }) {
       <div className="flex items-center justify-between">
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || dnsStatus === 'checking' || dnsStatus === 'error'}
           className="px-6 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {loading ? 'Saving…' : 'Save Changes'}
