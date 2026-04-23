@@ -395,33 +395,51 @@ def api_setup_status():
 @app.route('/api/auth/setup', methods=['POST'])
 @csrf.exempt
 def api_setup():
-    with _setup_lock:
-        if User.query.first():
-            return jsonify({'error': 'Setup already complete. Please log in.'}), 409
+    lock_file = None
+    try:
+        import fcntl
 
-        data = request.get_json(silent=True) or {}
-        username = data.get('username', '').strip()
-        password = data.get('password', '')
-        email = data.get('email', '').strip()
+        lock_file = open('/tmp/ascend-setup.lock', 'w')
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+    except Exception:
+        lock_file = None
 
-        if not username or len(username) < 3:
-            return jsonify({'error': 'Username must be at least 3 characters'}), 400
-        if not password or len(password) < 6:
-            return jsonify({'error': 'Password must be at least 6 characters'}), 400
-        if User.query.filter_by(username=username).first():
-            return jsonify({'error': 'Username already exists'}), 400
+    try:
+        with _setup_lock:
+            if User.query.first():
+                return jsonify({'error': 'Setup already complete. Please log in.'}), 409
 
-        user = User(username=username, email=email or None, is_admin=True)
-        user.set_password(password)
-        db.session.add(user)
-        db.session.commit()
-        login_user(user)
-        return jsonify({
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'is_admin': user.is_admin,
-        }), 201
+            data = request.get_json(silent=True) or {}
+            username = data.get('username', '').strip()
+            password = data.get('password', '')
+            email = data.get('email', '').strip()
+
+            if not username or len(username) < 3:
+                return jsonify({'error': 'Username must be at least 3 characters'}), 400
+            if not password or len(password) < 6:
+                return jsonify({'error': 'Password must be at least 6 characters'}), 400
+            if User.query.filter_by(username=username).first():
+                return jsonify({'error': 'Username already exists'}), 400
+
+            user = User(username=username, email=email or None, is_admin=True)
+            user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+            login_user(user)
+            return jsonify({
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'is_admin': user.is_admin,
+            }), 201
+    finally:
+        if lock_file:
+            try:
+                import fcntl
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════
@@ -1787,6 +1805,153 @@ def _verify_http_challenge_route(domain, log_file):
             pass
 
 
+def _find_valid_certificate(domain, min_days=7):
+    live_dir = '/etc/letsencrypt/live'
+    if not domain or not os.path.isdir(live_dir):
+        return None
+
+    now = datetime.now(timezone.utc)
+    for name in sorted(os.listdir(live_dir)):
+        cert_dir = os.path.join(live_dir, name)
+        cert_path = os.path.join(cert_dir, 'cert.pem')
+        fullchain_path = os.path.join(cert_dir, 'fullchain.pem')
+        privkey_path = os.path.join(cert_dir, 'privkey.pem')
+        if not os.path.exists(cert_path) or not os.path.exists(fullchain_path) or not os.path.exists(privkey_path):
+            continue
+
+        try:
+            result = subprocess.run(
+                ['openssl', 'x509', '-in', cert_path, '-noout', '-dates', '-subject', '-ext', 'subjectAltName'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        if result.returncode != 0:
+            continue
+
+        not_after = None
+        names = []
+        subject = ''
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith('notAfter='):
+                not_after = _parse_openssl_date(line)
+            elif line.startswith('subject='):
+                subject = line.split('=', 1)[1].strip()
+            elif 'DNS:' in line:
+                names.extend([d.strip().lower() for d in re.findall(r'DNS:([^,\s]+)', line)])
+        if not names:
+            cn_match = re.search(r'CN\s*=\s*([^,]+)', subject)
+            if cn_match:
+                names.append(cn_match.group(1).strip().lower())
+
+        if domain.lower() not in names or not_after is None:
+            continue
+        days_remaining = int((not_after - now).total_seconds() // 86400)
+        if days_remaining >= min_days:
+            return {
+                'name': name,
+                'cert_path': cert_path,
+                'fullchain_path': fullchain_path,
+                'privkey_path': privkey_path,
+                'expires_at': not_after,
+                'days_remaining': days_remaining,
+            }
+    return None
+
+
+def _build_nginx_config(app_row, cert_info=None):
+    common_proxy = (
+        f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
+        f"        proxy_set_header Host $host;\n"
+        f"        proxy_set_header X-Real-IP $remote_addr;\n"
+        f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
+    )
+    challenge = (
+        f"    location ^~ /.well-known/acme-challenge/ {{\n"
+        f"        root {ACME_WEBROOT};\n"
+        f"        default_type text/plain;\n"
+        f"        try_files $uri =404;\n"
+        f"    }}\n"
+    )
+
+    if cert_info:
+        ssl_options = ''
+        if os.path.exists('/etc/letsencrypt/options-ssl-nginx.conf'):
+            ssl_options += "    include /etc/letsencrypt/options-ssl-nginx.conf;\n"
+        if os.path.exists('/etc/letsencrypt/ssl-dhparams.pem'):
+            ssl_options += "    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;\n"
+        return (
+            f"server {{\n"
+            f"    listen 80;\n"
+            f"    server_name {app_row.domain};\n"
+            f"{challenge}"
+            f"    location / {{ return 301 https://$host$request_uri; }}\n"
+            f"}}\n\n"
+            f"server {{\n"
+            f"    listen 443 ssl;\n"
+            f"    server_name {app_row.domain};\n"
+            f"    client_max_body_size {app_row.client_max_body};\n"
+            f"    ssl_certificate {cert_info['fullchain_path']};\n"
+            f"    ssl_certificate_key {cert_info['privkey_path']};\n"
+            f"{ssl_options}"
+            f"\n"
+            f"{challenge}"
+            f"\n"
+            f"    location / {{\n"
+            f"{common_proxy}"
+            f"    }}\n"
+            f"}}\n"
+        )
+
+    return (
+        f"server {{\n"
+        f"    listen 80;\n"
+        f"    server_name {app_row.domain};\n"
+        f"    client_max_body_size {app_row.client_max_body};\n"
+        f"\n"
+        f"{challenge}"
+        f"\n"
+        f"    location / {{\n"
+        f"{common_proxy}"
+        f"    }}\n"
+        f"}}\n"
+    )
+
+
+def _run_certbot_nginx(domain, log_file):
+    lock_path = '/tmp/ascend-certbot.lock'
+    lock_file = None
+    try:
+        import fcntl
+
+        lock_file = open(lock_path, 'w')
+        log_file.write("  Waiting for certbot lock...\n")
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+    except Exception as e:
+        log_file.write(f"  Warning: could not acquire certbot lock ({e}); continuing.\n")
+
+    try:
+        cert = subprocess.run([
+            'certbot', '--nginx',
+            '-d', domain,
+            '--non-interactive', '--agree-tos',
+            '-m', f'admin@{domain}',
+        ], capture_output=True)
+    finally:
+        if lock_file:
+            try:
+                import fcntl
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
+    return cert
+
+
 def setup_nginx_config(app_row, log_file):
     """Write an Nginx virtual host and optionally obtain an SSL cert.
 
@@ -1795,28 +1960,14 @@ def setup_nginx_config(app_row, log_file):
     domains don't silently 502 after a bad config lands.
     """
     log_file.write(f"  Domain: {app_row.domain}\n")
+    existing_cert = _find_valid_certificate(app_row.domain) if app_row.enable_ssl else None
+    if existing_cert:
+        log_file.write(
+            f"  Existing valid certificate found: {existing_cert['name']} "
+            f"({existing_cert['days_remaining']}d remaining). Reusing it.\n"
+        )
 
-    nginx_config = (
-        f"server {{\n"
-        f"    listen 80;\n"
-        f"    server_name {app_row.domain} www.{app_row.domain};\n"
-        f"    client_max_body_size {app_row.client_max_body};\n"
-        f"\n"
-        f"    location ^~ /.well-known/acme-challenge/ {{\n"
-        f"        root {ACME_WEBROOT};\n"
-        f"        default_type text/plain;\n"
-        f"        try_files $uri =404;\n"
-        f"    }}\n"
-        f"\n"
-        f"    location / {{\n"
-        f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
-        f"        proxy_set_header Host $host;\n"
-        f"        proxy_set_header X-Real-IP $remote_addr;\n"
-        f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-        f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
-        f"    }}\n"
-        f"}}\n"
-    )
+    nginx_config = _build_nginx_config(app_row, existing_cert)
 
     config_path = f"/etc/nginx/sites-available/{app_row.domain}"
     enabled_path = f"/etc/nginx/sites-enabled/{app_row.domain}"
@@ -1856,7 +2007,7 @@ def setup_nginx_config(app_row, log_file):
             return False
         log_file.write("  Nginx reloaded\n")
 
-        if app_row.enable_ssl:
+        if app_row.enable_ssl and not existing_cert:
             if not _verify_http_challenge_route(app_row.domain, log_file):
                 log_file.write(
                     "  SSL preflight failed: Let's Encrypt will not be able to reach "
@@ -1865,12 +2016,7 @@ def setup_nginx_config(app_row, log_file):
                 return False
 
             log_file.write("  Obtaining SSL certificate...\n")
-            cert = subprocess.run([
-                'certbot', '--nginx',
-                '-d', app_row.domain,
-                '--non-interactive', '--agree-tos',
-                '-m', f'admin@{app_row.domain}',
-            ], capture_output=True)
+            cert = _run_certbot_nginx(app_row.domain, log_file)
             if cert.returncode != 0:
                 stdout = cert.stdout.decode('utf-8', errors='replace').strip()
                 stderr = cert.stderr.decode('utf-8', errors='replace').strip()
@@ -1880,6 +2026,7 @@ def setup_nginx_config(app_row, log_file):
                     log_file.write(f"  Certbot stderr:\n{stderr}\n")
                 log_file.write("  Certbot failed; deployment cannot be marked successful while SSL is enabled.\n")
                 return False
+            log_file.write("  Certificate issued successfully.\n")
 
         return True
 

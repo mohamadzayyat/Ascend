@@ -18,6 +18,7 @@ FRONTEND_PORT=8717       # Next.js (internal, 127.0.0.1 only)
 
 REPO_URL="https://github.com/mohamadzayyat/Ascend.git"
 NODE_MAJOR=20
+ADMIN_CREDENTIALS_FILE="/root/.ascend-admin-credentials"
 
 # Detect install dir: use script's own directory if app.py is there,
 # otherwise clone fresh into /opt/ascend
@@ -299,6 +300,62 @@ PYEOF
     ok "Database ready at $INSTALL_DIR/ascend.db"
 }
 
+create_initial_admin() {
+    section "Securing initial admin"
+    cd "$INSTALL_DIR"
+
+    local existing_users
+    existing_users=$(venv/bin/python - <<'PYEOF'
+import app
+with app.app.app_context():
+    print(app.User.query.count())
+PYEOF
+)
+    if [[ "$existing_users" != "0" ]]; then
+        ok "Admin setup already complete; /setup is locked"
+        return
+    fi
+
+    local username password generated=0
+    username="${ASCEND_ADMIN_USERNAME:-admin}"
+    if [[ -n "${ASCEND_ADMIN_PASSWORD:-}" ]]; then
+        password="$ASCEND_ADMIN_PASSWORD"
+    else
+        password=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+        generated=1
+    fi
+
+    ASCEND_ADMIN_USERNAME="$username" ASCEND_ADMIN_PASSWORD="$password" venv/bin/python - <<'PYEOF'
+import os
+import app
+
+username = os.environ['ASCEND_ADMIN_USERNAME']
+password = os.environ['ASCEND_ADMIN_PASSWORD']
+
+with app.app.app_context():
+    if app.User.query.first():
+        raise SystemExit(0)
+
+    user = app.User(username=username, is_admin=True)
+    user.set_password(password)
+    app.db.session.add(user)
+    app.db.session.commit()
+PYEOF
+
+    if [[ "$generated" -eq 1 ]]; then
+        cat > "$ADMIN_CREDENTIALS_FILE" <<EOF
+Ascend initial admin
+URL: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PANEL_PORT
+Username: $username
+Password: $password
+EOF
+        chmod 600 "$ADMIN_CREDENTIALS_FILE"
+        ok "Generated admin user '$username' and saved credentials to $ADMIN_CREDENTIALS_FILE"
+    else
+        ok "Created admin user '$username' from ASCEND_ADMIN_USERNAME/ASCEND_ADMIN_PASSWORD"
+    fi
+}
+
 # ── Next.js frontend ────────────────────────────────────────────
 
 setup_frontend_env() {
@@ -517,7 +574,13 @@ print_summary() {
     echo -e "  ${BOLD}Open your browser:${NC}"
     echo -e "  ${CYAN}http://$ip:$PANEL_PORT${NC}"
     echo
-    echo -e "  ${BOLD}First visit:${NC} go to /setup to create your admin account"
+    echo -e "  ${BOLD}Admin account:${NC}"
+    if [[ -f "$ADMIN_CREDENTIALS_FILE" ]]; then
+        echo -e "    Initial credentials saved at $ADMIN_CREDENTIALS_FILE"
+        echo -e "    View once with: sudo cat $ADMIN_CREDENTIALS_FILE"
+    else
+        echo -e "    Already configured. /setup is locked after the first admin exists."
+    fi
     echo
     echo -e "  ${BOLD}Port layout:${NC}"
     echo -e "    $PANEL_PORT  → Nginx (public, routes to backend + frontend)"
@@ -569,6 +632,7 @@ main() {
     setup_python
     setup_backend_env
     init_db
+    create_initial_admin
 
     setup_frontend_env
     build_frontend
