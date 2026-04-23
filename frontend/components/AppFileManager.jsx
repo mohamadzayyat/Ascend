@@ -945,27 +945,33 @@ export default function AppFileManager({ api }) {
         )}
       </div>
 
+      {activeEditor && !editorMinimized && (
+        <div
+          className="fixed inset-0 z-20 bg-black/10 md:left-64"
+          onMouseDown={() => setEditorMinimized(true)}
+          aria-hidden="true"
+        />
+      )}
+
       {activeEditor && (
-        <div className="mt-6">
-          <CodeEditorPanel
-            tabs={editorTabs}
-            activePath={activeEditorPath}
-            minimized={editorMinimized}
-            onActivate={(nextPath) => {
-              setActiveEditorPath(nextPath)
-              setEditorMinimized(false)
-            }}
-            onMinimize={() => setEditorMinimized((v) => !v)}
-            onCloseTab={closeEditorTab}
-            onChange={(content) => updateEditorTab(activeEditorPath, (tab) => ({ ...tab, content }))}
-            onSave={() => saveEditorTab(activeEditorPath)}
-            onCloseAll={() => {
-              setEditorTabs([])
-              setActiveEditorPath(null)
-              setEditorMinimized(false)
-            }}
-          />
-        </div>
+        <CodeEditorPanel
+          tabs={editorTabs}
+          activePath={activeEditorPath}
+          minimized={editorMinimized}
+          onActivate={(nextPath) => {
+            setActiveEditorPath(nextPath)
+            setEditorMinimized(false)
+          }}
+          onMinimize={() => setEditorMinimized((v) => !v)}
+          onCloseTab={closeEditorTab}
+          onChange={(content) => updateEditorTab(activeEditorPath, (tab) => ({ ...tab, content }))}
+          onSave={() => saveEditorTab(activeEditorPath)}
+          onCloseAll={() => {
+            setEditorTabs([])
+            setActiveEditorPath(null)
+            setEditorMinimized(false)
+          }}
+        />
       )}
 
       {menu && (
@@ -1186,8 +1192,41 @@ function CodeEditorPanel({ tabs, activePath, minimized, onActivate, onMinimize, 
 
   if (!activeTab) return null
 
+  if (minimized) {
+    return (
+      <div className="fixed z-30 bottom-4 right-4 md:left-[18rem] md:right-4">
+        <div className="ml-auto flex max-w-xl items-center gap-3 rounded-lg border border-gray-700 bg-secondary/95 px-3 py-2 shadow-2xl backdrop-blur">
+          <button
+            type="button"
+            onClick={onMinimize}
+            className="inline-flex items-center gap-2 text-sm text-gray-200 hover:text-white"
+          >
+            <ChevronRight className="h-4 w-4 -rotate-90" />
+            <span className="font-mono truncate max-w-[14rem]">{baseName(activeTab.path)}</span>
+          </button>
+          {tabs.length > 1 && (
+            <span className="rounded bg-primary px-2 py-0.5 text-xs text-gray-300">
+              {tabs.length} tabs
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onCloseAll}
+            className="ml-auto p-1.5 hover:bg-gray-700 rounded text-gray-400"
+            title="Close editor"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="bg-secondary border border-gray-700 rounded-lg overflow-hidden">
+    <div
+      className="fixed inset-x-4 bottom-4 top-4 z-30 overflow-hidden rounded-xl border border-gray-700 bg-secondary shadow-2xl md:left-[18rem]"
+      onMouseDown={(e) => e.stopPropagation()}
+    >
         <div className="border-b border-gray-700">
           <div className="flex items-center justify-between px-3 pt-3 gap-3">
             <div>
@@ -1247,8 +1286,7 @@ function CodeEditorPanel({ tabs, activePath, minimized, onActivate, onMinimize, 
           <div className="bg-red-500/10 border-b border-red-500/30 px-3 py-2 text-red-300 text-sm">{activeTab.error}</div>
         )}
 
-        {!minimized && (
-        <div className="h-[55vh] overflow-hidden">
+        <div className="h-[calc(100%-7.25rem)] overflow-hidden">
           {activeTab.loading ? (
             <div className="h-full flex items-center justify-center text-gray-400 text-sm">Loading...</div>
           ) : (
@@ -1284,7 +1322,6 @@ function CodeEditorPanel({ tabs, activePath, minimized, onActivate, onMinimize, 
             </div>
           )}
         </div>
-        )}
     </div>
   )
 }
