@@ -19,8 +19,16 @@ import threading
 import secrets
 import socket
 import ipaddress
+import platform
 from datetime import datetime, timezone
 from pathlib import Path
+
+import psutil
+
+# Prime cpu_percent so subsequent non-blocking reads return a real value.
+# psutil docs: the first interval=None call returns a meaningless 0.0.
+psutil.cpu_percent(interval=None)
+_net_sample = {'t': None, 'sent': 0, 'recv': 0}
 
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash, send_file
 from flask_sqlalchemy import SQLAlchemy
@@ -2431,6 +2439,106 @@ def _is_port_listening(port):
         return b'LISTEN' in result.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
+
+
+def _load_server_stats():
+    """Whole-server health snapshot. Cheap to call; safe for frequent polls."""
+    # CPU: priming at import means interval=None returns the % since our last
+    # call — fine for 5s-cached polling.
+    cpu_percent = psutil.cpu_percent(interval=None)
+    try:
+        per_cpu = psutil.cpu_percent(interval=None, percpu=True)
+    except Exception:
+        per_cpu = []
+
+    vm = psutil.virtual_memory()
+    try:
+        sw = psutil.swap_memory()
+        swap = {'total': sw.total, 'used': sw.used, 'percent': sw.percent}
+    except Exception:
+        swap = None
+
+    # Disk for the filesystem hosting the deploy directory (falls back to /).
+    disk_target = str(DEPLOYMENTS_DIR) if DEPLOYMENTS_DIR.exists() else ('/' if os.name != 'nt' else 'C:\\')
+    try:
+        du = psutil.disk_usage(disk_target)
+        disk = {
+            'path': disk_target,
+            'total': du.total,
+            'used': du.used,
+            'free': du.free,
+            'percent': du.percent,
+        }
+    except Exception:
+        disk = None
+
+    # Network throughput: compute bytes/sec since the previous sample.
+    now = time.time()
+    io = psutil.net_io_counters()
+    prev = _net_sample
+    if prev['t'] is not None and now > prev['t']:
+        dt = now - prev['t']
+        send_rate = max(0, (io.bytes_sent - prev['sent']) / dt)
+        recv_rate = max(0, (io.bytes_recv - prev['recv']) / dt)
+    else:
+        send_rate = None
+        recv_rate = None
+    _net_sample['t'] = now
+    _net_sample['sent'] = io.bytes_sent
+    _net_sample['recv'] = io.bytes_recv
+
+    # Load average (Linux/macOS). psutil returns (0,0,0) on Windows fallback.
+    try:
+        load1, load5, load15 = psutil.getloadavg()
+        load = {'1m': load1, '5m': load5, '15m': load15}
+    except (AttributeError, OSError):
+        load = None
+
+    try:
+        boot_ts = psutil.boot_time()
+        uptime_seconds = max(0, int(now - boot_ts))
+    except Exception:
+        uptime_seconds = None
+
+    try:
+        proc_count = len(psutil.pids())
+    except Exception:
+        proc_count = None
+
+    return {
+        'hostname': socket.gethostname(),
+        'platform': platform.platform(terse=True),
+        'kernel': platform.release(),
+        'cpu': {
+            'percent': cpu_percent,
+            'per_cpu': per_cpu,
+            'cores_logical': psutil.cpu_count(logical=True),
+            'cores_physical': psutil.cpu_count(logical=False),
+        },
+        'memory': {
+            'total': vm.total,
+            'used': vm.used,
+            'available': vm.available,
+            'percent': vm.percent,
+        },
+        'swap': swap,
+        'disk': disk,
+        'network': {
+            'bytes_sent': io.bytes_sent,
+            'bytes_recv': io.bytes_recv,
+            'send_rate_bps': send_rate,
+            'recv_rate_bps': recv_rate,
+        },
+        'load_average': load,
+        'uptime_seconds': uptime_seconds,
+        'process_count': proc_count,
+    }
+
+
+@app.route('/api/system/stats')
+@login_required
+def api_system_stats():
+    return jsonify(_cached('server_stats', _SYSTEM_TTL, _load_server_stats))
 
 
 @app.route('/api/system/pm2')

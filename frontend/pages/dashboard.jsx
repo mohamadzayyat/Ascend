@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { useAuth, useProjects, useCertificates } from '@/lib/hooks/useAuth'
 import StatCard from '@/components/StatCard'
 import ProjectCard from '@/components/ProjectCard'
+import ServerStats from '@/components/ServerStats'
 import { Activity, AlertCircle, CheckCircle, Boxes, ShieldCheck } from 'lucide-react'
 import { absoluteLocalTime, localDate, parseApiTime } from '@/lib/time'
 
@@ -42,6 +43,8 @@ export default function Dashboard() {
         <h1 className="text-4xl font-bold text-white mb-2">Dashboard</h1>
         <p className="text-gray-400">Welcome back, {user.username}.</p>
       </div>
+
+      <ServerStats />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <StatCard title="Projects" value={stats.projects} icon={<Activity className="w-6 h-6" />}

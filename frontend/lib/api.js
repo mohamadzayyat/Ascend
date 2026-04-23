@@ -55,6 +55,7 @@ export const apiClient = {
   deleteGitHubCredential: (id) => api.delete(`/api/github-credentials/${id}`),
 
   // System introspection
+  getServerStats: () => api.get('/api/system/stats'),
   getPm2Processes: () => api.get('/api/system/pm2'),
   getListeningPorts: () => api.get('/api/system/ports'),
   getNginxSites: () => api.get('/api/system/nginx'),

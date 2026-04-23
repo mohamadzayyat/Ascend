@@ -183,6 +183,20 @@ export function useAppDeployments(appId) {
   }
 }
 
+export function useServerStats() {
+  const { data, error, mutate } = useSWR(
+    `${API_URL}/api/system/stats`,
+    fetchWithCreds,
+    { refreshInterval: 5000, dedupingInterval: 2000 }
+  )
+  return {
+    stats: data || null,
+    isLoading: !error && !data,
+    isError: !!error,
+    mutate,
+  }
+}
+
 export function useSystem() {
   const pm2 = useSWR(`${API_URL}/api/system/pm2`, fetchWithCreds, {
     refreshInterval: 5000,
