@@ -35,6 +35,7 @@ from urllib import request as _urlreq, error as _urlerr
 
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
+ACME_WEBROOT = Path("/var/www/letsencrypt")
 
 # On Linux as root: deploy to /root; otherwise local deployments dir
 try:
@@ -1425,6 +1426,42 @@ def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
         return False
 
 
+def _verify_http_challenge_route(domain, log_file):
+    """Check that public HTTP requests for this domain hit our Nginx vhost."""
+    token = f"ascend-probe-{secrets.token_hex(8)}"
+    body = f"ascend-ok-{secrets.token_hex(8)}"
+    challenge_dir = ACME_WEBROOT / '.well-known' / 'acme-challenge'
+    challenge_file = challenge_dir / token
+
+    try:
+        challenge_dir.mkdir(parents=True, exist_ok=True)
+        challenge_file.write_text(body, encoding='utf-8')
+
+        url = f'http://{domain}/.well-known/acme-challenge/{token}'
+        log_file.write(f"  Checking HTTP challenge route: {url}\n")
+        with _urlreq.urlopen(url, timeout=10) as resp:
+            returned = resp.read().decode('utf-8', errors='replace').strip()
+            status = getattr(resp, 'status', None) or resp.getcode()
+
+        if status != 200 or returned != body:
+            log_file.write(
+                f"  HTTP challenge check failed: status={status}, "
+                f"expected={body!r}, got={returned[:200]!r}\n"
+            )
+            return False
+
+        log_file.write("  HTTP challenge route is reachable.\n")
+        return True
+    except Exception as e:
+        log_file.write(f"  HTTP challenge check failed: {e}\n")
+        return False
+    finally:
+        try:
+            challenge_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def setup_nginx_config(app_row, log_file):
     """Write an Nginx virtual host and optionally obtain an SSL cert.
 
@@ -1439,6 +1476,12 @@ def setup_nginx_config(app_row, log_file):
         f"    listen 80;\n"
         f"    server_name {app_row.domain} www.{app_row.domain};\n"
         f"    client_max_body_size {app_row.client_max_body};\n"
+        f"\n"
+        f"    location ^~ /.well-known/acme-challenge/ {{\n"
+        f"        root {ACME_WEBROOT};\n"
+        f"        default_type text/plain;\n"
+        f"        try_files $uri =404;\n"
+        f"    }}\n"
         f"\n"
         f"    location / {{\n"
         f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
@@ -1489,6 +1532,13 @@ def setup_nginx_config(app_row, log_file):
         log_file.write("  Nginx reloaded\n")
 
         if app_row.enable_ssl:
+            if not _verify_http_challenge_route(app_row.domain, log_file):
+                log_file.write(
+                    "  SSL preflight failed: Let's Encrypt will not be able to reach "
+                    "this domain over HTTP. Check DNS, firewall, port 80, and proxy settings.\n"
+                )
+                return False
+
             log_file.write("  Obtaining SSL certificate...\n")
             cert = subprocess.run([
                 'certbot', '--nginx',
@@ -1497,8 +1547,14 @@ def setup_nginx_config(app_row, log_file):
                 '-m', f'admin@{app_row.domain}',
             ], capture_output=True)
             if cert.returncode != 0:
-                # Cert failure is non-fatal — site still serves on HTTP
-                log_file.write(f"  Warning: certbot failed: {cert.stderr.decode()}\n")
+                stdout = cert.stdout.decode('utf-8', errors='replace').strip()
+                stderr = cert.stderr.decode('utf-8', errors='replace').strip()
+                if stdout:
+                    log_file.write(f"  Certbot stdout:\n{stdout}\n")
+                if stderr:
+                    log_file.write(f"  Certbot stderr:\n{stderr}\n")
+                log_file.write("  Certbot failed; deployment cannot be marked successful while SSL is enabled.\n")
+                return False
 
         return True
 
