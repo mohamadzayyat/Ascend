@@ -25,6 +25,7 @@ from flask_wtf.csrf import CSRFProtect
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import dotenv
+from urllib import request as _urlreq, error as _urlerr
 
 # ═══════════════════════════════════════════
 # Setup
@@ -103,6 +104,10 @@ class GitHubCredential(db.Model):
 
 
 class Project(db.Model):
+    """A project represents a GitHub repository. It owns one or more Apps,
+    each of which is an independently-deployable piece of the repo (e.g.
+    a CMS, an API, and a web frontend living in a monorepo).
+    """
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
@@ -110,17 +115,72 @@ class Project(db.Model):
     description = db.Column(db.Text)
     github_url = db.Column(db.String(500), nullable=False)
     github_branch = db.Column(db.String(120), default='main')
-
-    project_type = db.Column(db.String(50), default='website')
     folder_name = db.Column(db.String(255), nullable=False)
-    subdirectory = db.Column(db.String(255))
 
+    enable_webhook = db.Column(db.Boolean, default=True)
+    webhook_secret = db.Column(db.String(255), default=lambda: secrets.token_hex(32))
+    auto_deploy = db.Column(db.Boolean, default=False)
+    github_hook_id = db.Column(db.Integer)  # id of the hook we created in GitHub, if any
+
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # ── Deprecated columns (kept so existing SQLite DBs still load) ──
+    # These were used before Apps existed; a startup migration copies
+    # them into a default App for each legacy Project. Do not reference
+    # in new code.
+    project_type = db.Column(db.String(50))
+    subdirectory = db.Column(db.String(255))
     app_port = db.Column(db.Integer)
     webhook_port = db.Column(db.Integer)
+    package_manager = db.Column(db.String(20))
+    build_command = db.Column(db.String(500))
+    start_command = db.Column(db.String(500))
+    pm2_name = db.Column(db.String(255))
+    env_content = db.Column(db.Text)
+    domain = db.Column(db.String(255))
+    enable_ssl = db.Column(db.Boolean)
+    client_max_body = db.Column(db.String(20))
+    status = db.Column(db.String(50))
+    last_deployment = db.Column(db.DateTime)
+
+    apps = db.relationship('App', backref='project', lazy=True, cascade='all, delete-orphan', order_by='App.created_at')
+    deployments = db.relationship('Deployment', backref='project', lazy=True, cascade='all, delete-orphan')
+
+    def to_dict(self, include_apps=True):
+        d = {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'github_url': self.github_url,
+            'github_branch': self.github_branch,
+            'folder_name': self.folder_name,
+            'enable_webhook': self.enable_webhook,
+            'webhook_secret': self.webhook_secret,
+            'auto_deploy': self.auto_deploy,
+            'github_hook_id': self.github_hook_id,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_apps:
+            d['apps'] = [a.to_dict() for a in self.apps]
+        return d
+
+
+class App(db.Model):
+    """A deployable unit inside a Project — one Project can have many Apps
+    (e.g. ./cms, ./api, ./web inside a single monorepo)."""
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
+
+    name = db.Column(db.String(255), nullable=False)
+    app_type = db.Column(db.String(50), default='website')  # website / api / cms / custom
+    subdirectory = db.Column(db.String(255))
 
     package_manager = db.Column(db.String(20), default='npm')
     build_command = db.Column(db.String(500))
     start_command = db.Column(db.String(500))
+    app_port = db.Column(db.Integer)
     pm2_name = db.Column(db.String(255))
 
     env_content = db.Column(db.Text)
@@ -129,43 +189,33 @@ class Project(db.Model):
     enable_ssl = db.Column(db.Boolean, default=True)
     client_max_body = db.Column(db.String(20), default='100M')
 
-    enable_webhook = db.Column(db.Boolean, default=True)
-    webhook_secret = db.Column(db.String(255), default=lambda: secrets.token_hex(32))
-    auto_deploy = db.Column(db.Boolean, default=False)
-
     status = db.Column(db.String(50), default='created')
     last_deployment = db.Column(db.DateTime)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    deployments = db.relationship('Deployment', backref='project', lazy=True, cascade='all, delete-orphan')
+    deployments = db.relationship('Deployment', backref='app', lazy=True)
 
     def to_dict(self):
         return {
             'id': self.id,
+            'project_id': self.project_id,
             'name': self.name,
-            'description': self.description,
-            'github_url': self.github_url,
-            'github_branch': self.github_branch,
-            'project_type': self.project_type,
-            'folder_name': self.folder_name,
+            'app_type': self.app_type,
             'subdirectory': self.subdirectory,
-            'app_port': self.app_port,
-            'pm2_name': self.pm2_name,
+            'package_manager': self.package_manager,
             'build_command': self.build_command,
             'start_command': self.start_command,
-            'package_manager': self.package_manager,
+            'app_port': self.app_port,
+            'pm2_name': self.pm2_name,
             'env_content': self.env_content,
             'domain': self.domain,
             'enable_ssl': self.enable_ssl,
             'client_max_body': self.client_max_body,
-            'enable_webhook': self.enable_webhook,
-            'webhook_secret': self.webhook_secret,
-            'auto_deploy': self.auto_deploy,
             'status': self.status,
             'last_deployment': self.last_deployment.isoformat() if self.last_deployment else None,
-            'created_at': self.created_at.isoformat(),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -173,6 +223,7 @@ class Project(db.Model):
 class Deployment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
+    app_id = db.Column(db.Integer, db.ForeignKey('app.id'))  # new deployments reference an App
 
     status = db.Column(db.String(50), default='pending')
     branch = db.Column(db.String(120))
@@ -191,6 +242,7 @@ class Deployment(db.Model):
         return {
             'id': self.id,
             'project_id': self.project_id,
+            'app_id': self.app_id,
             'status': self.status,
             'branch': self.branch,
             'commit_hash': self.commit_hash,
@@ -205,6 +257,70 @@ class Deployment(db.Model):
 # ═══════════════════════════════════════════
 # Login Management
 # ═══════════════════════════════════════════
+
+def _sqlite_columns(table):
+    """Return the set of existing column names for a SQLite table."""
+    rows = db.session.execute(db.text(f'PRAGMA table_info("{table}")')).fetchall()
+    return {r[1] for r in rows}
+
+
+def migrate_schema():
+    """Idempotent migration from the pre-App single-table schema.
+
+    Safe to run on every startup. Does three things:
+      1. ADD COLUMN for newly-introduced columns on existing tables
+         (SQLite lets us do this without touching data).
+      2. Create a default App for each legacy Project that has none,
+         copying the Project's old deployment fields into it.
+      3. Back-fill Deployment.app_id from its project's first App.
+    """
+    try:
+        # 1. ADD COLUMN (ignore "duplicate column" errors)
+        def add_col(table, col_def):
+            name = col_def.split()[0].strip('"')
+            if name not in _sqlite_columns(table):
+                db.session.execute(db.text(f'ALTER TABLE "{table}" ADD COLUMN {col_def}'))
+        add_col('project', 'github_hook_id INTEGER')
+        add_col('deployment', 'app_id INTEGER REFERENCES app(id)')
+        db.session.commit()
+
+        # 2. Backfill Apps for legacy Projects
+        legacy_projects = [p for p in Project.query.all() if not p.apps]
+        for p in legacy_projects:
+            # Derive a sensible default App name from the project type
+            default_name = (p.project_type or 'app').capitalize() if p.project_type else 'App'
+            new_app = App(
+                project_id=p.id,
+                name=default_name,
+                app_type=p.project_type or 'website',
+                subdirectory=p.subdirectory,
+                package_manager=p.package_manager or 'npm',
+                build_command=p.build_command,
+                start_command=p.start_command,
+                app_port=p.app_port,
+                pm2_name=p.pm2_name,
+                env_content=p.env_content,
+                domain=p.domain,
+                enable_ssl=p.enable_ssl if p.enable_ssl is not None else True,
+                client_max_body=p.client_max_body or '100M',
+                status=p.status or 'created',
+                last_deployment=p.last_deployment,
+                created_at=p.created_at or datetime.now(timezone.utc),
+            )
+            db.session.add(new_app)
+        db.session.commit()
+
+        # 3. Back-fill Deployment.app_id where missing
+        orphans = Deployment.query.filter_by(app_id=None).all()
+        for dep in orphans:
+            project = db.session.get(Project, dep.project_id)
+            if project and project.apps:
+                dep.app_id = project.apps[0].id
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f'[migrate_schema] WARNING: migration encountered an error: {e}', file=sys.stderr)
+
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -343,11 +459,12 @@ def setup():
 @login_required
 def dashboard():
     projects = Project.query.filter_by(user_id=current_user.id).all()
+    all_apps = [a for p in projects for a in p.apps]
     stats = {
         'total_projects': len(projects),
-        'deployed': sum(1 for p in projects if p.status == 'deployed'),
-        'errors': sum(1 for p in projects if p.status == 'error'),
-        'deploying': sum(1 for p in projects if p.status == 'deploying'),
+        'deployed': sum(1 for a in all_apps if a.status == 'deployed'),
+        'errors': sum(1 for a in all_apps if a.status == 'error'),
+        'deploying': sum(1 for a in all_apps if a.status == 'deploying'),
     }
     return render_template('dashboard.html', projects=projects, stats=stats)
 
@@ -378,8 +495,8 @@ def api_projects():
 @csrf.exempt
 @login_required
 def api_create_project():
+    """Create a repo-level Project. Apps are added separately via /api/project/<id>/apps."""
     data = request.get_json(silent=True) or {}
-
     name = data.get('name', '').strip()
     folder_name = data.get('folder_name', '').strip()
     github_url = data.get('github_url', '').strip()
@@ -391,36 +508,28 @@ def api_create_project():
     if not github_url:
         return jsonify({'error': 'GitHub URL is required'}), 400
 
-    app_port = data.get('app_port')
-    if app_port is not None:
-        try:
-            app_port = int(app_port)
-        except (ValueError, TypeError):
-            app_port = None
-
     project = Project(
         user_id=current_user.id,
         name=name,
         description=data.get('description', ''),
         github_url=github_url,
-        github_branch=data.get('github_branch', 'main'),
-        project_type=data.get('project_type', 'website'),
+        github_branch=data.get('github_branch', 'main') or 'main',
         folder_name=folder_name,
-        subdirectory=data.get('subdirectory', ''),
-        domain=data.get('domain', ''),
-        app_port=app_port,
-        pm2_name=data.get('pm2_name', ''),
-        build_command=data.get('build_command', ''),
-        start_command=data.get('start_command', ''),
-        package_manager=data.get('package_manager', 'npm'),
-        enable_ssl=bool(data.get('enable_ssl', True)),
         auto_deploy=bool(data.get('auto_deploy', False)),
-        client_max_body=data.get('client_max_body', '100M'),
+        enable_webhook=bool(data.get('enable_webhook', True)),
     )
-
     db.session.add(project)
     db.session.commit()
-    return jsonify(project.to_dict()), 201
+
+    # If auto_deploy was enabled, try to install the webhook in GitHub now.
+    webhook_result = None
+    if project.auto_deploy and project.enable_webhook:
+        webhook_result = _sync_github_webhook(project)
+
+    body = project.to_dict()
+    if webhook_result:
+        body['github_webhook'] = webhook_result
+    return jsonify(body), 201
 
 
 @app.route('/api/project/<int:project_id>', methods=['GET'])
@@ -441,29 +550,32 @@ def api_update_project(project_id):
         return jsonify({'error': 'Unauthorized'}), 403
 
     data = request.get_json(silent=True) or {}
+    prev_auto_deploy = project.auto_deploy
 
-    for field in ['name', 'description', 'github_url', 'github_branch', 'project_type',
-                  'folder_name', 'subdirectory', 'domain', 'pm2_name', 'build_command',
-                  'start_command', 'package_manager', 'env_content', 'client_max_body']:
+    for field in ['name', 'description', 'github_url', 'github_branch', 'folder_name']:
         if field in data:
             setattr(project, field, data[field])
 
-    if 'enable_ssl' in data:
-        project.enable_ssl = bool(data['enable_ssl'])
-    if 'auto_deploy' in data:
-        project.auto_deploy = bool(data['auto_deploy'])
     if 'enable_webhook' in data:
         project.enable_webhook = bool(data['enable_webhook'])
-
-    if 'app_port' in data:
-        try:
-            project.app_port = int(data['app_port']) if data['app_port'] else None
-        except (ValueError, TypeError):
-            project.app_port = None
+    if 'auto_deploy' in data:
+        project.auto_deploy = bool(data['auto_deploy'])
 
     project.updated_at = datetime.now(timezone.utc)
     db.session.commit()
-    return jsonify(project.to_dict())
+
+    webhook_result = None
+    if (
+        project.auto_deploy != prev_auto_deploy
+        or 'github_url' in data
+        or 'enable_webhook' in data
+    ):
+        webhook_result = _sync_github_webhook(project)
+
+    body = project.to_dict()
+    if webhook_result:
+        body['github_webhook'] = webhook_result
+    return jsonify(body)
 
 
 @app.route('/api/project/<int:project_id>', methods=['DELETE'])
@@ -474,13 +586,206 @@ def api_delete_project(project_id):
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
 
+    # Best-effort cleanup of the GitHub webhook before we delete the row
+    if project.github_hook_id:
+        _delete_github_webhook(project)
+
     db.session.delete(project)
     db.session.commit()
     return jsonify({'status': 'deleted'})
 
 
 # ═══════════════════════════════════════════
-# Deployment API Routes
+# App API (the actual deployable units)
+# ═══════════════════════════════════════════
+
+def _parse_port(v):
+    try:
+        n = int(v)
+        return n if 1 <= n <= 65535 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _check_port_conflict(port, exclude_app_id=None):
+    """Return a reason string if the port is unusable, or None if it is free.
+
+    Checks (in order): other Ascend apps -> Nginx listen directives -> any live listener.
+    Uses the /api/system caches so it's cheap enough to call on every create/update.
+    """
+    if not port:
+        return None
+    # Another Ascend app
+    clash = App.query.filter(App.app_port == port).filter(App.id != (exclude_app_id or -1)).first()
+    if clash:
+        return f"port {port} is already used by another Ascend app ({clash.name})"
+    # Nginx sites
+    for site in _cached('nginx', _SYSTEM_TTL, _load_nginx_sites):
+        if port in site.get('listen_ports', []):
+            return f"port {port} is already configured in Nginx site '{site['name']}'"
+    # Any live listener. On updates we only call this when the port is changing,
+    # so the app's current PM2 process does not block normal edits.
+    for p in _cached('ports', _SYSTEM_TTL, _load_listening_ports):
+        if p['port'] == port:
+            return f"port {port} is currently bound by process '{p.get('process') or 'unknown'}'"
+    return None
+
+
+def _app_fields_from_dict(data, allow_all=True):
+    """Extract App fields from request JSON, validated/cleaned."""
+    out = {}
+    for field in ['name', 'app_type', 'subdirectory', 'package_manager',
+                  'build_command', 'start_command', 'pm2_name',
+                  'env_content', 'domain', 'client_max_body']:
+        if field in data:
+            val = data[field]
+            out[field] = (val.strip() if isinstance(val, str) else val) or None
+    if 'enable_ssl' in data:
+        out['enable_ssl'] = bool(data['enable_ssl'])
+    if 'app_port' in data and allow_all:
+        out['app_port'] = _parse_port(data['app_port'])
+    return out
+
+
+@app.route('/api/project/<int:project_id>/apps', methods=['GET'])
+@login_required
+def api_list_apps(project_id):
+    project = Project.query.get_or_404(project_id)
+    if project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    return jsonify([a.to_dict() for a in project.apps])
+
+
+@app.route('/api/project/<int:project_id>/apps', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_create_app(project_id):
+    project = Project.query.get_or_404(project_id)
+    if project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'App name is required'}), 400
+
+    fields = _app_fields_from_dict(data)
+    port = fields.get('app_port')
+    if port:
+        conflict = _check_port_conflict(port)
+        if conflict:
+            return jsonify({'error': conflict}), 409
+
+    new_app = App(project_id=project.id, name=name)
+    for k, v in fields.items():
+        setattr(new_app, k, v)
+    # Auto-generate a pm2_name if not provided
+    if not new_app.pm2_name:
+        new_app.pm2_name = f"{project.folder_name}-{re.sub(r'[^a-zA-Z0-9_-]+', '-', name.lower())}"
+    db.session.add(new_app)
+    db.session.commit()
+    return jsonify(new_app.to_dict()), 201
+
+
+@app.route('/api/app/<int:app_id>', methods=['GET'])
+@login_required
+def api_get_app(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    return jsonify(a.to_dict())
+
+
+@app.route('/api/app/<int:app_id>', methods=['PUT'])
+@csrf.exempt
+@login_required
+def api_update_app(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.get_json(silent=True) or {}
+    fields = _app_fields_from_dict(data)
+
+    if 'app_port' in fields and fields['app_port'] and fields['app_port'] != a.app_port:
+        conflict = _check_port_conflict(fields['app_port'], exclude_app_id=a.id)
+        if conflict:
+            return jsonify({'error': conflict}), 409
+
+    for k, v in fields.items():
+        setattr(a, k, v)
+    a.updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify(a.to_dict())
+
+
+@app.route('/api/app/<int:app_id>', methods=['DELETE'])
+@csrf.exempt
+@login_required
+def api_delete_app(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    # Best-effort: stop the pm2 process so the port is freed
+    if a.pm2_name:
+        try:
+            subprocess.run(['pm2', 'delete', a.pm2_name], capture_output=True, timeout=10)
+        except Exception:
+            pass
+
+    db.session.delete(a)
+    db.session.commit()
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/api/app/<int:app_id>/deploy', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_deploy_app(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cred = GitHubCredential.query.filter_by(user_id=current_user.id).first()
+    if not cred:
+        return jsonify({'error': 'No GitHub credentials configured. Add credentials in Settings.'}), 400
+    if a.status == 'deploying':
+        return jsonify({'error': 'A deployment is already in progress for this app'}), 409
+
+    deployment = Deployment(
+        project_id=a.project_id,
+        app_id=a.id,
+        status='pending',
+        branch=a.project.github_branch,
+        triggered_by='manual',
+    )
+    db.session.add(deployment)
+    a.status = 'deploying'
+    db.session.commit()
+
+    threading.Thread(
+        target=deploy_app_bg,
+        args=(deployment.id, cred.username, cred.token),
+        daemon=True,
+    ).start()
+    return jsonify({'id': deployment.id, 'status': 'pending'})
+
+
+@app.route('/api/app/<int:app_id>/deployments', methods=['GET'])
+@login_required
+def api_app_deployments(app_id):
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    deployments = Deployment.query.filter_by(app_id=a.id).order_by(
+        Deployment.started_at.desc()
+    ).limit(20).all()
+    return jsonify([d.to_dict() for d in deployments])
+
+
+# ═══════════════════════════════════════════
+# Legacy deploy-all endpoint — deploys every app in the project
 # ═══════════════════════════════════════════
 
 @app.route('/api/project/<int:project_id>/deploy', methods=['POST'])
@@ -491,33 +796,31 @@ def api_deploy(project_id):
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
 
-    # Fetch credentials now while we're in the request context
     cred = GitHubCredential.query.filter_by(user_id=current_user.id).first()
     if not cred:
         return jsonify({'error': 'No GitHub credentials configured. Add credentials in Settings.'}), 400
+    if not project.apps:
+        return jsonify({'error': 'Project has no apps yet — add one before deploying'}), 400
 
-    if project.status == 'deploying':
-        return jsonify({'error': 'A deployment is already in progress'}), 409
+    deployment_ids = []
+    for a in project.apps:
+        if a.status == 'deploying':
+            continue
+        dep = Deployment(
+            project_id=project.id, app_id=a.id,
+            status='pending', branch=project.github_branch, triggered_by='manual',
+        )
+        db.session.add(dep)
+        a.status = 'deploying'
+        db.session.commit()
+        threading.Thread(
+            target=deploy_app_bg,
+            args=(dep.id, cred.username, cred.token),
+            daemon=True,
+        ).start()
+        deployment_ids.append(dep.id)
 
-    deployment = Deployment(
-        project_id=project_id,
-        status='pending',
-        branch=project.github_branch,
-        triggered_by='manual'
-    )
-    db.session.add(deployment)
-    project.status = 'deploying'
-    db.session.commit()
-
-    # Pass all needed data to the thread; never use current_user inside the thread
-    thread = threading.Thread(
-        target=deploy_project_bg,
-        args=(deployment.id, cred.username, cred.token),
-        daemon=True
-    )
-    thread.start()
-
-    return jsonify({'id': deployment.id, 'status': 'pending'})
+    return jsonify({'deployment_ids': deployment_ids, 'status': 'pending'})
 
 
 @app.route('/api/project/<int:project_id>/deployments', methods=['GET'])
@@ -529,8 +832,7 @@ def api_project_deployments(project_id):
 
     deployments = Deployment.query.filter_by(project_id=project_id).order_by(
         Deployment.started_at.desc()
-    ).limit(20).all()
-
+    ).limit(50).all()
     return jsonify([d.to_dict() for d in deployments])
 
 
@@ -559,8 +861,140 @@ def api_deployment_status(deployment_id):
 
 
 # ═══════════════════════════════════════════
-# GitHub Webhook
+# GitHub Webhook (inbound from GitHub push)
 # ═══════════════════════════════════════════
+
+def _parse_github_repo(url):
+    """Extract (owner, repo) from a GitHub URL. Returns (None, None) on failure."""
+    if not url:
+        return None, None
+    m = re.search(r'github\.com[:/]+([\w.-]+)/([\w.-]+?)(?:\.git)?/?$', url.strip())
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def _github_api(method, path, token, body=None, timeout=10):
+    """Minimal GitHub API client using urllib. Returns (status, json|None)."""
+    req = _urlreq.Request(
+        f'https://api.github.com{path}',
+        method=method,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'Authorization': f'token {token}',
+            'User-Agent': 'Ascend-Panel',
+            'X-GitHub-Api-Version': '2022-11-28',
+        },
+        data=json.dumps(body).encode() if body is not None else None,
+    )
+    if body is not None:
+        req.add_header('Content-Type', 'application/json')
+    try:
+        with _urlreq.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode('utf-8', errors='replace') or 'null'
+            return resp.status, json.loads(raw)
+    except _urlerr.HTTPError as e:
+        raw = (e.read() or b'').decode('utf-8', errors='replace')
+        try:
+            return e.code, json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            return e.code, {'message': raw}
+    except (_urlerr.URLError, TimeoutError) as e:
+        return 0, {'message': str(e)}
+
+
+def _sync_github_webhook(project):
+    """Ensure GitHub has a webhook matching this project's auto_deploy state.
+
+    - If auto_deploy=True and enable_webhook=True: create or update a GitHub
+      webhook that points at /webhook/github/<secret>.
+    - If auto_deploy=False or enable_webhook=False: delete the stored webhook.
+    Returns a dict describing the outcome — never raises."""
+    cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
+    if not cred:
+        return {'status': 'skipped', 'reason': 'no GitHub credentials on file'}
+
+    owner, repo = _parse_github_repo(project.github_url)
+    if not owner or not repo:
+        return {'status': 'skipped', 'reason': 'could not parse github_url'}
+
+    base = _public_panel_url()
+    if not base:
+        return {'status': 'skipped', 'reason': 'panel URL unknown (set PANEL_PUBLIC_URL env var)'}
+    hook_url = f'{base}/webhook/github/{project.webhook_secret}'
+
+    if not project.auto_deploy or not project.enable_webhook:
+        # Turn it off
+        if project.github_hook_id:
+            status, _ = _github_api('DELETE',
+                                    f'/repos/{owner}/{repo}/hooks/{project.github_hook_id}',
+                                    cred.token)
+            project.github_hook_id = None
+            db.session.commit()
+            return {'status': 'deleted' if status in (204, 404) else f'delete_failed({status})'}
+        return {'status': 'disabled'}
+
+    # Turn it on / update it
+    config = {
+        'url': hook_url,
+        'content_type': 'json',
+        'secret': project.webhook_secret,
+        'insecure_ssl': '0',
+    }
+    payload = {'name': 'web', 'active': True, 'events': ['push'], 'config': config}
+
+    if project.github_hook_id:
+        status, resp = _github_api(
+            'PATCH', f'/repos/{owner}/{repo}/hooks/{project.github_hook_id}',
+            cred.token, payload,
+        )
+        if status == 200:
+            return {'status': 'updated', 'hook_id': project.github_hook_id, 'url': hook_url}
+        if status == 404:
+            project.github_hook_id = None  # fall through to create
+            db.session.commit()
+        else:
+            return {'status': 'update_failed', 'code': status, 'message': (resp or {}).get('message')}
+
+    status, resp = _github_api('POST', f'/repos/{owner}/{repo}/hooks', cred.token, payload)
+    if status in (200, 201) and isinstance(resp, dict) and 'id' in resp:
+        project.github_hook_id = resp['id']
+        db.session.commit()
+        return {'status': 'created', 'hook_id': resp['id'], 'url': hook_url}
+    return {'status': 'create_failed', 'code': status, 'message': (resp or {}).get('message')}
+
+
+def _delete_github_webhook(project):
+    cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
+    if not cred or not project.github_hook_id:
+        return
+    owner, repo = _parse_github_repo(project.github_url)
+    if not owner or not repo:
+        return
+    _github_api('DELETE', f'/repos/{owner}/{repo}/hooks/{project.github_hook_id}', cred.token)
+
+
+def _public_panel_url():
+    """Return the base URL GitHub should hit to reach our webhook endpoint.
+
+    Priority: PANEL_PUBLIC_URL env var → X-Forwarded-Host header of the current
+    request → Host header. Must be reachable from the public internet, so
+    callers that configure a real domain should set PANEL_PUBLIC_URL.
+    """
+    explicit = os.environ.get('PANEL_PUBLIC_URL', '').strip().rstrip('/')
+    if explicit:
+        return explicit
+    try:
+        if request:
+            proto = request.headers.get('X-Forwarded-Proto', 'http')
+            host = request.headers.get('X-Forwarded-Host') or request.headers.get('Host')
+            if host:
+                return f'{proto}://{host}'
+    except RuntimeError:
+        # Outside of a request context
+        pass
+    return None
+
 
 @app.route('/webhook/github/<webhook_secret>', methods=['POST'])
 @csrf.exempt
@@ -586,30 +1020,37 @@ def github_webhook(webhook_secret):
     if pushed_branch and pushed_branch != project.github_branch:
         return jsonify({'status': 'skipped', 'reason': 'branch mismatch'})
 
-    # Get credentials for the project owner
     cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
     if not cred:
         return jsonify({'error': 'No GitHub credentials for project owner'}), 500
 
-    deployment = Deployment(
-        project_id=project.id,
-        status='pending',
-        branch=pushed_branch or project.github_branch,
-        commit_hash=data.get('after', '')[:40],
-        triggered_by='webhook'
-    )
-    db.session.add(deployment)
-    project.status = 'deploying'
-    db.session.commit()
+    if not project.apps:
+        return jsonify({'status': 'skipped', 'reason': 'project has no apps'}), 200
 
-    thread = threading.Thread(
-        target=deploy_project_bg,
-        args=(deployment.id, cred.username, cred.token),
-        daemon=True
-    )
-    thread.start()
+    commit = data.get('after', '')[:40]
+    deployment_ids = []
+    for a in project.apps:
+        if a.status == 'deploying':
+            continue
+        dep = Deployment(
+            project_id=project.id,
+            app_id=a.id,
+            status='pending',
+            branch=pushed_branch or project.github_branch,
+            commit_hash=commit,
+            triggered_by='webhook',
+        )
+        db.session.add(dep)
+        a.status = 'deploying'
+        db.session.commit()
+        threading.Thread(
+            target=deploy_app_bg,
+            args=(dep.id, cred.username, cred.token),
+            daemon=True,
+        ).start()
+        deployment_ids.append(dep.id)
 
-    return jsonify({'status': 'pending', 'deployment_id': deployment.id})
+    return jsonify({'status': 'pending', 'deployment_ids': deployment_ids})
 
 
 # ═══════════════════════════════════════════
@@ -663,17 +1104,44 @@ def api_delete_github_credential(cred_id):
 # Background Deployment Process
 # ═══════════════════════════════════════════
 
-def deploy_project_bg(deployment_id, github_username, github_token):
-    """Background task: runs inside its own app context."""
+def _ensure_repo_cloned(project, github_username, github_token, log):
+    """Clone or fast-forward the project's repo. Returns the clone dir path."""
+    clone_dir = DEPLOYMENTS_DIR / project.folder_name
+    log.write("Step 1: Cloning/updating repository...\n")
+    if clone_dir.exists():
+        log.write("  Repository exists, fetching latest...\n")
+        ok = run_cmd(['git', '-C', str(clone_dir), 'fetch', '--all'], log) \
+             and run_cmd(['git', '-C', str(clone_dir), 'reset', '--hard',
+                          f'origin/{project.github_branch}'], log)
+    else:
+        log.write(f"  Cloning to {clone_dir}...\n")
+        repo_url = project.github_url.replace('https://',
+                                              f'https://{github_username}:{github_token}@')
+        ok = run_cmd(['git', 'clone', repo_url, str(clone_dir)], log, redact=repo_url)
+    if not ok:
+        raise RuntimeError("Failed to clone/update repository")
+    return clone_dir
+
+
+def deploy_app_bg(deployment_id, github_username, github_token):
+    """Background task: deploy a single App. Runs in its own app context."""
     with app.app_context():
         deployment = db.session.get(Deployment, deployment_id)
         if not deployment:
             return
 
+        app_row = deployment.app
         project = deployment.project
+        if not app_row:
+            deployment.status = 'failed'
+            deployment.error_message = 'Deployment has no associated app'
+            db.session.commit()
+            return
+
         log_file = LOG_DIR / f"deploy_{deployment_id}_{int(time.time())}.log"
         deployment.log_file = str(log_file)
         deployment.status = 'running'
+        app_row.status = 'deploying'
         db.session.commit()
 
         start_time = time.time()
@@ -682,86 +1150,64 @@ def deploy_project_bg(deployment_id, github_username, github_token):
             with open(log_file, 'w', encoding='utf-8') as log:
                 log.write(f"=== Deployment Started: {datetime.now(timezone.utc).isoformat()} ===\n")
                 log.write(f"Project: {project.name}\n")
-                log.write(f"Type: {project.project_type}\n")
+                log.write(f"App: {app_row.name} ({app_row.app_type})\n")
                 log.write(f"GitHub URL: {project.github_url}\n")
                 log.write(f"Branch: {project.github_branch}\n")
-                if project.subdirectory:
-                    log.write(f"Subdirectory: {project.subdirectory}\n")
+                if app_row.subdirectory:
+                    log.write(f"Subdirectory: {app_row.subdirectory}\n")
                 log.write("\n")
 
-                clone_dir = DEPLOYMENTS_DIR / project.folder_name
-
-                log.write("Step 1: Cloning/updating repository...\n")
-                if clone_dir.exists():
-                    log.write("  Repository exists, fetching latest...\n")
-                    ok = run_cmd(
-                        ['git', '-C', str(clone_dir), 'fetch', '--all'],
-                        log
-                    ) and run_cmd(
-                        ['git', '-C', str(clone_dir), 'reset', '--hard',
-                         f'origin/{project.github_branch}'],
-                        log
-                    )
-                else:
-                    log.write(f"  Cloning to {clone_dir}...\n")
-                    # Embed credentials in URL (never logged)
-                    repo_url = project.github_url.replace(
-                        'https://',
-                        f'https://{github_username}:{github_token}@'
-                    )
-                    ok = run_cmd(['git', 'clone', repo_url, str(clone_dir)], log, redact=repo_url)
-
-                if not ok:
-                    raise RuntimeError("Failed to clone/update repository")
+                with _repo_lock(project.id):
+                    clone_dir = _ensure_repo_cloned(project, github_username, github_token, log)
 
                 deploy_dir = clone_dir
-                if project.subdirectory:
-                    deploy_dir = clone_dir / project.subdirectory.strip('/')
-                    log.write(f"  Using subdirectory: {project.subdirectory}\n")
+                if app_row.subdirectory:
+                    deploy_dir = clone_dir / app_row.subdirectory.strip('/')
+                    log.write(f"  Using subdirectory: {app_row.subdirectory}\n")
                     if not deploy_dir.exists():
-                        raise RuntimeError(f"Subdirectory not found: {project.subdirectory}")
+                        raise RuntimeError(f"Subdirectory not found: {app_row.subdirectory}")
 
-                if project.env_content:
+                if app_row.env_content:
                     log.write("\nStep 2: Writing .env file...\n")
-                    (deploy_dir / '.env').write_text(project.env_content, encoding='utf-8')
+                    (deploy_dir / '.env').write_text(app_row.env_content, encoding='utf-8')
                     log.write("  .env written\n")
 
                 if (deploy_dir / 'package.json').exists():
-                    pm = project.package_manager or 'npm'
+                    pm = app_row.package_manager or 'npm'
                     log.write(f"\nStep 3: Installing dependencies ({pm} install)...\n")
                     if not run_cmd([pm, 'install'], log, cwd=deploy_dir):
                         raise RuntimeError(f"{pm} install failed")
 
-                    if project.build_command:
-                        log.write(f"\nStep 4: Building ({project.build_command})...\n")
-                        if not run_cmd(project.build_command, log, cwd=deploy_dir, shell=True):
+                    if app_row.build_command:
+                        log.write(f"\nStep 4: Building ({app_row.build_command})...\n")
+                        if not run_cmd(app_row.build_command, log, cwd=deploy_dir, shell=True):
                             raise RuntimeError("Build failed")
 
-                if project.start_command and project.pm2_name:
-                    log.write(f"\nStep 5: Starting with PM2 as '{project.pm2_name}'...\n")
-                    run_cmd(['pm2', 'delete', project.pm2_name], log, check=False)
+                if app_row.start_command and app_row.pm2_name:
+                    log.write(f"\nStep 5: Starting with PM2 as '{app_row.pm2_name}'...\n")
+                    run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
                     if not run_cmd(
-                        ['pm2', 'start', project.start_command,
-                         '--name', project.pm2_name],
+                        ['pm2', 'start', app_row.start_command,
+                         '--name', app_row.pm2_name],
                         log, cwd=deploy_dir
                     ):
                         raise RuntimeError("pm2 start failed")
                     run_cmd(['pm2', 'save'], log)
 
-                if project.domain:
+                if app_row.domain:
                     log.write("\nStep 6: Configuring Nginx...\n")
-                    if not setup_nginx_config(project, log):
+                    if not setup_nginx_config(app_row, log):
                         raise RuntimeError("Nginx configuration failed — see log above")
 
                 log.write("\n=== Deployment Completed Successfully ===\n")
                 deployment.status = 'success'
-                project.status = 'deployed'
-                project.last_deployment = datetime.now(timezone.utc)
+                app_row.status = 'deployed'
+                app_row.last_deployment = datetime.now(timezone.utc)
 
         except Exception as e:
             deployment.status = 'failed'
             deployment.error_message = str(e)
-            project.status = 'error'
+            app_row.status = 'error'
             try:
                 with open(log_file, 'a', encoding='utf-8') as log:
                     log.write(f"\n!!! Deployment Failed: {e} !!!\n")
@@ -809,23 +1255,23 @@ def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
         return False
 
 
-def setup_nginx_config(project, log_file):
+def setup_nginx_config(app_row, log_file):
     """Write an Nginx virtual host and optionally obtain an SSL cert.
 
     Returns True on success, False if the config failed to write, test,
     or reload — caller should treat False as a deployment failure so
     domains don't silently 502 after a bad config lands.
     """
-    log_file.write(f"  Domain: {project.domain}\n")
+    log_file.write(f"  Domain: {app_row.domain}\n")
 
     nginx_config = (
         f"server {{\n"
         f"    listen 80;\n"
-        f"    server_name {project.domain} www.{project.domain};\n"
-        f"    client_max_body_size {project.client_max_body};\n"
+        f"    server_name {app_row.domain} www.{app_row.domain};\n"
+        f"    client_max_body_size {app_row.client_max_body};\n"
         f"\n"
         f"    location / {{\n"
-        f"        proxy_pass http://127.0.0.1:{project.app_port};\n"
+        f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
         f"        proxy_set_header Host $host;\n"
         f"        proxy_set_header X-Real-IP $remote_addr;\n"
         f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
@@ -834,8 +1280,8 @@ def setup_nginx_config(project, log_file):
         f"}}\n"
     )
 
-    config_path = f"/etc/nginx/sites-available/{project.domain}"
-    enabled_path = f"/etc/nginx/sites-enabled/{project.domain}"
+    config_path = f"/etc/nginx/sites-available/{app_row.domain}"
+    enabled_path = f"/etc/nginx/sites-enabled/{app_row.domain}"
     # Back up any existing config so we can roll back on validation failure
     backup_path = None
     if os.path.exists(config_path):
@@ -872,14 +1318,14 @@ def setup_nginx_config(project, log_file):
             return False
         log_file.write("  Nginx reloaded\n")
 
-        if project.enable_ssl:
+        if app_row.enable_ssl:
             log_file.write("  Obtaining SSL certificate...\n")
             cert = subprocess.run([
                 'certbot', '--nginx',
-                '-d', project.domain,
-                '-d', f'www.{project.domain}',
+                '-d', app_row.domain,
+                '-d', f'www.{app_row.domain}',
                 '--non-interactive', '--agree-tos',
-                '-m', f'admin@{project.domain}',
+                '-m', f'admin@{app_row.domain}',
             ], capture_output=True)
             if cert.returncode != 0:
                 # Cert failure is non-fatal — site still serves on HTTP
@@ -905,6 +1351,15 @@ def setup_nginx_config(project, log_file):
 # Short-lived caches so repeated page loads don't hammer CLI tools.
 _system_cache = {}
 _SYSTEM_TTL = 5  # seconds
+_repo_locks = {}
+
+
+def _repo_lock(project_id):
+    lock = _repo_locks.get(project_id)
+    if lock is None:
+        lock = threading.Lock()
+        _repo_locks[project_id] = lock
+    return lock
 
 
 def _cached(key, ttl, builder):
@@ -1051,29 +1506,32 @@ def api_system_nginx():
     })
 
 
-@app.route('/api/project/<int:project_id>/runtime')
+@app.route('/api/app/<int:app_id>/runtime')
 @login_required
-def api_project_runtime(project_id):
-    project = db.session.get(Project, project_id)
-    if not project or project.user_id != current_user.id:
+def api_app_runtime(app_id):
+    a = db.session.get(App, app_id)
+    if not a or a.project.user_id != current_user.id:
         return jsonify({'error': 'Not found'}), 404
 
     pm2_status = None
-    if project.pm2_name:
+    if a.pm2_name:
         for p in _cached('pm2', _SYSTEM_TTL, _load_pm2_processes):
-            if p.get('name') == project.pm2_name:
+            if p.get('name') == a.pm2_name:
                 pm2_status = p
                 break
 
+    project = a.project
     webhook_path = None
     if project.enable_webhook and project.webhook_secret:
         webhook_path = f'/webhook/github/{project.webhook_secret}'
 
     return jsonify({
         'pm2': pm2_status,
-        'port': project.app_port,
-        'port_listening': _is_port_listening(project.app_port) if project.app_port else None,
+        'port': a.app_port,
+        'port_listening': _is_port_listening(a.app_port) if a.app_port else None,
         'webhook_path': webhook_path,
+        'domain': a.domain,
+        'status': a.status,
     })
 
 
@@ -1097,14 +1555,18 @@ def server_error(e):
 
 @app.shell_context_processor
 def make_shell_context():
-    return {'db': db, 'User': User, 'Project': Project, 'Deployment': Deployment}
+    return {'db': db, 'User': User, 'Project': Project, 'App': App, 'Deployment': Deployment}
+
+
+with app.app_context():
+    db.create_all()
+    migrate_schema()
 
 
 if __name__ == '__main__':
     with app.app_context():
-        db.create_all()
         if not User.query.first():
-            print("No users found. Visit http://localhost:5000/setup or http://localhost:3000/setup")
+            print("No users found. Visit /setup to create the admin account.")
         host = os.environ.get('HOST', '127.0.0.1')
         port = int(os.environ.get('PORT', 8765))
         app.run(debug=False, host=host, port=port)

@@ -31,15 +31,15 @@ export default function System() {
   const { pm2, ports, nginxSites, isLoading } = useSystem()
   const { projects } = useProjects()
 
-  // Set of pm2 process names already managed by an Ascend project
+  // Set of pm2 process names / ports already managed by an Ascend app
+  const allApps = useMemo(() => projects.flatMap((p) => p.apps || []), [projects])
   const managed = useMemo(
-    () => new Set(projects.filter((p) => p.pm2_name).map((p) => p.pm2_name)),
-    [projects]
+    () => new Set(allApps.filter((a) => a.pm2_name).map((a) => a.pm2_name)),
+    [allApps]
   )
-
   const ascendPorts = useMemo(
-    () => new Set(projects.filter((p) => p.app_port).map((p) => p.app_port)),
-    [projects]
+    () => new Set(allApps.filter((a) => a.app_port).map((a) => a.app_port)),
+    [allApps]
   )
 
   return (

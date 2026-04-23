@@ -23,12 +23,21 @@ export const apiClient = {
   setup: (username, password, email) => api.post('/api/auth/setup', { username, password, email }),
   checkAuth: () => api.get('/api/current-user'),
 
-  // Projects
+  // Projects (repo-level)
   getProjects: () => api.get('/api/projects'),
   getProject: (id) => api.get(`/api/project/${id}`),
   createProject: (data) => api.post('/api/projects', data),
   updateProject: (id, data) => api.put(`/api/project/${id}`, data),
   deleteProject: (id) => api.delete(`/api/project/${id}`),
+
+  // Apps (deployment units inside a project)
+  listApps: (projectId) => api.get(`/api/project/${projectId}/apps`),
+  createApp: (projectId, data) => api.post(`/api/project/${projectId}/apps`, data),
+  getApp: (id) => api.get(`/api/app/${id}`),
+  updateApp: (id, data) => api.put(`/api/app/${id}`, data),
+  deleteApp: (id) => api.delete(`/api/app/${id}`),
+  deployApp: (id) => api.post(`/api/app/${id}/deploy`),
+  getAppDeployments: (id) => api.get(`/api/app/${id}/deployments`),
 
   // Deployments
   deploy: (projectId) => api.post(`/api/project/${projectId}/deploy`),
@@ -45,7 +54,7 @@ export const apiClient = {
   getPm2Processes: () => api.get('/api/system/pm2'),
   getListeningPorts: () => api.get('/api/system/ports'),
   getNginxSites: () => api.get('/api/system/nginx'),
-  getProjectRuntime: (id) => api.get(`/api/project/${id}/runtime`),
+  getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
 }
 
 export { API_URL }

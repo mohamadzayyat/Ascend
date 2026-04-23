@@ -1,34 +1,28 @@
 import Link from 'next/link'
-import { formatDistanceToNow } from 'date-fns'
-import { ExternalLink, Trash2 } from 'lucide-react'
+import { ExternalLink, Trash2, GitBranch, Boxes } from 'lucide-react'
 import { useState } from 'react'
 import { apiClient } from '@/lib/api'
 import { useProjects } from '@/lib/hooks/useAuth'
-
-const STATUS_CLASS = {
-  deployed: 'bg-green-500/10 text-green-400',
-  deploying: 'bg-yellow-500/10 text-yellow-400',
-  error: 'bg-red-500/10 text-red-400',
-  created: 'bg-blue-500/10 text-blue-400',
-}
 
 export default function ProjectCard({ project }) {
   const [deleting, setDeleting] = useState(false)
   const { mutate } = useProjects()
 
   const handleDelete = async () => {
-    if (!confirm(`Delete "${project.name}"? This cannot be undone.`)) return
+    if (!confirm(`Delete "${project.name}" and all its apps? This cannot be undone.`)) return
     setDeleting(true)
     try {
       await apiClient.deleteProject(project.id)
-      mutate() // revalidate SWR cache — no full-page reload needed
+      mutate()
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to delete project')
       setDeleting(false)
     }
   }
 
-  const statusColor = STATUS_CLASS[project.status] || 'bg-gray-500/10 text-gray-400'
+  const apps = project.apps || []
+  const deployedApps = apps.filter((a) => a.status === 'deployed').length
+  const erroredApps = apps.filter((a) => a.status === 'error').length
 
   return (
     <div className="bg-secondary rounded-lg border border-gray-700 p-6 hover:border-accent transition group">
@@ -54,31 +48,25 @@ export default function ProjectCard({ project }) {
       </div>
 
       <div className="space-y-3 mb-4">
-        <div>
-          <p className="text-xs text-gray-500 mb-1">Status</p>
-          <span className={`inline-block px-2 py-1 rounded text-xs font-semibold ${statusColor}`}>
-            {project.status}
+        <div className="flex items-center gap-2 text-sm text-gray-400">
+          <GitBranch className="w-4 h-4" />
+          <span className="font-mono truncate">{project.github_branch || 'main'}</span>
+        </div>
+
+        <div className="flex items-center gap-2 text-sm text-gray-400">
+          <Boxes className="w-4 h-4" />
+          <span>
+            {apps.length} {apps.length === 1 ? 'app' : 'apps'}
+            {deployedApps > 0 && <span className="text-green-400 ml-2">{deployedApps} deployed</span>}
+            {erroredApps > 0 && <span className="text-red-400 ml-2">{erroredApps} error</span>}
           </span>
         </div>
 
-        <div>
-          <p className="text-xs text-gray-500 mb-1">Type</p>
-          <p className="text-sm text-gray-300 capitalize">{project.project_type}</p>
-        </div>
-
-        {project.domain && (
+        {project.auto_deploy && (
           <div>
-            <p className="text-xs text-gray-500 mb-1">Domain</p>
-            <p className="text-sm text-gray-300">{project.domain}</p>
-          </div>
-        )}
-
-        {project.last_deployment && (
-          <div>
-            <p className="text-xs text-gray-500 mb-1">Last Deployment</p>
-            <p className="text-sm text-gray-300">
-              {formatDistanceToNow(new Date(project.last_deployment), { addSuffix: true })}
-            </p>
+            <span className="inline-block px-2 py-1 rounded text-xs font-semibold bg-accent/10 text-accent">
+              Auto-deploy on push
+            </span>
           </div>
         )}
       </div>
@@ -87,7 +75,7 @@ export default function ProjectCard({ project }) {
         href={`/projects/${project.id}`}
         className="flex items-center gap-2 text-accent hover:text-blue-400 text-sm font-semibold transition"
       >
-        View Details
+        Open Project
         <ExternalLink className="w-4 h-4" />
       </Link>
     </div>

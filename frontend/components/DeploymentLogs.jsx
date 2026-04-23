@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useDeployment, useProjectDeployments } from '@/lib/hooks/useAuth'
+import { useDeployment, useProjectDeployments, useAppDeployments } from '@/lib/hooks/useAuth'
 import { formatDistanceToNow } from 'date-fns'
 
 function statusClass(status) {
@@ -64,8 +64,12 @@ function LogViewer({ deploymentId, onClose }) {
   )
 }
 
-export default function DeploymentLogs({ projectId }) {
-  const { deployments, isLoading, mutate } = useProjectDeployments(projectId)
+export default function DeploymentLogs({ projectId, appId }) {
+  // Prefer per-app deployments when an appId is given; otherwise project-wide.
+  const project = useProjectDeployments(appId ? null : projectId)
+  const app = useAppDeployments(appId || null)
+  const deployments = appId ? app.deployments : project.deployments
+  const isLoading = appId ? app.isLoading : project.isLoading
   const [selectedId, setSelectedId] = useState(null)
 
   // Auto-select the most recent running/pending deployment

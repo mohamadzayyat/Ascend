@@ -1,30 +1,33 @@
 import { useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { useProject } from '@/lib/hooks/useAuth'
-import DeploymentForm from '@/components/DeploymentForm'
+import { Plus, Play } from 'lucide-react'
+import { apiClient } from '@/lib/api'
+import { useProject, useProjects } from '@/lib/hooks/useAuth'
+import AppCard from '@/components/AppCard'
 import DeploymentLogs from '@/components/DeploymentLogs'
 import ProjectSettings from '@/components/ProjectSettings'
-import ProjectRuntime from '@/components/ProjectRuntime'
 
 export default function ProjectDetail() {
   const router = useRouter()
   const { id } = router.query
-  const { project, isLoading } = useProject(id)
-  const [activeTab, setActiveTab] = useState('overview')
+  const { project, isLoading, mutate } = useProject(id)
+  const { mutate: mutateAll } = useProjects()
+  const [activeTab, setActiveTab] = useState('apps')
+  const [deployingAll, setDeployingAll] = useState(false)
+  const [deployError, setDeployError] = useState('')
 
   if (!id) return null
-
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-accent border-t-transparent rounded-full spinner mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading project...</p>
+          <div className="w-12 h-12 border-4 border-accent border-t-transparent rounded-full spinner mx-auto mb-4" />
+          <p className="text-gray-400">Loading project…</p>
         </div>
       </div>
     )
   }
-
   if (!project) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -33,30 +36,60 @@ export default function ProjectDetail() {
     )
   }
 
+  const apps = project.apps || []
+
+  const deployAll = async () => {
+    if (!apps.length) return
+    setDeployingAll(true)
+    setDeployError('')
+    try {
+      await apiClient.deploy(project.id)
+      mutate()
+      mutateAll()
+    } catch (err) {
+      setDeployError(err.response?.data?.error || 'Failed to deploy')
+    } finally {
+      setDeployingAll(false)
+    }
+  }
+
   return (
     <div className="p-8">
-      {/* Header */}
       <div className="mb-8">
-        <div className="flex items-center gap-4 mb-4">
-          <h1 className="text-4xl font-bold text-white">{project.name}</h1>
-          <span
-            className={`px-3 py-1 rounded-full text-xs font-semibold ${
-              project.status === 'deployed'
-                ? 'bg-green-500/20 text-green-400'
-                : project.status === 'deploying'
-                ? 'bg-yellow-500/20 text-yellow-400'
-                : 'bg-red-500/20 text-red-400'
-            }`}
-          >
-            {project.status}
-          </span>
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h1 className="text-4xl font-bold text-white mb-2">{project.name}</h1>
+            <p className="text-gray-400">{project.description}</p>
+            <p className="text-gray-500 text-sm mt-2 font-mono">
+              {project.github_url} · {project.github_branch}
+            </p>
+          </div>
+          <div className="flex gap-3">
+            <Link
+              href={`/projects/${project.id}/apps/new`}
+              className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-gray-700 border border-gray-600 text-white font-semibold rounded-lg transition"
+            >
+              <Plus className="w-4 h-4" /> Add App
+            </Link>
+            {apps.length > 0 && (
+              <button
+                onClick={deployAll}
+                disabled={deployingAll}
+                className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50"
+              >
+                <Play className="w-4 h-4" />
+                {deployingAll ? 'Starting…' : 'Deploy All'}
+              </button>
+            )}
+          </div>
         </div>
-        <p className="text-gray-400">{project.description}</p>
+        {deployError && (
+          <p className="text-red-400 text-sm mt-3">{deployError}</p>
+        )}
       </div>
 
-      {/* Tabs */}
       <div className="flex gap-4 mb-8 border-b border-gray-700">
-        {['overview', 'deployments', 'settings'].map((tab) => (
+        {['apps', 'deployments', 'settings'].map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -71,40 +104,25 @@ export default function ProjectDetail() {
         ))}
       </div>
 
-      {/* Tab Content */}
-      {activeTab === 'overview' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <div className="bg-secondary rounded-lg border border-gray-700 p-6">
-              <h2 className="text-xl font-bold text-white mb-4">Project Information</h2>
-              <div className="space-y-4">
-                <div>
-                  <p className="text-gray-400 text-sm">GitHub URL</p>
-                  <p className="text-white font-mono">{project.github_url}</p>
-                </div>
-                <div>
-                  <p className="text-gray-400 text-sm">Branch</p>
-                  <p className="text-white">{project.github_branch}</p>
-                </div>
-                <div>
-                  <p className="text-gray-400 text-sm">Type</p>
-                  <p className="text-white capitalize">{project.project_type}</p>
-                </div>
-                {project.domain && (
-                  <div>
-                    <p className="text-gray-400 text-sm">Domain</p>
-                    <p className="text-white">{project.domain}</p>
-                  </div>
-                )}
-              </div>
+      {activeTab === 'apps' && (
+        <div>
+          {apps.length === 0 ? (
+            <div className="bg-secondary rounded-lg border border-dashed border-gray-700 p-12 text-center">
+              <p className="text-gray-400 mb-4">No apps in this project yet.</p>
+              <Link
+                href={`/projects/${project.id}/apps/new`}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition"
+              >
+                <Plus className="w-4 h-4" /> Add First App
+              </Link>
             </div>
-
-            <ProjectRuntime projectId={project.id} />
-          </div>
-
-          <div>
-            <DeploymentForm projectId={project.id} />
-          </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {apps.map((a) => (
+                <AppCard key={a.id} app={a} onDeployStarted={() => mutate()} />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -113,7 +131,7 @@ export default function ProjectDetail() {
       )}
 
       {activeTab === 'settings' && (
-        <ProjectSettings project={project} />
+        <ProjectSettings project={project} onUpdate={() => mutate()} />
       )}
     </div>
   )

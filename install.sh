@@ -270,11 +270,10 @@ EOF
 init_db() {
     section "Initialising database"
     cd "$INSTALL_DIR"
-    # db.create_all() is safe to run multiple times — skips existing tables
+    # db.create_all() and migrate_schema() both run on import (see app.py),
+    # so just importing is enough — this is idempotent.
     venv/bin/python - <<'PYEOF'
-from app import app, db
-with app.app_context():
-    db.create_all()
+import app  # triggers db.create_all() + migrate_schema() inside app.py
 PYEOF
     ok "Database ready at $INSTALL_DIR/ascend.db"
 }

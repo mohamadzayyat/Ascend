@@ -108,14 +108,36 @@ export function useDeployment(id) {
   }
 }
 
-export function useProjectRuntime(projectId) {
+export function useApp(appId) {
   const { data, error, mutate } = useSWR(
-    projectId ? `${API_URL}/api/project/${projectId}/runtime` : null,
+    appId ? `${API_URL}/api/app/${appId}` : null,
+    fetchWithCreds
+  )
+  return { app: data, isLoading: !data && !error, isError: !!error, mutate }
+}
+
+export function useAppRuntime(appId) {
+  const { data, error, mutate } = useSWR(
+    appId ? `${API_URL}/api/app/${appId}/runtime` : null,
     fetchWithCreds,
     { refreshInterval: 5000, dedupingInterval: 2000 }
   )
   return {
     runtime: data || null,
+    isLoading: !error && !data,
+    isError: !!error,
+    mutate,
+  }
+}
+
+export function useAppDeployments(appId) {
+  const { data, error, mutate } = useSWR(
+    appId ? `${API_URL}/api/app/${appId}/deployments` : null,
+    fetchWithCreds,
+    { refreshInterval: 10000, dedupingInterval: 2000 }
+  )
+  return {
+    deployments: data || [],
     isLoading: !error && !data,
     isError: !!error,
     mutate,

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Copy, Check } from 'lucide-react'
-import { useProjectRuntime } from '@/lib/hooks/useAuth'
+import { useAppRuntime } from '@/lib/hooks/useAuth'
 
 function formatUptime(ms) {
   if (!ms || ms <= 0) return '—'
@@ -14,8 +14,8 @@ function formatUptime(ms) {
   return `${s}s`
 }
 
-export default function ProjectRuntime({ projectId }) {
-  const { runtime, isLoading } = useProjectRuntime(projectId)
+export default function AppRuntime({ appId }) {
+  const { runtime, isLoading } = useAppRuntime(appId)
   const [copied, setCopied] = useState(false)
 
   if (isLoading && !runtime) {
@@ -27,7 +27,7 @@ export default function ProjectRuntime({ projectId }) {
   }
   if (!runtime) return null
 
-  const { pm2, port, port_listening, webhook_path } = runtime
+  const { pm2, port, port_listening, webhook_path, domain } = runtime
   const webhookUrl =
     webhook_path && typeof window !== 'undefined'
       ? `${window.location.origin}${webhook_path}`
@@ -72,7 +72,7 @@ export default function ProjectRuntime({ projectId }) {
           <p className="text-gray-400 text-sm">Port</p>
           {port ? (
             <p className="text-white font-mono">
-              {port}{' '}
+              {port}
               {port_listening === true && (
                 <span className="text-green-400 text-xs ml-2">listening</span>
               )}
@@ -89,23 +89,26 @@ export default function ProjectRuntime({ projectId }) {
           <>
             <div>
               <p className="text-gray-400 text-sm">CPU / Memory</p>
-              <p className="text-white">
-                {pm2.cpu}% · {pm2.memory_mb} MB
-              </p>
+              <p className="text-white">{pm2.cpu}% · {pm2.memory_mb} MB</p>
             </div>
             <div>
               <p className="text-gray-400 text-sm">Uptime · Restarts</p>
-              <p className="text-white">
-                {formatUptime(pm2.uptime_ms)} · {pm2.restarts}
-              </p>
+              <p className="text-white">{formatUptime(pm2.uptime_ms)} · {pm2.restarts}</p>
             </div>
           </>
+        )}
+
+        {domain && (
+          <div className="col-span-2">
+            <p className="text-gray-400 text-sm">Domain</p>
+            <p className="text-white">{domain}</p>
+          </div>
         )}
       </div>
 
       {webhookUrl && (
         <div className="pt-4 border-t border-gray-700">
-          <p className="text-gray-400 text-sm mb-2">GitHub webhook URL</p>
+          <p className="text-gray-400 text-sm mb-2">GitHub webhook URL (project-level)</p>
           <div className="flex items-center gap-2">
             <code className="flex-1 bg-primary px-3 py-2 rounded text-white text-xs font-mono truncate">
               {webhookUrl}
@@ -120,8 +123,8 @@ export default function ProjectRuntime({ projectId }) {
             </button>
           </div>
           <p className="text-gray-500 text-xs mt-2">
-            Paste this into GitHub → Settings → Webhooks. Content type:
-            <code className="mx-1 text-gray-400">application/json</code>.
+            Same webhook for every app in the project. Auto-deploy on push installs this into
+            GitHub automatically when enabled in project settings.
           </p>
         </div>
       )}
