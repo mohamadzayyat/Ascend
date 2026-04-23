@@ -13,9 +13,9 @@ import {
   FileImage,
   FileJson,
   FileLock,
+  FilePlus,
   FileText,
   FileVideo,
-  FilePlus,
   Folder,
   FolderPlus,
   Home,
@@ -90,7 +90,7 @@ function iconMeta(name) {
 }
 
 function formatSize(bytes) {
-  if (bytes === null || bytes === undefined) return '—'
+  if (bytes === null || bytes === undefined) return '-'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -98,7 +98,7 @@ function formatSize(bytes) {
 }
 
 function formatTime(iso) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   try {
     return new Date(iso).toLocaleString()
   } catch {
@@ -199,6 +199,18 @@ function highlightText(text, path) {
   return html
 }
 
+function makeEditorTab(path) {
+  return {
+    path,
+    content: '',
+    original: '',
+    loading: true,
+    saving: false,
+    error: '',
+    size: 0,
+  }
+}
+
 export default function AppFileManager({ api }) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState([])
@@ -212,9 +224,12 @@ export default function AppFileManager({ api }) {
   const [searchLimited, setSearchLimited] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
   const [clipboard, setClipboard] = useState(null) // { mode, path, name, is_dir }
-  const [menu, setMenu] = useState(null) // { x, y, entry }
-  const [editor, setEditor] = useState(null) // { path, content, original, saving, error, size }
-  const [preview, setPreview] = useState(null) // { path, kind, url, loading, error }
+  const [dragItem, setDragItem] = useState(null)
+  const [dropTarget, setDropTarget] = useState('')
+  const [menu, setMenu] = useState(null)
+  const [editorTabs, setEditorTabs] = useState([])
+  const [activeEditorPath, setActiveEditorPath] = useState(null)
+  const [preview, setPreview] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [status, setStatus] = useState('')
@@ -250,7 +265,6 @@ export default function AppFileManager({ api }) {
     setSelected(new Set())
   }, [path, search, showHidden])
 
-  // close right-click menu on any outside interaction
   useEffect(() => {
     if (!menu) return
     const close = () => setMenu(null)
@@ -284,9 +298,17 @@ export default function AppFileManager({ api }) {
   const visibleSelectableEntries = useMemo(() => entries.filter((entry) => entry.path), [entries])
   const selectedEntries = useMemo(
     () => visibleSelectableEntries.filter((entry) => selected.has(entry.path)),
-    [visibleSelectableEntries, selected],
+    [visibleSelectableEntries, selected]
   )
   const allSelected = visibleSelectableEntries.length > 0 && selectedEntries.length === visibleSelectableEntries.length
+  const activeEditor = useMemo(
+    () => editorTabs.find((tab) => tab.path === activeEditorPath) || null,
+    [editorTabs, activeEditorPath]
+  )
+
+  const updateEditorTab = useCallback((tabPath, updater) => {
+    setEditorTabs((tabs) => tabs.map((tab) => (tab.path === tabPath ? updater(tab) : tab)))
+  }, [])
 
   const openEntry = (entry) => {
     if (entry.is_dir) {
@@ -294,7 +316,7 @@ export default function AppFileManager({ api }) {
       return
     }
     const kind = fileKind(entry.name)
-    if (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'pdf') {
+    if (['image', 'video', 'audio', 'pdf'].includes(kind)) {
       openPreview(entry.path, kind)
       return
     }
@@ -302,7 +324,7 @@ export default function AppFileManager({ api }) {
       openEditor(entry.path)
       return
     }
-    flash('Binary file — use Download from right-click.')
+    flash('Binary file - use Download from the menu.')
   }
 
   const openPreview = async (relPath, kind) => {
@@ -315,7 +337,7 @@ export default function AppFileManager({ api }) {
       setPreview((p) =>
         p && p.path === relPath
           ? { ...p, loading: false, error: err.response?.data?.error || 'Failed to load preview' }
-          : p,
+          : p
       )
     }
   }
@@ -328,10 +350,11 @@ export default function AppFileManager({ api }) {
   }
 
   const openEditor = async (relPath) => {
-    setEditor({ path: relPath, content: '', original: '', loading: true, saving: false, error: '', size: 0 })
+    setActiveEditorPath(relPath)
+    setEditorTabs((tabs) => (tabs.some((tab) => tab.path === relPath) ? tabs : [...tabs, makeEditorTab(relPath)]))
     try {
       const res = await api.read(relPath)
-      setEditor({
+      updateEditorTab(relPath, () => ({
         path: relPath,
         content: res.data.content,
         original: res.data.content,
@@ -339,22 +362,49 @@ export default function AppFileManager({ api }) {
         loading: false,
         saving: false,
         error: '',
-      })
+      }))
     } catch (err) {
-      setEditor((e) => e && { ...e, loading: false, error: err.response?.data?.error || 'Failed to read file' })
+      updateEditorTab(relPath, (tab) => ({
+        ...tab,
+        loading: false,
+        error: err.response?.data?.error || 'Failed to read file',
+      }))
     }
   }
 
-  const saveEditor = async () => {
-    if (!editor) return
-    setEditor((e) => ({ ...e, saving: true, error: '' }))
+  const closeEditorTab = (tabPath) => {
+    setEditorTabs((tabs) => {
+      const next = tabs.filter((tab) => tab.path !== tabPath)
+      if (activeEditorPath === tabPath) {
+        const idx = tabs.findIndex((tab) => tab.path === tabPath)
+        const nextActive = next[idx] || next[idx - 1] || next[0] || null
+        setActiveEditorPath(nextActive?.path || null)
+      }
+      return next
+    })
+  }
+
+  const saveEditorTab = async (tabPath = activeEditorPath) => {
+    if (!tabPath) return
+    const tab = editorTabs.find((item) => item.path === tabPath)
+    if (!tab) return
+    updateEditorTab(tabPath, (current) => ({ ...current, saving: true, error: '' }))
     try {
-      await api.write(editor.path, editor.content)
-      setEditor(null)
-      flash('Saved')
+      await api.write(tab.path, tab.content)
+      updateEditorTab(tabPath, (current) => ({
+        ...current,
+        original: current.content,
+        saving: false,
+        error: '',
+      }))
+      flash(`Saved ${baseName(tab.path)}`)
       load()
     } catch (err) {
-      setEditor((e) => ({ ...e, saving: false, error: err.response?.data?.error || 'Failed to save' }))
+      updateEditorTab(tabPath, (current) => ({
+        ...current,
+        saving: false,
+        error: err.response?.data?.error || 'Failed to save',
+      }))
     }
   }
 
@@ -378,12 +428,13 @@ export default function AppFileManager({ api }) {
     uploadFiles(e.target.files, { unzip: false })
     e.target.value = ''
   }
+
   const onPickZip = (e) => {
     uploadFiles(e.target.files, { unzip: true })
     e.target.value = ''
   }
 
-  const onDrop = (e) => {
+  const onDropUpload = (e) => {
     e.preventDefault()
     setDragOver(false)
     if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files)
@@ -416,11 +467,9 @@ export default function AppFileManager({ api }) {
   }
 
   const renameEntry = async (entry) => {
-    const current = entry.name
-    const next = window.prompt(`Rename "${current}" to:`, current)
-    if (!next || next === current) return
-    const parent = parentPath(entry.path)
-    const target = joinPath(parent, next)
+    const next = window.prompt(`Rename "${entry.name}" to:`, entry.name)
+    if (!next || next === entry.name) return
+    const target = joinPath(parentPath(entry.path), next)
     try {
       await api.rename(entry.path, target)
       flash(`Renamed to ${next}`)
@@ -452,9 +501,9 @@ export default function AppFileManager({ api }) {
     flash(`Cut ${entry.name}`)
   }
 
-  const pasteClipboard = async () => {
+  const pasteClipboardTo = async (targetPath = path) => {
     if (!clipboard) return
-    const destination = joinPath(path, clipboard.name)
+    const destination = joinPath(targetPath, clipboard.name)
     if (destination === clipboard.path) {
       setError('Already in this folder')
       return
@@ -462,8 +511,8 @@ export default function AppFileManager({ api }) {
     try {
       if (clipboard.mode === 'cut') {
         await api.rename(clipboard.path, destination)
-        flash(`Moved ${clipboard.name}`)
         setClipboard(null)
+        flash(`Moved ${clipboard.name}`)
       } else {
         await api.copy(clipboard.path, destination)
         flash(`Pasted ${clipboard.name}`)
@@ -486,6 +535,17 @@ export default function AppFileManager({ api }) {
     }
   }
 
+  const saveBlob = (blob, name) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   const downloadEntry = async (entry) => {
     if (entry.is_dir) {
       try {
@@ -499,17 +559,6 @@ export default function AppFileManager({ api }) {
     }
     const url = api.downloadUrl(entry.path)
     window.open(url, '_blank')
-  }
-
-  const saveBlob = (blob, name) => {
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = name
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
   }
 
   const toggleSelection = (entry, checked) => {
@@ -541,7 +590,7 @@ export default function AppFileManager({ api }) {
   const bulkDownloadZip = async () => {
     if (!selectedEntries.length) return
     try {
-      const outputName = path ? `${path.split('/').pop() || 'selection'}.zip` : 'selection.zip'
+      const outputName = path ? `${baseName(path) || 'selection'}.zip` : 'selection.zip'
       const res = await api.archiveDownload(selectedEntries.map((entry) => entry.path), path, outputName)
       saveBlob(res.data, outputName)
       flash(`Downloaded ${selectedEntries.length} item(s) as zip`)
@@ -552,7 +601,7 @@ export default function AppFileManager({ api }) {
 
   const bulkCreateZip = async () => {
     if (!selectedEntries.length) return
-    const suggested = `${path ? path.split('/').pop() || 'selection' : 'selection'}-${Date.now()}.zip`
+    const suggested = `${path ? baseName(path) || 'selection' : 'selection'}-${Date.now()}.zip`
     const outputName = window.prompt('Zip file name', suggested)
     if (!outputName) return
     try {
@@ -570,13 +619,48 @@ export default function AppFileManager({ api }) {
     setMenu({ x: e.clientX, y: e.clientY, entry })
   }
 
+  const onEntryDragStart = (entry) => {
+    setDragItem(entry)
+  }
+
+  const onEntryDragEnd = () => {
+    setDragItem(null)
+    setDropTarget('')
+  }
+
+  const onFolderDragOver = (e, entry) => {
+    if (!dragItem || !entry.is_dir) return
+    e.preventDefault()
+    setDropTarget(entry.path)
+  }
+
+  const onFolderDrop = async (e, entry) => {
+    e.preventDefault()
+    setDropTarget('')
+    if (!dragItem || !entry.is_dir) return
+    const destination = joinPath(entry.path, dragItem.name)
+    if (destination === dragItem.path) {
+      setDragItem(null)
+      return
+    }
+    try {
+      await api.rename(dragItem.path, destination)
+      flash(`Moved ${dragItem.name} to ${entry.name}`)
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Drag move failed')
+    } finally {
+      setDragItem(null)
+    }
+  }
+
   return (
     <div className="bg-secondary rounded-lg border border-gray-700 p-6">
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div className="min-w-[240px] flex-1">
           <h2 className="text-xl font-bold text-white">Files</h2>
           <p className="text-sm text-gray-500 mt-1">
-            Browse, edit, upload, search, and archive files inside this deployment directory.
+            Browse, edit, upload, search, archive, and move files inside this deployment directory.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -623,7 +707,7 @@ export default function AppFileManager({ api }) {
           </button>
           <button
             type="button"
-            onClick={pasteClipboard}
+            onClick={() => pasteClipboardTo(path)}
             disabled={!clipboard}
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
             title={clipboard ? `Paste ${clipboard.name}` : 'Copy or cut something first'}
@@ -645,7 +729,7 @@ export default function AppFileManager({ api }) {
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
             title="Upload a .zip and extract it here"
           >
-            <Plus className="w-4 h-4" /> Upload &amp; unzip
+            <Plus className="w-4 h-4" /> Upload & unzip
           </button>
           <input ref={uploadRef} type="file" multiple className="hidden" onChange={onPickUpload} />
           <input ref={zipRef} type="file" accept=".zip,application/zip" className="hidden" onChange={onPickZip} />
@@ -654,9 +738,7 @@ export default function AppFileManager({ api }) {
 
       {selectedEntries.length > 0 && (
         <div className="mb-4 flex items-center justify-between gap-3 flex-wrap rounded border border-accent/30 bg-accent/10 px-4 py-3">
-          <div className="text-sm text-gray-200">
-            {selectedEntries.length} selected
-          </div>
+          <div className="text-sm text-gray-200">{selectedEntries.length} selected</div>
           <div className="flex items-center gap-2 flex-wrap">
             <button
               type="button"
@@ -686,12 +768,13 @@ export default function AppFileManager({ api }) {
       {clipboard && (
         <div className="mb-4 flex items-center justify-between gap-3 flex-wrap rounded border border-gray-700 bg-primary/40 px-4 py-3">
           <div className="text-sm text-gray-200">
-            {clipboard.mode === 'cut' ? 'Cut' : 'Copied'}: <span className="font-mono text-xs">{clipboard.path}</span>
+            {clipboard.mode === 'cut' ? 'Cut' : 'Copied'}:{' '}
+            <span className="font-mono text-xs">{clipboard.path}</span>
           </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={pasteClipboard}
+              onClick={() => pasteClipboardTo(path)}
               className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
             >
               <ClipboardPaste className="w-4 h-4" /> Paste here
@@ -716,18 +799,36 @@ export default function AppFileManager({ api }) {
         >
           <Home className="w-3.5 h-3.5" /> root
         </button>
-        {breadcrumbs.map((c, i) => {
+        {clipboard && (
+          <button
+            type="button"
+            onClick={() => pasteClipboardTo('')}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-primary hover:bg-gray-700 text-white"
+          >
+            <ClipboardPaste className="w-3.5 h-3.5" /> paste here
+          </button>
+        )}
+        {breadcrumbs.map((crumb, i) => {
           const isLast = i === breadcrumbs.length - 1
           return (
-            <span key={c.path} className="inline-flex items-center gap-1">
+            <span key={crumb.path} className="inline-flex items-center gap-1">
               <ChevronRight className="w-3.5 h-3.5 text-gray-500" />
               <button
                 type="button"
-                onClick={() => setPath(c.path)}
+                onClick={() => setPath(crumb.path)}
                 className={`px-2 py-1 rounded cursor-pointer hover:bg-gray-700 hover:underline transition ${isLast ? 'text-accent font-semibold' : 'text-gray-200'}`}
               >
-                {c.name}
+                {crumb.name}
               </button>
+              {clipboard && (
+                <button
+                  type="button"
+                  onClick={() => pasteClipboardTo(crumb.path)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-primary hover:bg-gray-700 text-white text-xs"
+                >
+                  <ClipboardPaste className="w-3 h-3" /> paste
+                </button>
+              )}
             </span>
           )
         })}
@@ -748,19 +849,17 @@ export default function AppFileManager({ api }) {
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
+        onDrop={onDropUpload}
         className={`rounded border ${dragOver ? 'border-accent bg-accent/5' : 'border-gray-700'} overflow-hidden`}
       >
         {!exists ? (
           <div className="p-8 text-center text-gray-400 text-sm">
-            The app's deploy directory does not exist yet. Deploy the app first, then files will appear here.
+            The app&apos;s deploy directory does not exist yet. Deploy the app first, then files will appear here.
           </div>
         ) : loading && entries.length === 0 ? (
-          <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
+          <div className="p-8 text-center text-gray-400 text-sm">Loading...</div>
         ) : entries.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 text-sm">
-            Empty folder. Drop files here to upload.
-          </div>
+          <div className="p-8 text-center text-gray-500 text-sm">Empty folder. Drop files here to upload.</div>
         ) : (
           <table className="w-full text-sm">
             <thead className="bg-primary/50 text-gray-400 text-xs uppercase">
@@ -782,10 +881,7 @@ export default function AppFileManager({ api }) {
             </thead>
             <tbody>
               {path && (
-                <tr
-                  className="hover:bg-primary/40 cursor-pointer border-t border-gray-800"
-                  onClick={() => setPath(parentPath(path))}
-                >
+                <tr className="hover:bg-primary/40 cursor-pointer border-t border-gray-800" onClick={() => setPath(parentPath(path))}>
                   <td className="px-3 py-2 text-gray-300" colSpan={5}>
                     <span className="inline-flex items-center gap-2">
                       <Folder className="w-4 h-4 text-gray-500" /> ..
@@ -794,44 +890,51 @@ export default function AppFileManager({ api }) {
                 </tr>
               )}
               {entries.map((entry) => {
-                const { Icon, color } = entry.is_dir
-                  ? { Icon: Folder, color: 'text-accent' }
-                  : iconMeta(entry.name)
+                const { Icon, color } = entry.is_dir ? { Icon: Folder, color: 'text-accent' } : iconMeta(entry.name)
+                const isDrop = dropTarget === entry.path
                 return (
-                <tr
-                  key={entry.path}
-                  onClick={() => openEntry(entry)}
-                  onContextMenu={(e) => onContextMenu(e, entry)}
-                  className="hover:bg-primary/40 cursor-pointer border-t border-gray-800"
-                >
-                  <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(entry.path)}
-                      onChange={(e) => toggleSelection(entry, e.target.checked)}
-                      className="accent-accent"
-                      aria-label={`Select ${entry.name}`}
-                    />
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className="inline-flex items-center gap-2 text-gray-200">
-                      <Icon className={`w-4 h-4 ${color}`} />
-                      {entry.name}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-right text-gray-400 font-mono text-xs">{formatSize(entry.size)}</td>
-                  <td className="px-3 py-2 text-right text-gray-500 text-xs">{formatTime(entry.mtime)}</td>
-                  <td className="px-3 py-2 text-right">
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); onContextMenu(e, entry) }}
-                      className="p-1 hover:bg-gray-700 rounded text-gray-400"
-                      title="Actions"
-                    >
-                      <MoreHorizontal className="w-4 h-4" />
-                    </button>
-                  </td>
-                </tr>
+                  <tr
+                    key={entry.path}
+                    draggable={!!entry.path}
+                    onDragStart={() => onEntryDragStart(entry)}
+                    onDragEnd={onEntryDragEnd}
+                    onDragOver={(e) => onFolderDragOver(e, entry)}
+                    onDrop={(e) => onFolderDrop(e, entry)}
+                    onClick={() => openEntry(entry)}
+                    onContextMenu={(e) => onContextMenu(e, entry)}
+                    className={`hover:bg-primary/40 cursor-pointer border-t border-gray-800 ${isDrop ? 'bg-accent/10' : ''}`}
+                  >
+                    <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(entry.path)}
+                        onChange={(e) => toggleSelection(entry, e.target.checked)}
+                        className="accent-accent"
+                        aria-label={`Select ${entry.name}`}
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className="inline-flex items-center gap-2 text-gray-200">
+                        <Icon className={`w-4 h-4 ${color}`} />
+                        {entry.name}
+                        {entry.is_dir && dragItem && dragItem.path !== entry.path && (
+                          <span className="text-xs text-gray-500">drop to move</span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right text-gray-400 font-mono text-xs">{formatSize(entry.size)}</td>
+                    <td className="px-3 py-2 text-right text-gray-500 text-xs">{formatTime(entry.mtime)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onContextMenu(e, entry) }}
+                        className="p-1 hover:bg-gray-700 rounded text-gray-400"
+                        title="Actions"
+                      >
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
                 )
               })}
             </tbody>
@@ -842,7 +945,7 @@ export default function AppFileManager({ api }) {
       {menu && (
         <div
           style={{ left: menu.x, top: menu.y }}
-          className="fixed z-50 bg-secondary border border-gray-700 rounded shadow-lg py-1 min-w-[160px]"
+          className="fixed z-50 bg-secondary border border-gray-700 rounded shadow-lg py-1 min-w-[180px]"
           onClick={(e) => e.stopPropagation()}
         >
           {!menu.entry.is_dir && (
@@ -851,9 +954,9 @@ export default function AppFileManager({ api }) {
                 <MenuItem
                   icon={<Eye className="w-4 h-4" />}
                   onClick={() => {
-                    const e = menu.entry
+                    const entry = menu.entry
                     setMenu(null)
-                    openPreview(e.path, fileKind(e.name))
+                    openPreview(entry.path, fileKind(entry.name))
                   }}
                 >
                   Preview
@@ -861,14 +964,22 @@ export default function AppFileManager({ api }) {
               )}
               <MenuItem
                 icon={<Edit3 className="w-4 h-4" />}
-                onClick={() => { setMenu(null); openEditor(menu.entry.path) }}
+                onClick={() => {
+                  const entry = menu.entry
+                  setMenu(null)
+                  openEditor(entry.path)
+                }}
                 disabled={fileKind(menu.entry.name) !== 'text'}
               >
                 Edit
               </MenuItem>
               <MenuItem
                 icon={<Download className="w-4 h-4" />}
-                onClick={() => { setMenu(null); downloadEntry(menu.entry) }}
+                onClick={() => {
+                  const entry = menu.entry
+                  setMenu(null)
+                  downloadEntry(entry)
+                }}
               >
                 Download
               </MenuItem>
@@ -877,45 +988,73 @@ export default function AppFileManager({ api }) {
           {menu.entry.is_dir && (
             <MenuItem
               icon={<FileArchive className="w-4 h-4" />}
-              onClick={() => { setMenu(null); downloadEntry(menu.entry) }}
+              onClick={() => {
+                const entry = menu.entry
+                setMenu(null)
+                downloadEntry(entry)
+              }}
             >
               Download zip
             </MenuItem>
           )}
           <MenuItem
             icon={<Copy className="w-4 h-4" />}
-            onClick={() => { const e = menu.entry; setMenu(null); copyEntry(e) }}
+            onClick={() => {
+              const entry = menu.entry
+              setMenu(null)
+              copyEntry(entry)
+            }}
           >
             Copy
           </MenuItem>
           <MenuItem
             icon={<Scissors className="w-4 h-4" />}
-            onClick={() => { const e = menu.entry; setMenu(null); cutEntry(e) }}
+            onClick={() => {
+              const entry = menu.entry
+              setMenu(null)
+              cutEntry(entry)
+            }}
           >
             Cut
           </MenuItem>
           <MenuItem
             icon={<ClipboardPaste className="w-4 h-4" />}
-            onClick={() => { setMenu(null); pasteClipboard() }}
+            onClick={() => {
+              const target = menu.entry.is_dir ? menu.entry.path : parentPath(menu.entry.path)
+              setMenu(null)
+              pasteClipboardTo(target)
+            }}
             disabled={!clipboard}
           >
-            Paste here
+            Paste into folder
           </MenuItem>
           <MenuItem
             icon={<Edit3 className="w-4 h-4" />}
-            onClick={() => { const e = menu.entry; setMenu(null); renameEntry(e) }}
+            onClick={() => {
+              const entry = menu.entry
+              setMenu(null)
+              renameEntry(entry)
+            }}
           >
             Rename
           </MenuItem>
           <MenuItem
             icon={<ChevronRight className="w-4 h-4" />}
-            onClick={() => { const e = menu.entry; setMenu(null); moveEntry(e) }}
+            onClick={() => {
+              const entry = menu.entry
+              setMenu(null)
+              moveEntry(entry)
+            }}
           >
             Move
           </MenuItem>
           <MenuItem
             icon={<Trash2 className="w-4 h-4" />}
-            onClick={() => { const e = menu.entry; setMenu(null); deleteEntry(e) }}
+            onClick={() => {
+              const entry = menu.entry
+              setMenu(null)
+              deleteEntry(entry)
+            }}
             danger
           >
             Delete
@@ -923,12 +1062,18 @@ export default function AppFileManager({ api }) {
         </div>
       )}
 
-      {editor && (
+      {activeEditor && (
         <CodeEditorModal
-          editor={editor}
-          onChange={(content) => setEditor((e) => ({ ...e, content }))}
-          onSave={saveEditor}
-          onClose={() => setEditor(null)}
+          tabs={editorTabs}
+          activePath={activeEditorPath}
+          onActivate={setActiveEditorPath}
+          onCloseTab={closeEditorTab}
+          onChange={(content) => updateEditorTab(activeEditorPath, (tab) => ({ ...tab, content }))}
+          onSave={() => saveEditorTab(activeEditorPath)}
+          onCloseAll={() => {
+            setEditorTabs([])
+            setActiveEditorPath(null)
+          }}
         />
       )}
 
@@ -936,7 +1081,7 @@ export default function AppFileManager({ api }) {
         <PreviewModal
           preview={preview}
           onClose={closePreview}
-          onDownload={() => downloadEntry({ path: preview.path, name: preview.path.split('/').pop(), is_dir: false })}
+          onDownload={() => downloadEntry({ path: preview.path, name: baseName(preview.path), is_dir: false })}
         />
       )}
     </div>
@@ -944,12 +1089,9 @@ export default function AppFileManager({ api }) {
 }
 
 function PreviewModal({ preview, onClose, onDownload }) {
-  const fileName = preview.path.split('/').pop()
+  const fileName = baseName(preview.path)
   return (
-    <div
-      className="fixed inset-0 z-40 bg-black/80 flex items-center justify-center p-4"
-      onMouseDown={onClose}
-    >
+    <div className="fixed inset-0 z-40 bg-black/80 flex items-center justify-center p-4" onMouseDown={onClose}>
       <div
         className="bg-secondary border border-gray-700 rounded-lg w-full max-w-5xl max-h-[90vh] flex flex-col"
         onMouseDown={(e) => e.stopPropagation()}
@@ -964,41 +1106,24 @@ function PreviewModal({ preview, onClose, onDownload }) {
             >
               <Download className="w-4 h-4" /> Download
             </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 hover:bg-gray-700 rounded text-gray-400"
-              title="Close"
-            >
+            <button type="button" onClick={onClose} className="p-1.5 hover:bg-gray-700 rounded text-gray-400" title="Close">
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
         <div className="flex-1 overflow-auto flex items-center justify-center bg-primary/40 p-4 min-h-[40vh]">
           {preview.loading ? (
-            <div className="text-gray-400 text-sm">Loading preview…</div>
+            <div className="text-gray-400 text-sm">Loading preview...</div>
           ) : preview.error ? (
             <div className="text-red-400 text-sm">{preview.error}</div>
           ) : preview.kind === 'image' ? (
-            <img
-              src={preview.url}
-              alt={fileName}
-              className="max-w-full max-h-[75vh] object-contain"
-            />
+            <img src={preview.url} alt={fileName} className="max-w-full max-h-[75vh] object-contain" />
           ) : preview.kind === 'video' ? (
-            <video
-              src={preview.url}
-              controls
-              className="max-w-full max-h-[75vh]"
-            />
+            <video src={preview.url} controls className="max-w-full max-h-[75vh]" />
           ) : preview.kind === 'audio' ? (
             <audio src={preview.url} controls className="w-full max-w-xl" />
           ) : preview.kind === 'pdf' ? (
-            <iframe
-              src={preview.url}
-              title={fileName}
-              className="w-full h-[75vh] bg-white rounded"
-            />
+            <iframe src={preview.url} title={fileName} className="w-full h-[75vh] bg-white rounded" />
           ) : null}
         </div>
       </div>
@@ -1022,77 +1147,14 @@ function MenuItem({ icon, children, onClick, disabled, danger }) {
   )
 }
 
-function EditorModal({ editor, onChange, onSave, onClose }) {
-  const dirty = editor.content !== editor.original
-  const onKeyDown = (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-      e.preventDefault()
-      onSave()
-    }
-  }
-  return (
-    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onMouseDown={onClose}>
-      <div
-        className="bg-secondary border border-gray-700 rounded-lg w-full max-w-4xl h-[80vh] flex flex-col"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-gray-700 p-3">
-          <p className="font-mono text-sm text-gray-300 truncate">
-            {editor.path}{dirty ? ' •' : ''}
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={!dirty || editor.saving || editor.loading}
-              className="inline-flex items-center gap-1 px-3 py-1.5 bg-accent hover:bg-blue-600 rounded text-white text-sm disabled:opacity-50"
-            >
-              <Save className="w-4 h-4" /> {editor.saving ? 'Saving…' : 'Save'}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 hover:bg-gray-700 rounded text-gray-400"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-        {editor.error && (
-          <div className="bg-red-500/10 border-b border-red-500/30 px-3 py-2 text-red-300 text-sm">{editor.error}</div>
-        )}
-        <div className="flex-1 overflow-hidden">
-          {editor.loading ? (
-            <div className="h-full flex items-center justify-center text-gray-400 text-sm">Loading…</div>
-          ) : (
-            <textarea
-              value={editor.content}
-              onChange={(e) => onChange(e.target.value)}
-              onKeyDown={onKeyDown}
-              spellCheck={false}
-              className="w-full h-full bg-primary text-gray-100 font-mono text-sm p-4 resize-none outline-none border-0"
-            />
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function CodeEditorModal({ editor, onChange, onSave, onClose }) {
-  const dirty = editor.content !== editor.original
+function CodeEditorModal({ tabs, activePath, onActivate, onCloseTab, onChange, onSave, onCloseAll }) {
+  const activeTab = tabs.find((tab) => tab.path === activePath) || tabs[0] || null
   const textareaRef = useRef(null)
   const gutterRef = useRef(null)
   const highlightRef = useRef(null)
-  const lineCount = Math.max(1, editor.content.split('\n').length)
-  const highlighted = `${highlightText(editor.content, editor.path)}\n`
 
-  const onKeyDown = (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-      e.preventDefault()
-      onSave()
-    }
-  }
+  const lineCount = Math.max(1, (activeTab?.content || '').split('\n').length)
+  const highlighted = `${highlightText(activeTab?.content || '', activeTab?.path || '')}\n`
 
   const syncScroll = () => {
     const top = textareaRef.current?.scrollTop || 0
@@ -1104,44 +1166,79 @@ function CodeEditorModal({ editor, onChange, onSave, onClose }) {
     }
   }
 
+  const onKeyDown = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault()
+      onSave()
+    }
+  }
+
+  if (!activeTab) return null
+
   return (
-    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onMouseDown={onCloseAll}>
       <div
-        className="bg-secondary border border-gray-700 rounded-lg w-full max-w-5xl h-[80vh] flex flex-col"
+        className="bg-secondary border border-gray-700 rounded-lg w-full max-w-6xl h-[85vh] flex flex-col"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-gray-700 p-3">
-          <div>
-            <p className="font-mono text-sm text-gray-300 truncate">
-              {editor.path}{dirty ? ' *' : ''}
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              {editorLanguage(editor.path)} mode
-            </p>
+        <div className="border-b border-gray-700">
+          <div className="flex items-center justify-between px-3 pt-3 gap-3">
+            <div>
+              <p className="text-sm text-gray-300 font-mono truncate">{activeTab.path}</p>
+              <p className="text-xs text-gray-500 mt-1">{editorLanguage(activeTab.path)} mode</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={activeTab.loading || activeTab.saving || activeTab.content === activeTab.original}
+                className="inline-flex items-center gap-1 px-3 py-1.5 bg-accent hover:bg-blue-600 rounded text-white text-sm disabled:opacity-50"
+              >
+                <Save className="w-4 h-4" /> {activeTab.saving ? 'Saving...' : 'Save'}
+              </button>
+              <button type="button" onClick={onCloseAll} className="p-1.5 hover:bg-gray-700 rounded text-gray-400">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={!dirty || editor.saving || editor.loading}
-              className="inline-flex items-center gap-1 px-3 py-1.5 bg-accent hover:bg-blue-600 rounded text-white text-sm disabled:opacity-50"
-            >
-              <Save className="w-4 h-4" /> {editor.saving ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 hover:bg-gray-700 rounded text-gray-400"
-            >
-              <X className="w-4 h-4" />
-            </button>
+          <div className="flex items-end gap-1 px-3 pt-3 overflow-x-auto">
+            {tabs.map((tab) => {
+              const dirty = tab.content !== tab.original
+              const isActive = tab.path === activeTab.path
+              return (
+                <button
+                  key={tab.path}
+                  type="button"
+                  onClick={() => onActivate(tab.path)}
+                  className={`group inline-flex items-center gap-2 px-3 py-2 rounded-t-md border border-b-0 text-sm whitespace-nowrap ${
+                    isActive
+                      ? 'bg-primary border-gray-600 text-white'
+                      : 'bg-primary/40 border-gray-800 text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  <span className="font-mono text-xs">{baseName(tab.path)}</span>
+                  {dirty && <span className="text-accent">*</span>}
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onCloseTab(tab.path)
+                    }}
+                    className="p-0.5 rounded hover:bg-gray-700"
+                  >
+                    <X className="w-3 h-3" />
+                  </span>
+                </button>
+              )
+            })}
           </div>
         </div>
-        {editor.error && (
-          <div className="bg-red-500/10 border-b border-red-500/30 px-3 py-2 text-red-300 text-sm">{editor.error}</div>
+
+        {activeTab.error && (
+          <div className="bg-red-500/10 border-b border-red-500/30 px-3 py-2 text-red-300 text-sm">{activeTab.error}</div>
         )}
+
         <div className="flex-1 overflow-hidden">
-          {editor.loading ? (
+          {activeTab.loading ? (
             <div className="h-full flex items-center justify-center text-gray-400 text-sm">Loading...</div>
           ) : (
             <div className="h-full flex bg-primary text-sm font-mono">
@@ -1164,7 +1261,7 @@ function CodeEditorModal({ editor, onChange, onSave, onClose }) {
                 />
                 <textarea
                   ref={textareaRef}
-                  value={editor.content}
+                  value={activeTab.content}
                   onChange={(e) => onChange(e.target.value)}
                   onKeyDown={onKeyDown}
                   onScroll={syncScroll}
