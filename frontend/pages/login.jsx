@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
-import { useAuth } from '@/lib/hooks/useAuth'
+import { useAuth, useSetupStatus } from '@/lib/hooks/useAuth'
 
 export default function Login() {
   const router = useRouter()
   const { user, login } = useAuth()
+  const { initialized } = useSetupStatus()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -87,12 +88,14 @@ export default function Login() {
             </button>
           </form>
 
-          <div className="mt-6 text-center text-gray-400 text-sm">
-            No account yet?{' '}
-            <Link href="/setup" className="text-accent hover:underline">
-              Run setup
-            </Link>
-          </div>
+          {initialized === false && (
+            <div className="mt-6 text-center text-gray-400 text-sm">
+              No account yet?{' '}
+              <Link href="/setup" className="text-accent hover:underline">
+                Run setup
+              </Link>
+            </div>
+          )}
         </div>
       </div>
     </div>

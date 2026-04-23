@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import { apiClient } from '@/lib/api'
-import { useAuth } from '@/lib/hooks/useAuth'
+import { useAuth, useSetupStatus } from '@/lib/hooks/useAuth'
 
 export default function Setup() {
   const router = useRouter()
   const { user, setUser } = useAuth()
+  const { initialized, isLoading: setupStatusLoading } = useSetupStatus()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [email, setEmail] = useState('')
@@ -16,8 +17,16 @@ export default function Setup() {
     if (user) router.push('/dashboard')
   }, [user, router])
 
+  useEffect(() => {
+    if (initialized === true && !user) router.replace('/login')
+  }, [initialized, user, router])
+
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (initialized === true) {
+      router.replace('/login')
+      return
+    }
     setError('')
     setLoading(true)
 
@@ -30,6 +39,14 @@ export default function Setup() {
     } finally {
       setLoading(false)
     }
+  }
+
+  if (setupStatusLoading || initialized === true) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-primary via-secondary to-primary flex items-center justify-center p-4">
+        <div className="text-gray-400">Checking setup status...</div>
+      </div>
+    )
   }
 
   return (

@@ -387,35 +387,41 @@ def api_logout():
     return jsonify({'status': 'logged out'})
 
 
+@app.route('/api/setup-status')
+def api_setup_status():
+    return jsonify({'initialized': User.query.first() is not None})
+
+
 @app.route('/api/auth/setup', methods=['POST'])
 @csrf.exempt
 def api_setup():
-    if User.query.first():
-        return jsonify({'error': 'Setup already complete. Please log in.'}), 400
+    with _setup_lock:
+        if User.query.first():
+            return jsonify({'error': 'Setup already complete. Please log in.'}), 409
 
-    data = request.get_json(silent=True) or {}
-    username = data.get('username', '').strip()
-    password = data.get('password', '')
-    email = data.get('email', '').strip()
+        data = request.get_json(silent=True) or {}
+        username = data.get('username', '').strip()
+        password = data.get('password', '')
+        email = data.get('email', '').strip()
 
-    if not username or len(username) < 3:
-        return jsonify({'error': 'Username must be at least 3 characters'}), 400
-    if not password or len(password) < 6:
-        return jsonify({'error': 'Password must be at least 6 characters'}), 400
-    if User.query.filter_by(username=username).first():
-        return jsonify({'error': 'Username already exists'}), 400
+        if not username or len(username) < 3:
+            return jsonify({'error': 'Username must be at least 3 characters'}), 400
+        if not password or len(password) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        if User.query.filter_by(username=username).first():
+            return jsonify({'error': 'Username already exists'}), 400
 
-    user = User(username=username, email=email or None, is_admin=True)
-    user.set_password(password)
-    db.session.add(user)
-    db.session.commit()
-    login_user(user)
-    return jsonify({
-        'id': user.id,
-        'username': user.username,
-        'email': user.email,
-        'is_admin': user.is_admin,
-    }), 201
+        user = User(username=username, email=email or None, is_admin=True)
+        user.set_password(password)
+        db.session.add(user)
+        db.session.commit()
+        login_user(user)
+        return jsonify({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'is_admin': user.is_admin,
+        }), 201
 
 
 # ═══════════════════════════════════════════
@@ -1896,6 +1902,7 @@ def setup_nginx_config(app_row, log_file):
 _system_cache = {}
 _SYSTEM_TTL = 5  # seconds
 _repo_locks = {}
+_setup_lock = threading.Lock()
 
 
 def _repo_lock(project_id):

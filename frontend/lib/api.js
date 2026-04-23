@@ -21,6 +21,7 @@ export const apiClient = {
   login: (username, password) => api.post('/api/auth/login', { username, password }),
   logout: () => api.post('/api/auth/logout'),
   setup: (username, password, email) => api.post('/api/auth/setup', { username, password, email }),
+  getSetupStatus: () => api.get('/api/setup-status'),
   checkAuth: () => api.get('/api/current-user'),
 
   // Projects (repo-level)

@@ -54,6 +54,25 @@ export function useAuth() {
   }
 }
 
+export function useSetupStatus() {
+  const { data, error, mutate } = useSWR(
+    `${API_URL}/api/setup-status`,
+    fetchWithCreds,
+    {
+      revalidateOnFocus: false,
+      shouldRetryOnError: false,
+      dedupingInterval: 30000,
+    }
+  )
+
+  return {
+    initialized: data?.initialized ?? null,
+    isLoading: !error && !data,
+    isError: !!error,
+    mutate,
+  }
+}
+
 export function useProjects() {
   const { data: projects, error, mutate } = useSWR(
     `${API_URL}/api/projects`,
