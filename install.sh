@@ -400,7 +400,7 @@ server {
 
     client_max_body_size 5G;
 
-    # Flask API and webhooks
+    # Flask API and webhooks (also carries the /api/terminal/ws WebSocket)
     location /api/ {
         proxy_pass         http://127.0.0.1:$BACKEND_PORT;
         proxy_set_header   Host \$http_host;
@@ -409,7 +409,11 @@ server {
         proxy_set_header   X-Forwarded-Proto \$scheme;
         proxy_set_header   X-Forwarded-Host \$http_host;
         proxy_set_header   X-Forwarded-Port \$server_port;
-        proxy_read_timeout 300s;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade \$http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     location /webhook/ {
@@ -485,9 +489,11 @@ User=root
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
 ExecStart=$INSTALL_DIR/venv/bin/gunicorn \\
+    --worker-class gthread \\
     --workers $GUNICORN_WORKERS \\
+    --threads 8 \\
     --bind 127.0.0.1:$BACKEND_PORT \\
-    --timeout 120 \\
+    --timeout 0 \\
     --access-logfile - \\
     app:app
 Restart=on-failure

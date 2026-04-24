@@ -21,6 +21,7 @@ import socket
 import ipaddress
 import tempfile
 import platform
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -3278,6 +3279,186 @@ def api_project_files_recalc_size(project_id):
 def api_app_files_delete(app_id):
     a, err = _fm_owned_app(app_id)
     return err or _fm_handle_delete(a)
+
+
+# ═══════════════════════════════════════════
+# Terminal (server shell via xterm.js + WebSocket)
+# ═══════════════════════════════════════════
+
+try:
+    import pty
+    import termios
+    import fcntl
+    import select as _py_select
+    import signal as _py_signal
+    _TERMINAL_SUPPORTED = True
+except ImportError:
+    # Not on Linux (Windows dev host) — endpoints will return 501.
+    _TERMINAL_SUPPORTED = False
+
+# Session-scoped passphrase gate. Unlock persists until the Flask session is
+# cleared (logout), after which the user must re-enter it.
+TERMINAL_PASSPHRASE = os.environ.get('TERMINAL_PASSPHRASE', 'Open my shell now !@')
+_TERMINAL_ATTEMPTS = {}  # user_id -> {'count': int, 'until': float}
+_TERMINAL_ATTEMPT_LIMIT = 5
+_TERMINAL_LOCKOUT_SECONDS = 60
+
+
+def _terminal_passphrase_ok(given):
+    return hmac.compare_digest(str(given or ''), TERMINAL_PASSPHRASE)
+
+
+def _terminal_unlocked():
+    return bool(session.get('terminal_unlocked'))
+
+
+@app.route('/api/terminal/status')
+@login_required
+def api_terminal_status():
+    return jsonify({
+        'supported': _TERMINAL_SUPPORTED,
+        'unlocked': _terminal_unlocked(),
+    })
+
+
+@app.route('/api/terminal/unlock', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_terminal_unlock():
+    if not _TERMINAL_SUPPORTED:
+        return jsonify({'error': 'Terminal is only available on Linux servers.'}), 501
+    data = request.get_json(silent=True) or {}
+    given = data.get('passphrase', '')
+    now = time.time()
+    rec = _TERMINAL_ATTEMPTS.get(current_user.id, {'count': 0, 'until': 0.0})
+    if rec['until'] > now:
+        wait = int(rec['until'] - now)
+        return jsonify({'error': f'Too many attempts. Try again in {wait}s.'}), 429
+    if _terminal_passphrase_ok(given):
+        session['terminal_unlocked'] = True
+        _TERMINAL_ATTEMPTS.pop(current_user.id, None)
+        return jsonify({'unlocked': True})
+    rec['count'] += 1
+    if rec['count'] >= _TERMINAL_ATTEMPT_LIMIT:
+        rec = {'count': 0, 'until': now + _TERMINAL_LOCKOUT_SECONDS}
+    _TERMINAL_ATTEMPTS[current_user.id] = rec
+    return jsonify({'error': 'Incorrect passphrase.'}), 401
+
+
+@app.route('/api/terminal/lock', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_terminal_lock():
+    session.pop('terminal_unlocked', None)
+    return jsonify({'ok': True})
+
+
+try:
+    from flask_sock import Sock
+    _sock = Sock(app)
+
+    @_sock.route('/api/terminal/ws')
+    def _terminal_ws(ws):
+        # Re-check auth + unlock on every connection. Browsers send the session
+        # cookie with the WebSocket handshake, so Flask-Login populates the
+        # request context the same way it does for HTTP.
+        if not _TERMINAL_SUPPORTED:
+            return
+        if not current_user.is_authenticated or not _terminal_unlocked():
+            return
+
+        try:
+            pid, fd = pty.fork()
+        except OSError:
+            return
+
+        if pid == 0:
+            # Child: replace with an interactive login shell.
+            env = os.environ.copy()
+            env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            home = env.get('HOME') or '/root'
+            try:
+                os.chdir(home)
+            except OSError:
+                pass
+            try:
+                os.execvpe('/bin/bash', ['/bin/bash', '--login'], env)
+            except OSError:
+                os._exit(1)
+            return
+
+        # Parent: pump PTY <-> WebSocket.
+        stop = threading.Event()
+
+        def pump_output():
+            while not stop.is_set():
+                try:
+                    r, _, _ = _py_select.select([fd], [], [], 0.2)
+                except (OSError, ValueError):
+                    break
+                if fd in r:
+                    try:
+                        data = os.read(fd, 4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    try:
+                        ws.send(data.decode('utf-8', errors='replace'))
+                    except Exception:
+                        break
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+        reader = threading.Thread(target=pump_output, daemon=True)
+        reader.start()
+
+        try:
+            while True:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                try:
+                    obj = json.loads(msg) if isinstance(msg, str) else None
+                except json.JSONDecodeError:
+                    obj = None
+                if not isinstance(obj, dict):
+                    continue
+                mtype = obj.get('type')
+                if mtype == 'input':
+                    data = obj.get('data', '')
+                    if isinstance(data, str):
+                        try:
+                            os.write(fd, data.encode('utf-8'))
+                        except OSError:
+                            break
+                elif mtype == 'resize':
+                    try:
+                        cols = max(1, int(obj.get('cols', 80)))
+                        rows = max(1, int(obj.get('rows', 24)))
+                        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+                    except (OSError, ValueError):
+                        pass
+        finally:
+            stop.set()
+            try:
+                os.kill(pid, _py_signal.SIGHUP)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+except ImportError:
+    # flask-sock not installed — unlock endpoints still respond but WS is 404.
+    pass
 
 
 # ═══════════════════════════════════════════

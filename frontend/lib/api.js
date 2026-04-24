@@ -96,6 +96,26 @@ export const apiClient = {
     api.post(`/api/app/${id}/files/recalculate-size`),
   recalcProjectSize: (id) =>
     api.post(`/api/project/${id}/files/recalculate-size`),
+
+  // Terminal — passphrase-gated server shell
+  getTerminalStatus: () => api.get('/api/terminal/status'),
+  unlockTerminal: (passphrase) => api.post('/api/terminal/unlock', { passphrase }),
+  lockTerminal: () => api.post('/api/terminal/lock'),
+}
+
+// Build the WebSocket URL for the server-shell endpoint. Respects
+// NEXT_PUBLIC_API_URL for dev (cross-origin), falls back to same-origin in prod.
+export function terminalWebSocketUrl() {
+  const base = API_URL
+  if (base) {
+    const u = new URL(base)
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
+    u.pathname = '/api/terminal/ws'
+    u.search = ''
+    return u.toString()
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/api/terminal/ws`
 }
 
 // Factory for a file-manager API bound to a specific scope (app or project).
