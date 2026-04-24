@@ -164,7 +164,7 @@ export default function WorkflowPage() {
     <>
       <Head><title>Workflow - Ascend</title></Head>
       <div className="h-full bg-primary p-6 overflow-auto">
-        <div className="mx-auto flex max-w-7xl flex-col gap-5">
+        <div className="flex min-h-full w-full flex-col gap-5">
           <header className="rounded border border-gray-800 bg-secondary p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
@@ -203,7 +203,7 @@ export default function WorkflowPage() {
                 <p className="text-xs text-gray-500">Drag the canvas, zoom with the controls, and use the minimap to jump between areas.</p>
               </div>
             </div>
-            <div className="h-[620px] min-h-[520px]">
+            <div className="h-[calc(100vh-310px)] min-h-[560px]">
               <ReactFlow
                 nodes={nodes}
                 edges={edges}

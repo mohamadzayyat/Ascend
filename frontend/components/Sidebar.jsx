@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { Menu, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
+import { LogOut, Settings, Terminal, Workflow } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -17,28 +17,28 @@ export default function Sidebar() {
 
   return (
     <>
-      {/* Mobile Menu Button */}
       <button
         onClick={toggleSidebar}
         className="fixed top-4 left-4 z-50 md:hidden p-2 rounded-lg bg-secondary border border-gray-700 text-white hover:bg-primary transition"
+        aria-label="Open navigation"
       >
-        <Menu className="w-6 h-6" />
+        <img src="/logo/main_logo.png" alt="" className="h-6 w-6 object-contain" />
       </button>
 
-      {/* Sidebar */}
       <aside
         className={`fixed md:relative w-64 h-screen bg-secondary border-r border-gray-700 transition-transform duration-300 z-40 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
         <div className="p-6 h-full flex flex-col">
-          {/* Logo */}
-          <Link href="/dashboard" className="flex items-center gap-2 mb-8 text-xl font-bold text-white hover:text-accent transition">
-            <span className="text-2xl">🚀</span>
-            Ascend
+          <Link href="/dashboard" className="flex items-center mb-8 hover:opacity-90 transition" aria-label="Ascend dashboard">
+            <img
+              src="/logo/opened_sidebar_logo.png"
+              alt="Ascend"
+              className="h-9 w-auto max-w-full object-contain"
+            />
           </Link>
 
-          {/* Navigation */}
           <nav className="flex-1 space-y-2">
             <NavLink
               href="/dashboard"
@@ -72,10 +72,8 @@ export default function Sidebar() {
             />
           </nav>
 
-          {/* Divider */}
           <div className="border-t border-gray-700 my-4"></div>
 
-          {/* Bottom Actions */}
           <div className="space-y-2">
             <NavLink
               href="/settings"
@@ -100,7 +98,6 @@ export default function Sidebar() {
         </div>
       </aside>
 
-      {/* Overlay */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 bg-black/50 z-30 md:hidden"
