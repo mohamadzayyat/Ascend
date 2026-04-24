@@ -39,6 +39,15 @@ warn()    { echo -e "  ${YELLOW}!${NC} $*"; }
 die()     { echo -e "\n  ${RED}✗ ERROR:${NC} $*\n" >&2; exit 1; }
 section() { echo -e "\n${BOLD}${BLUE}▶ $*${NC}"; }
 
+INSTALL_LOG="/var/log/ascend-install-latest.log"
+
+on_error() {
+    local line=$1 cmd=$2
+    echo -e "\n  ${RED}ERROR:${NC} Installer failed at line $line while running: $cmd" >&2
+    echo -e "  ${YELLOW}!${NC} Full log: $INSTALL_LOG" >&2
+}
+trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
+
 banner() {
     echo -e "${BOLD}${CYAN}"
     cat <<'EOF'
@@ -59,6 +68,13 @@ check_root() {
     [[ $EUID -eq 0 ]] || die "Please run as root:  sudo bash install.sh"
 }
 
+setup_logging() {
+    mkdir -p "$(dirname "$INSTALL_LOG")"
+    : > "$INSTALL_LOG"
+    exec > >(tee -a "$INSTALL_LOG") 2>&1
+    info "Installer log: $INSTALL_LOG"
+}
+
 check_os() {
     if [[ -f /etc/os-release ]]; then
         # shellcheck disable=SC1091
@@ -74,6 +90,27 @@ check_systemd() {
     command -v systemctl &>/dev/null || die "systemd is required but not found."
 }
 
+running_inside_ascend_backend() {
+    local pid unit cgroup ppid
+    pid=$$
+    while [[ -n "$pid" && "$pid" -gt 1 ]]; do
+        unit=$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        [[ "$unit" == "ascend-backend.service" ]] && return 0
+        cgroup=$(cat "/proc/$pid/cgroup" 2>/dev/null || true)
+        [[ "$cgroup" == *"ascend-backend.service"* ]] && return 0
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        [[ -z "$ppid" || "$ppid" == "$pid" ]] && break
+        pid=$ppid
+    done
+    return 1
+}
+
+check_not_panel_terminal() {
+    if running_inside_ascend_backend; then
+        die "Do not run this installer from the Ascend web terminal. Run it from SSH or tmux because the update restarts ascend-backend."
+    fi
+}
+
 # Abort if a port is bound by a process that isn't ours.
 # Allowed owners per port:
 #   PANEL_PORT    → nginx (the reverse proxy we configure)
@@ -84,7 +121,7 @@ port_used_by_other() {
     local port=$1
     local expected=$2
     local pids
-    pids=$(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+    pids=$(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
     [[ -z "$pids" ]] && return 1
     for pid in $pids; do
         local comm unit
@@ -623,8 +660,10 @@ main() {
     banner
 
     check_root
+    setup_logging
     check_os
     check_systemd
+    check_not_panel_terminal
     check_ports
 
     GUNICORN_WORKERS=$(detect_worker_count)
