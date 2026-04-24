@@ -77,7 +77,7 @@ export default function TerminalPage() {
 
         {state === 'unsupported' && (
           <div className="max-w-lg rounded border border-yellow-500/30 bg-yellow-500/10 p-4 text-yellow-200 text-sm">
-            Terminal is only available on Linux servers. This host does not expose a PTY.
+            Terminal is unavailable on this server. This host needs Linux PTY support and websocket support enabled.
           </div>
         )}
 
@@ -134,9 +134,11 @@ function TerminalView({ wsState, setWsState }) {
     let cleanupResize = null
     let term
     let ws
+    let receivedOutput = false
 
     // xterm has to load on the client only — dynamic import avoids SSR errors.
     async function boot() {
+      setWsState('connecting')
       const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
         import('@xterm/xterm'),
         import('@xterm/addon-fit'),
@@ -178,10 +180,17 @@ function TerminalView({ wsState, setWsState }) {
         send({ type: 'resize', cols: term.cols, rows: term.rows })
       }
       ws.onmessage = (evt) => {
-        if (typeof evt.data === 'string') term.write(evt.data)
+        if (typeof evt.data === 'string') {
+          receivedOutput = true
+          term.write(evt.data)
+        }
       }
       ws.onclose = () => {
         setWsState('closed')
+        if (!receivedOutput) {
+          try { term.writeln('\r\n\x1b[90m[connection closed - check websocket proxy headers, then reload or re-unlock]\x1b[0m') } catch { /* noop */ }
+          return
+        }
         try { term.writeln('\r\n\x1b[90m[connection closed — reload or re-unlock to reconnect]\x1b[0m') } catch { /* noop */ }
       }
       ws.onerror = () => {

@@ -34,7 +34,7 @@ SETTINGS_FILE = BASE_DIR / ".deploy_wizard_settings.json"
 NGINX_AVAIL = Path("/etc/nginx/sites-available")
 NGINX_ENABLED = Path("/etc/nginx/sites-enabled")
 
-DEFAULT_CLIENT_MAX_BODY = "100M"
+DEFAULT_CLIENT_MAX_BODY = "6G"
 
 # Track state for rollback
 _rollback_actions: list[dict] = []

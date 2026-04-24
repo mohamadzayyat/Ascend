@@ -25,7 +25,7 @@ export default function AppSettings({ app, onUpdate }) {
     app_port: app?.app_port || '',
     domain: app?.domain || '',
     enable_ssl: app?.enable_ssl !== false,
-    client_max_body: app?.client_max_body || '100M',
+    client_max_body: app?.client_max_body || '6G',
     env_content: app?.env_content || '',
   })
 
@@ -189,7 +189,7 @@ export default function AppSettings({ app, onUpdate }) {
               {portHint || 'Ascend checks saved apps and live listeners before suggesting a port.'}
             </p>
           </div>
-          {input('Client Max Body Size', 'client_max_body', 'text', '100M')}
+          {input('Client Max Body Size', 'client_max_body', 'text', '6G')}
           {check('Enable SSL with Certbot', 'enable_ssl')}
         </div>
       </div>

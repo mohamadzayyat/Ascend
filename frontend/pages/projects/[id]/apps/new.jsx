@@ -22,7 +22,7 @@ export default function NewApp() {
     app_port: '',
     domain: '',
     enable_ssl: true,
-    client_max_body: '100M',
+    client_max_body: '6G',
     env_content: '',
   })
   const [loading, setLoading] = useState(false)
@@ -196,7 +196,7 @@ export default function NewApp() {
                 {portHint || 'Ascend suggests the next free port and refuses ports already in use.'}
               </p>
             </div>
-            {input('Client Max Body', 'client_max_body', 'text', '100M')}
+            {input('Client Max Body', 'client_max_body', 'text', '6G')}
             {check('Enable SSL with Certbot', 'enable_ssl')}
           </div>
         </div>

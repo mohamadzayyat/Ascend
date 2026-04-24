@@ -329,7 +329,7 @@ Connect with:
 - Unlimited deployment history
 - Multiple users (expandable)
 - Concurrent deployments (queued)
-- Large file uploads (100MB)
+- Large file uploads (5GB)
 - Efficient log storage
 
 ---

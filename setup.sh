@@ -154,7 +154,7 @@ DEBUG=False
 SQLALCHEMY_DATABASE_URI=sqlite:////opt/cpanel/cpanel.db
 HOST=0.0.0.0
 PORT=5000
-MAX_CONTENT_LENGTH=5368709120
+MAX_CONTENT_LENGTH=6442450944
 DEPLOYMENT_DIR=/root/deployments
 LOG_DIR=/root/deploy_logs
 EOF
@@ -200,7 +200,7 @@ module.exports = {
     {
       name: 'cpanel-backend',
       script: './venv/bin/python',
-      args: '-m gunicorn -w 4 -b 127.0.0.1:5000 app:app',
+      args: '-m gunicorn --worker-class gthread -w 4 --threads 8 -b 127.0.0.1:5000 --timeout 0 app:app',
       cwd: '/opt/cpanel',
       instances: 1,
       exec_mode: 'cluster',
@@ -249,7 +249,7 @@ upstream cpanel_frontend {
 server {
     listen 80;
     server_name _;
-    client_max_body_size 5G;
+    client_max_body_size 6G;
 
     location /api/ {
         proxy_pass http://cpanel_backend;
@@ -257,7 +257,11 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 300s;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
         proxy_connect_timeout 300s;
     }
 

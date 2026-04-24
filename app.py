@@ -61,11 +61,29 @@ DEPLOYMENTS_DIR.mkdir(exist_ok=True)
 
 dotenv.load_dotenv(BASE_DIR / '.env')
 
+MAX_UPLOAD_FILE_BYTES = 5 * 1024 * 1024 * 1024
+# Multipart form-data adds request overhead around the file bytes. Keep the
+# transport ceiling above 5 GiB so a real 5 GiB file is accepted.
+DEFAULT_MAX_CONTENT_LENGTH = 6 * 1024 * 1024 * 1024
+DEFAULT_CLIENT_MAX_BODY = '6G'
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.split('#', 1)[0].strip()
+    return int(raw) if raw else default
+
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{BASE_DIR}/cpanel.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', 5 * 1024 * 1024 * 1024))
+app.config['MAX_CONTENT_LENGTH'] = max(
+    _env_int('MAX_CONTENT_LENGTH', DEFAULT_MAX_CONTENT_LENGTH),
+    DEFAULT_MAX_CONTENT_LENGTH,
+)
 
 # Cross-origin session cookies (needed when frontend is on a different port/domain)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -225,7 +243,7 @@ class App(db.Model):
 
     domain = db.Column(db.String(255))
     enable_ssl = db.Column(db.Boolean, default=True)
-    client_max_body = db.Column(db.String(20), default='100M')
+    client_max_body = db.Column(db.String(20), default='6G')
 
     status = db.Column(db.String(50), default='created')
     last_deployment = db.Column(db.DateTime)
@@ -350,7 +368,7 @@ def migrate_schema():
                 env_content=p.env_content,
                 domain=p.domain,
                 enable_ssl=p.enable_ssl if p.enable_ssl is not None else True,
-                client_max_body=p.client_max_body or '100M',
+                client_max_body=p.client_max_body or DEFAULT_CLIENT_MAX_BODY,
                 status=p.status or 'created',
                 last_deployment=p.last_deployment,
                 created_at=p.created_at or datetime.now(timezone.utc),
@@ -3302,6 +3320,7 @@ TERMINAL_PASSPHRASE = os.environ.get('TERMINAL_PASSPHRASE', 'Open my shell now !
 _TERMINAL_ATTEMPTS = {}  # user_id -> {'count': int, 'until': float}
 _TERMINAL_ATTEMPT_LIMIT = 5
 _TERMINAL_LOCKOUT_SECONDS = 60
+_TERMINAL_WS_SUPPORTED = False
 
 
 def _terminal_passphrase_ok(given):
@@ -3316,7 +3335,7 @@ def _terminal_unlocked():
 @login_required
 def api_terminal_status():
     return jsonify({
-        'supported': _TERMINAL_SUPPORTED,
+        'supported': _TERMINAL_SUPPORTED and _TERMINAL_WS_SUPPORTED,
         'unlocked': _terminal_unlocked(),
     })
 
@@ -3327,6 +3346,8 @@ def api_terminal_status():
 def api_terminal_unlock():
     if not _TERMINAL_SUPPORTED:
         return jsonify({'error': 'Terminal is only available on Linux servers.'}), 501
+    if not _TERMINAL_WS_SUPPORTED:
+        return jsonify({'error': 'Terminal websocket support is not installed.'}), 501
     data = request.get_json(silent=True) or {}
     given = data.get('passphrase', '')
     now = time.time()
@@ -3356,20 +3377,34 @@ def api_terminal_lock():
 try:
     from flask_sock import Sock
     _sock = Sock(app)
+    _TERMINAL_WS_SUPPORTED = True
 
     @_sock.route('/api/terminal/ws')
     def _terminal_ws(ws):
         # Re-check auth + unlock on every connection. Browsers send the session
         # cookie with the WebSocket handshake, so Flask-Login populates the
         # request context the same way it does for HTTP.
+        def close_with_message(message):
+            try:
+                ws.send(f'\r\n\x1b[31m{message}\x1b[0m\r\n')
+            except Exception:
+                pass
+            try:
+                ws.close()
+            except Exception:
+                pass
+
         if not _TERMINAL_SUPPORTED:
+            close_with_message('Terminal is only available on Linux servers.')
             return
         if not current_user.is_authenticated or not _terminal_unlocked():
+            close_with_message('Terminal is locked. Unlock it and reconnect.')
             return
 
         try:
             pid, fd = pty.fork()
         except OSError:
+            close_with_message('Could not start a server shell.')
             return
 
         if pid == 0:
@@ -3481,8 +3516,8 @@ def server_error(e):
 
 @app.errorhandler(413)
 def payload_too_large(e):
-    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
-    msg = f'File too large. Maximum upload size is {limit_mb} MB.'
+    limit_gb = MAX_UPLOAD_FILE_BYTES // (1024 * 1024 * 1024)
+    msg = f'File too large. Upload files up to {limit_gb} GB.'
     if request.path.startswith('/api/'):
         return jsonify({'error': msg}), 413
     return msg, 413

@@ -19,6 +19,7 @@ services:
       - FLASK_ENV=production
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
       - DATABASE_URL=sqlite:////opt/cpanel/cpanel.db
+      - MAX_CONTENT_LENGTH=${MAX_CONTENT_LENGTH:-6442450944}
       - PORT=8716
       - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:8717}
     restart: unless-stopped
