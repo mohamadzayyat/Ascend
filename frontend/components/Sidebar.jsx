@@ -65,12 +65,6 @@ export default function Sidebar() {
               label="Terminal"
             />
             <NavLink
-              href="/workflow"
-              active={isActive('/workflow')}
-              icon={<Workflow className="w-5 h-5" />}
-              label="Workflow"
-            />
-            <NavLink
               href="/settings/github"
               active={isActive('/settings/github')}
               icon="🔑"
@@ -88,6 +82,12 @@ export default function Sidebar() {
               active={isActive('/settings')}
               icon={<Settings className="w-5 h-5" />}
               label="Settings"
+            />
+            <NavLink
+              href="/workflow"
+              active={isActive('/workflow')}
+              icon={<Workflow className="w-5 h-5" />}
+              label="Workflow"
             />
             <button
               onClick={handleLogout}
