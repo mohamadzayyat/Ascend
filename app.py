@@ -64,7 +64,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{BASE_DIR}/cpanel.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', 500 * 1024 * 1024))
 
 # Cross-origin session cookies (needed when frontend is on a different port/domain)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -3296,6 +3296,15 @@ def server_error(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Internal server error'}), 500
     return render_template('500.html'), 500
+
+
+@app.errorhandler(413)
+def payload_too_large(e):
+    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    msg = f'File too large. Maximum upload size is {limit_mb} MB.'
+    if request.path.startswith('/api/'):
+        return jsonify({'error': msg}), 413
+    return msg, 413
 
 
 @app.shell_context_processor

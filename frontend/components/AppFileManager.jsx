@@ -462,7 +462,12 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
       flash(unzip ? `Uploaded & unzipped ${files.length} file(s)` : `Uploaded ${files.length} file(s)`)
       load()
     } catch (err) {
-      setError(err.response?.data?.error || 'Upload failed')
+      const apiMsg = err.response?.data?.error
+      const status = err.response?.status
+      let msg = apiMsg || err.message || 'Upload failed'
+      if (!apiMsg && status === 413) msg = 'File too large for the server upload limit.'
+      else if (!apiMsg && status) msg = `Upload failed (HTTP ${status})`
+      setError(msg)
     } finally {
       setUploading(false)
       setUploadProgress(null)
