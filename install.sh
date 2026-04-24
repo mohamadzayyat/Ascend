@@ -398,7 +398,7 @@ server {
     listen $PANEL_PORT;
     server_name _;
 
-    client_max_body_size 100M;
+    client_max_body_size 5G;
 
     # Flask API and webhooks
     location /api/ {

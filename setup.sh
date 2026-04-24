@@ -154,7 +154,7 @@ DEBUG=False
 SQLALCHEMY_DATABASE_URI=sqlite:////opt/cpanel/cpanel.db
 HOST=0.0.0.0
 PORT=5000
-MAX_CONTENT_LENGTH=52428800
+MAX_CONTENT_LENGTH=5368709120
 DEPLOYMENT_DIR=/root/deployments
 LOG_DIR=/root/deploy_logs
 EOF
@@ -249,7 +249,7 @@ upstream cpanel_frontend {
 server {
     listen 80;
     server_name _;
-    client_max_body_size 100M;
+    client_max_body_size 5G;
 
     location /api/ {
         proxy_pass http://cpanel_backend;
