@@ -2929,8 +2929,11 @@ def _fm_handle_rename(scope):
         return jsonify({'error': 'Invalid path'}), 400
     if dst_p.exists():
         return jsonify({'error': 'Destination exists'}), 409
-    dst_p.parent.mkdir(parents=True, exist_ok=True)
-    src_p.rename(dst_p)
+    try:
+        dst_p.parent.mkdir(parents=True, exist_ok=True)
+        src_p.rename(dst_p)
+    except OSError as exc:
+        return jsonify({'error': f'Rename failed: {exc.strerror or exc}'}), 500
     return jsonify({'status': 'ok', 'path': _fm_rel(dst_p, base)})
 
 

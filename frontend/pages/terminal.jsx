@@ -9,6 +9,7 @@ export default function TerminalPage() {
   const [unlockError, setUnlockError] = useState('')
   const [unlocking, setUnlocking] = useState(false)
   const [wsState, setWsState] = useState('connecting') // connecting | open | closed
+  const [fontSize, setFontSize] = useState(16)
 
   useEffect(() => {
     let cancelled = false
@@ -59,13 +60,34 @@ export default function TerminalPage() {
             </p>
           </div>
           {state === 'unlocked' && (
-            <button
-              onClick={onLock}
-              className="inline-flex items-center gap-2 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
-              title="Lock the terminal in this session (requires passphrase to reopen)"
-            >
-              <Lock className="w-4 h-4" /> Lock
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setFontSize((size) => Math.max(12, size - 1))}
+                disabled={fontSize <= 12}
+                className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-40"
+                title="Decrease font size"
+              >
+                A-
+              </button>
+              <span className="font-mono text-xs text-gray-400 w-10 text-center">{fontSize}px</span>
+              <button
+                type="button"
+                onClick={() => setFontSize((size) => Math.min(24, size + 1))}
+                disabled={fontSize >= 24}
+                className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-40"
+                title="Increase font size"
+              >
+                A+
+              </button>
+              <button
+                onClick={onLock}
+                className="inline-flex items-center gap-2 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+                title="Lock the terminal in this session (requires passphrase to reopen)"
+              >
+                <Lock className="w-4 h-4" /> Lock
+              </button>
+            </div>
           )}
         </div>
 
@@ -116,14 +138,18 @@ export default function TerminalPage() {
         )}
 
         {state === 'unlocked' && (
-          <TerminalView wsState={wsState} setWsState={setWsState} />
+          <TerminalView
+            wsState={wsState}
+            setWsState={setWsState}
+            fontSize={fontSize}
+          />
         )}
       </div>
     </>
   )
 }
 
-function TerminalView({ wsState, setWsState }) {
+function TerminalView({ wsState, setWsState, fontSize }) {
   const hostRef = useRef(null)
   const termRef = useRef(null)
   const fitRef = useRef(null)
@@ -149,7 +175,7 @@ function TerminalView({ wsState, setWsState }) {
 
       term = new Terminal({
         fontFamily: 'Menlo, Monaco, Consolas, "Courier New", monospace',
-        fontSize: 13,
+        fontSize,
         cursorBlink: true,
         scrollback: 10000,
         theme: {
@@ -215,7 +241,7 @@ function TerminalView({ wsState, setWsState }) {
       try { wsRef.current?.close() } catch { /* noop */ }
       try { termRef.current?.dispose() } catch { /* noop */ }
     }
-  }, [setWsState])
+  }, [fontSize, setWsState])
 
   // Ctrl+Shift+V paste from clipboard into the PTY. Ctrl+Shift+C is xterm's
   // default copy binding and needs no extra wiring.

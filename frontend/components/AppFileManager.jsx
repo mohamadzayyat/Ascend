@@ -123,6 +123,21 @@ function baseName(p) {
   return parts[parts.length - 1] || ''
 }
 
+function contextMenuPosition(x, y, entry) {
+  if (typeof window === 'undefined') return { x, y }
+  const margin = 8
+  const menuWidth = 190
+  const itemHeight = 37
+  const itemCount = entry?.is_dir
+    ? 7
+    : 8 + (isPreviewable(entry?.name || '') ? 1 : 0)
+  const menuHeight = itemCount * itemHeight + 8
+  return {
+    x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
+    y: Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin)),
+  }
+}
+
 function escapeHtml(text) {
   return text
     .replace(/&/g, '&amp;')
@@ -520,6 +535,7 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
     const next = window.prompt(`Rename "${entry.name}" to:`, entry.name)
     if (!next || next === entry.name) return
     const target = joinPath(parentPath(entry.path), next)
+    setError('')
     try {
       await api.rename(entry.path, target)
       flash(`Renamed to ${next}`)
@@ -666,7 +682,8 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
 
   const onContextMenu = (e, entry) => {
     e.preventDefault()
-    setMenu({ x: e.clientX, y: e.clientY, entry })
+    const pos = contextMenuPosition(e.clientX, e.clientY, entry)
+    setMenu({ ...pos, entry })
   }
 
   const onEntryDragStart = (entry) => {
@@ -950,7 +967,7 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
                 <th className="text-left font-semibold px-3 py-2">Name</th>
                 <th className="text-right font-semibold px-3 py-2 w-28">Size</th>
                 <th className="text-right font-semibold px-3 py-2 w-48">Modified</th>
-                <th className="w-10"></th>
+                <th className="w-20"></th>
               </tr>
             </thead>
             <tbody>
@@ -1001,8 +1018,16 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
                     <td className="px-3 py-2 text-right">
                       <button
                         type="button"
+                        onClick={(e) => { e.stopPropagation(); renameEntry(entry) }}
+                        className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white"
+                        title="Rename"
+                      >
+                        <Edit3 className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
                         onClick={(e) => { e.stopPropagation(); onContextMenu(e, entry) }}
-                        className="p-1 hover:bg-gray-700 rounded text-gray-400"
+                        className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white"
                         title="Actions"
                       >
                         <MoreHorizontal className="w-4 h-4" />
@@ -1047,8 +1072,8 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
 
       {menu && (
         <div
-          style={{ left: menu.x, top: menu.y }}
-          className="fixed z-50 bg-secondary border border-gray-700 rounded shadow-lg py-1 min-w-[180px]"
+          style={{ left: menu.x, top: menu.y, maxHeight: 'calc(100vh - 16px)' }}
+          className="fixed z-50 bg-secondary border border-gray-700 rounded shadow-lg py-1 min-w-[180px] overflow-y-auto"
           onClick={(e) => e.stopPropagation()}
         >
           {!menu.entry.is_dir && (
