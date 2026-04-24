@@ -144,6 +144,7 @@ export function makeFileApi(prefix) {
       })
     },
     mkdir: (path) => api.post(`${prefix}/files/mkdir`, { path }),
+    extract: (path) => api.post(`${prefix}/files/extract`, { path }),
     rename: (from, to) => api.post(`${prefix}/files/rename`, { from, to }),
     copy: (from, to) => api.post(`${prefix}/files/copy`, { from, to }),
     delete: (path) => api.post(`${prefix}/files/delete`, { path }),

@@ -74,6 +74,65 @@ check_systemd() {
     command -v systemctl &>/dev/null || die "systemd is required but not found."
 }
 
+running_inside_ascend_backend() {
+    local pid unit cgroup ppid
+    pid=$$
+    while [[ -n "$pid" && "$pid" -gt 1 ]]; do
+        unit=$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        [[ "$unit" == "ascend-backend.service" ]] && return 0
+        cgroup=$(cat "/proc/$pid/cgroup" 2>/dev/null || true)
+        [[ "$cgroup" == *"ascend-backend.service"* ]] && return 0
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        [[ -z "$ppid" || "$ppid" == "$pid" ]] && break
+        pid=$ppid
+    done
+    return 1
+}
+
+maybe_detach_panel_update() {
+    [[ "${ASCEND_INSTALL_DETACHED:-}" == "1" ]] && return
+    running_inside_ascend_backend || return
+
+    command -v systemd-run &>/dev/null || {
+        warn "Panel terminal detected, but systemd-run is unavailable."
+        warn "The terminal will disconnect when ascend-backend restarts. Prefer running this installer from SSH."
+        return
+    }
+
+    local stamp log_file script_copy unit_name
+    stamp=$(date +%Y%m%d-%H%M%S)
+    log_file="/var/log/ascend-install-$stamp.log"
+    script_copy="/tmp/ascend-install-$stamp.sh"
+    unit_name="ascend-self-update-$stamp"
+
+    if [[ -f "${BASH_SOURCE[0]}" ]]; then
+        cp "${BASH_SOURCE[0]}" "$script_copy"
+    else
+        curl -fsSL "https://raw.githubusercontent.com/mohamadzayyat/Ascend/main/install.sh" -o "$script_copy"
+    fi
+    chmod 700 "$script_copy"
+
+    section "Panel terminal update detected"
+    warn "This terminal is served by ascend-backend, which must restart during the update."
+    info "Starting detached update job: $unit_name"
+    info "Log file: $log_file"
+
+    systemd-run \
+        --unit="$unit_name" \
+        --description="Ascend self-update" \
+        --setenv=ASCEND_INSTALL_DETACHED=1 \
+        /bin/bash -lc "bash '$script_copy' > '$log_file' 2>&1"
+
+    ok "Update is running in the background."
+    echo
+    echo "Follow it from SSH with:"
+    echo "  journalctl -u $unit_name -f"
+    echo "  tail -f $log_file"
+    echo
+    echo "The panel may disconnect while services restart; refresh it in a minute."
+    exit 0
+}
+
 # Abort if a port is bound by a process that isn't ours.
 # Allowed owners per port:
 #   PANEL_PORT    → nginx (the reverse proxy we configure)
@@ -625,6 +684,7 @@ main() {
     check_root
     check_os
     check_systemd
+    maybe_detach_panel_update
     check_ports
 
     GUNICORN_WORKERS=$(detect_worker_count)

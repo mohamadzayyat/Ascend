@@ -68,6 +68,10 @@ function isPreviewable(name) {
   return ['image', 'video', 'audio', 'pdf'].includes(fileKind(name))
 }
 
+function isZipFile(name) {
+  return (name || '').toLowerCase().endsWith('.zip')
+}
+
 function iconMeta(name) {
   const lower = name.toLowerCase()
   const ext = lower.includes('.') ? lower.split('.').pop() : ''
@@ -130,7 +134,7 @@ function contextMenuPosition(x, y, entry) {
   const itemHeight = 37
   const itemCount = entry?.is_dir
     ? 7
-    : 8 + (isPreviewable(entry?.name || '') ? 1 : 0)
+    : 8 + (isPreviewable(entry?.name || '') ? 1 : 0) + (isZipFile(entry?.name) ? 1 : 0)
   const menuHeight = itemCount * itemHeight + 8
   return {
     x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
@@ -627,6 +631,17 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
     window.open(url, '_blank')
   }
 
+  const extractEntry = async (entry) => {
+    setError('')
+    try {
+      await api.extract(entry.path)
+      flash(`Unzipped ${entry.name}`)
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Unzip failed')
+    }
+  }
+
   const toggleSelection = (entry, checked) => {
     setSelected((prev) => {
       const next = new Set(prev)
@@ -1111,6 +1126,18 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
               >
                 Download
               </MenuItem>
+              {isZipFile(menu.entry.name) && (
+                <MenuItem
+                  icon={<FileArchive className="w-4 h-4" />}
+                  onClick={() => {
+                    const entry = menu.entry
+                    setMenu(null)
+                    extractEntry(entry)
+                  }}
+                >
+                  Unzip here
+                </MenuItem>
+              )}
             </>
           )}
           {menu.entry.is_dir && (

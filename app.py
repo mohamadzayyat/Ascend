@@ -2895,6 +2895,30 @@ def _fm_handle_upload(scope):
     return jsonify({'status': 'ok', 'files': written})
 
 
+def _fm_handle_extract(scope):
+    data = request.get_json(silent=True) or {}
+    relpath = data.get('path', '')
+    if not relpath:
+        return jsonify({'error': 'path required'}), 400
+    if not relpath.lower().endswith('.zip'):
+        return jsonify({'error': 'Only .zip files can be unzipped'}), 400
+    try:
+        base, zip_path = _fm_resolve(scope, relpath)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'Zip file not found'}), 404
+    if not zip_path.is_file():
+        return jsonify({'error': 'Not a file'}), 400
+    try:
+        _fm_safe_extract_zip(zip_path, zip_path.parent, base)
+    except (ValueError, zipfile.BadZipFile) as exc:
+        return jsonify({'error': f'Failed to unzip {zip_path.name}: {exc}'}), 400
+    except OSError as exc:
+        return jsonify({'error': f'Failed to unzip {zip_path.name}: {exc.strerror or exc}'}), 500
+    return jsonify({'status': 'ok', 'path': _fm_rel(zip_path.parent, base)})
+
+
 def _fm_handle_mkdir(scope):
     data = request.get_json(silent=True) or {}
     relpath = data.get('path', '')
@@ -3127,6 +3151,14 @@ def api_app_files_upload(app_id):
     return err or _fm_handle_upload(a)
 
 
+@app.route('/api/app/<int:app_id>/files/extract', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_app_files_extract(app_id):
+    a, err = _fm_owned_app(app_id)
+    return err or _fm_handle_extract(a)
+
+
 @app.route('/api/app/<int:app_id>/files/mkdir', methods=['POST'])
 @csrf.exempt
 @login_required
@@ -3195,6 +3227,14 @@ def api_project_files_download(project_id):
 def api_project_files_upload(project_id):
     p, err = _fm_owned_project(project_id)
     return err or _fm_handle_upload(p)
+
+
+@app.route('/api/project/<int:project_id>/files/extract', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_project_files_extract(project_id):
+    p, err = _fm_owned_project(project_id)
+    return err or _fm_handle_extract(p)
 
 
 @app.route('/api/project/<int:project_id>/files/mkdir', methods=['POST'])
