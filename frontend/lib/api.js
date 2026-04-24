@@ -108,13 +108,19 @@ export function makeFileApi(prefix) {
     write: (path, content) => api.post(`${prefix}/files/write`, { path, content }),
     downloadUrl: (path) => `${API_URL}${prefix}/files/download?path=${encodeURIComponent(path)}`,
     fetchBlob: (path) => api.get(`${prefix}/files/download`, { params: { path }, responseType: 'blob' }),
-    upload: (path, files, { unzip = false } = {}) => {
+    upload: (path, files, { unzip = false, onProgress } = {}) => {
       const form = new FormData()
       form.append('path', path || '')
       if (unzip) form.append('unzip', '1')
       for (const f of files) form.append('files', f)
       return api.post(`${prefix}/files/upload`, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (evt) => {
+          if (!onProgress) return
+          const total = evt.total || evt.event?.total || 0
+          const loaded = evt.loaded || 0
+          onProgress({ loaded, total, percent: total ? Math.round((loaded / total) * 100) : 0 })
+        },
       })
     },
     mkdir: (path) => api.post(`${prefix}/files/mkdir`, { path }),

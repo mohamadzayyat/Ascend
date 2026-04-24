@@ -232,6 +232,7 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
   const [editorMinimized, setEditorMinimized] = useState(false)
   const [preview, setPreview] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(null) // { percent, loaded, total, count }
   const [dragOver, setDragOver] = useState(false)
   const [status, setStatus] = useState('')
   const uploadRef = useRef(null)
@@ -442,16 +443,29 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
   const uploadFiles = async (fileList, { unzip = false } = {}) => {
     const files = Array.from(fileList || []).filter(Boolean)
     if (!files.length) return
+    const totalBytes = files.reduce((sum, f) => sum + (f.size || 0), 0)
     setUploading(true)
+    setUploadProgress({ percent: 0, loaded: 0, total: totalBytes, count: files.length })
     setError('')
     try {
-      await api.upload(path, files, { unzip })
+      await api.upload(path, files, {
+        unzip,
+        onProgress: ({ loaded, total, percent }) => {
+          setUploadProgress({
+            percent,
+            loaded,
+            total: total || totalBytes,
+            count: files.length,
+          })
+        },
+      })
       flash(unzip ? `Uploaded & unzipped ${files.length} file(s)` : `Uploaded ${files.length} file(s)`)
       load()
     } catch (err) {
       setError(err.response?.data?.error || 'Upload failed')
     } finally {
       setUploading(false)
+      setUploadProgress(null)
     }
   }
 
@@ -865,6 +879,30 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
         })}
       </div>
 
+      {uploading && (
+        <div className="bg-accent/10 border border-accent/30 rounded p-3 mb-3">
+          <div className="flex items-center justify-between text-sm text-gray-200 mb-2">
+            <span className="inline-flex items-center gap-2">
+              <Upload className="w-4 h-4 animate-pulse" />
+              Uploading {uploadProgress?.count ?? ''} file{uploadProgress?.count === 1 ? '' : 's'}…
+            </span>
+            <span className="font-mono text-xs text-gray-300">
+              {uploadProgress
+                ? `${formatSize(uploadProgress.loaded)} / ${formatSize(uploadProgress.total)} · ${uploadProgress.percent}%`
+                : 'Preparing…'}
+            </span>
+          </div>
+          <div className="h-2 rounded bg-primary/60 overflow-hidden">
+            <div
+              className="h-full bg-accent transition-all duration-150"
+              style={{ width: `${uploadProgress?.percent ?? 0}%` }}
+            />
+          </div>
+          {uploadProgress?.percent === 100 && (
+            <div className="mt-2 text-xs text-gray-400">Finalizing on server…</div>
+          )}
+        </div>
+      )}
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 rounded p-3 mb-3 text-red-300 text-sm">{error}</div>
       )}
