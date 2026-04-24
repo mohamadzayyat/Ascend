@@ -3,6 +3,7 @@ import { useRouter } from 'next/router'
 import { useAuth } from '@/lib/hooks/useAuth'
 import Sidebar from '@/components/Sidebar'
 import '../styles/globals.css'
+import '@xyflow/react/dist/style.css'
 
 const PUBLIC_PATHS = ['/login', '/setup']
 

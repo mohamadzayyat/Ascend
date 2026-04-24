@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { Menu, LogOut, Settings, Github, Terminal } from 'lucide-react'
+import { Menu, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -63,6 +63,12 @@ export default function Sidebar() {
               active={isActive('/terminal')}
               icon={<Terminal className="w-5 h-5" />}
               label="Terminal"
+            />
+            <NavLink
+              href="/workflow"
+              active={isActive('/workflow')}
+              icon={<Workflow className="w-5 h-5" />}
+              label="Workflow"
             />
             <NavLink
               href="/settings/github"
