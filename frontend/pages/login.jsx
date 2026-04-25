@@ -36,7 +36,11 @@ export default function Login() {
       <div className="w-full max-w-md">
         <div className="bg-secondary rounded-lg shadow-2xl p-8 border border-gray-700">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold text-white mb-2">🚀 Ascend</h1>
+            <img
+              src="/logo/opened_sidebar_logo.png"
+              alt="Ascend"
+              className="h-12 w-auto mx-auto mb-4 object-contain"
+            />
             <p className="text-gray-400">Deployment Management System</p>
           </div>
 

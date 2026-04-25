@@ -2665,6 +2665,17 @@ MAX_EDIT_FILE_BYTES = 2 * 1024 * 1024  # 2MB cap for read/write through the edit
 HIDDEN_NAMES = {'node_modules', '.git'}
 
 
+class ServerFileScope:
+    pass
+
+
+SERVER_FILE_SCOPE = ServerFileScope()
+SERVER_FILES_ROOT = Path(os.environ.get('SERVER_FILES_ROOT', '/')).resolve()
+_SERVER_FILES_ATTEMPTS = {}
+_SERVER_FILES_ATTEMPT_LIMIT = 5
+_SERVER_FILES_LOCKOUT_SECONDS = 60
+
+
 def _fm_owned_app(app_id):
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
@@ -2679,9 +2690,27 @@ def _fm_owned_project(project_id):
     return p, None
 
 
+def _server_files_passphrase_ok(given):
+    expected = os.environ.get('SERVER_FILES_PASSPHRASE') or os.environ.get('TERMINAL_PASSPHRASE', 'Open my shell now !@')
+    return hmac.compare_digest(str(given or ''), expected)
+
+
+def _server_files_unlocked():
+    return bool(session.get('server_files_unlocked'))
+
+
+def _fm_owned_server():
+    if not _server_files_unlocked():
+        return None, (jsonify({'error': 'Server files are locked'}), 423)
+    if not getattr(current_user, 'is_admin', False):
+        return None, (jsonify({'error': 'Unauthorized'}), 403)
+    return SERVER_FILE_SCOPE, None
+
+
 def _fm_scope_base(scope):
-    """Resolved filesystem root for either an App (its deploy dir) or a
-    Project (its cloned repo root)."""
+    """Resolved filesystem root for an App, Project, or server-wide scope."""
+    if isinstance(scope, ServerFileScope):
+        return SERVER_FILES_ROOT
     if isinstance(scope, App):
         return _app_deploy_dir(scope).resolve()
     # Project
@@ -2764,7 +2793,11 @@ def _fm_handle_list(scope):
     entries = []
     if search:
         count = 0
-        for child in sorted(target.rglob('*'), key=lambda p: (not p.is_dir(), str(p).lower())):
+        try:
+            children = sorted(target.rglob('*'), key=lambda p: (not p.is_dir(), str(p).lower()))
+        except OSError as exc:
+            return jsonify({'error': f'Cannot search directory: {exc.strerror or exc}'}), 403
+        for child in children:
             if child == target:
                 continue
             rel = _fm_rel(child, base)
@@ -2780,7 +2813,11 @@ def _fm_handle_list(scope):
                 if count >= search_limit:
                     break
     else:
-        for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        try:
+            children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError as exc:
+            return jsonify({'error': f'Cannot read directory: {exc.strerror or exc}'}), 403
+        for child in children:
             if not show_hidden and child.name in HIDDEN_NAMES:
                 continue
             entry = _fm_entry(child, base)
@@ -3343,6 +3380,132 @@ def api_app_files_delete(app_id):
 
 
 # ═══════════════════════════════════════════
+# Server-wide file manager. This is deliberately separate from app/project
+# scopes so existing deployment file manager behavior stays unchanged.
+@app.route('/api/server/files/status')
+@login_required
+def api_server_files_status():
+    return jsonify({
+        'unlocked': _server_files_unlocked(),
+        'root': str(SERVER_FILES_ROOT),
+    })
+
+
+@app.route('/api/server/files/unlock', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_unlock():
+    data = request.get_json(silent=True) or {}
+    given = data.get('passphrase', '')
+    now = time.time()
+    rec = _SERVER_FILES_ATTEMPTS.get(current_user.id, {'count': 0, 'until': 0.0})
+    if rec['until'] > now:
+        wait = int(rec['until'] - now)
+        return jsonify({'error': f'Too many attempts. Try again in {wait}s.'}), 429
+    if _server_files_passphrase_ok(given):
+        session['server_files_unlocked'] = True
+        _SERVER_FILES_ATTEMPTS.pop(current_user.id, None)
+        return jsonify({'unlocked': True, 'root': str(SERVER_FILES_ROOT)})
+    rec['count'] += 1
+    if rec['count'] >= _SERVER_FILES_ATTEMPT_LIMIT:
+        rec = {'count': 0, 'until': now + _SERVER_FILES_LOCKOUT_SECONDS}
+    _SERVER_FILES_ATTEMPTS[current_user.id] = rec
+    return jsonify({'error': 'Incorrect passphrase.'}), 401
+
+
+@app.route('/api/server/files/lock', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_lock():
+    session.pop('server_files_unlocked', None)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/server/files/list')
+@login_required
+def api_server_files_list():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_list(scope)
+
+
+@app.route('/api/server/files/read')
+@login_required
+def api_server_files_read():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_read(scope)
+
+
+@app.route('/api/server/files/write', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_write():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_write(scope)
+
+
+@app.route('/api/server/files/download')
+@login_required
+def api_server_files_download():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_download(scope)
+
+
+@app.route('/api/server/files/upload', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_upload():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_upload(scope)
+
+
+@app.route('/api/server/files/extract', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_extract():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_extract(scope)
+
+
+@app.route('/api/server/files/mkdir', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_mkdir():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_mkdir(scope)
+
+
+@app.route('/api/server/files/rename', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_rename():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_rename(scope)
+
+
+@app.route('/api/server/files/copy', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_copy():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_copy(scope)
+
+
+@app.route('/api/server/files/archive', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_archive():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_archive(scope)
+
+
+@app.route('/api/server/files/delete', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_server_files_delete():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_delete(scope)
+
+
 # Terminal (server shell via xterm.js + WebSocket)
 # ═══════════════════════════════════════════
 

@@ -230,7 +230,15 @@ function makeEditorTab(path) {
   }
 }
 
-export default function AppFileManager({ api, scopeKey = 'default' }) {
+export default function AppFileManager({
+  api,
+  scopeKey = 'default',
+  title = 'Files',
+  description = 'Browse, edit, upload, search, archive, and move files inside this deployment directory.',
+  rootLabel = 'root',
+  hiddenLabel = 'Show node_modules / .git',
+  missingText = "The app's deploy directory does not exist yet. Deploy the app first, then files will appear here.",
+}) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState([])
   const [basePath, setBasePath] = useState('')
@@ -740,9 +748,9 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
     <div className="bg-secondary rounded-lg border border-gray-700 p-6">
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div className="min-w-[240px] flex-1">
-          <h2 className="text-xl font-bold text-white">Files</h2>
+          <h2 className="text-xl font-bold text-white">{title}</h2>
           <p className="text-sm text-gray-500 mt-1">
-            Browse, edit, upload, search, archive, and move files inside this deployment directory.
+            {description}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -763,7 +771,7 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
               onChange={(e) => setShowHidden(e.target.checked)}
               className="accent-accent"
             />
-            Show node_modules / .git
+            {hiddenLabel}
           </label>
           <button
             type="button"
@@ -879,7 +887,7 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
           title={basePath}
           className={`inline-flex items-center gap-1 px-2 py-1 rounded cursor-pointer hover:bg-gray-700 hover:underline transition ${path ? 'text-gray-200' : 'text-accent font-semibold'}`}
         >
-          <Home className="w-3.5 h-3.5" /> root
+          <Home className="w-3.5 h-3.5" /> {rootLabel}
         </button>
         {clipboard && (
           <button
@@ -960,7 +968,7 @@ export default function AppFileManager({ api, scopeKey = 'default' }) {
       >
         {!exists ? (
           <div className="p-8 text-center text-gray-400 text-sm">
-            The app&apos;s deploy directory does not exist yet. Deploy the app first, then files will appear here.
+            {missingText}
           </div>
         ) : loading && entries.length === 0 ? (
           <div className="p-8 text-center text-gray-400 text-sm">Loading...</div>

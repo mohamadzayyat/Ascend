@@ -65,6 +65,9 @@ export const apiClient = {
     api.get('/api/system/suggest-port', { params: { start, exclude_app_id: excludeAppId } }),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
   getAppPm2Logs: (id, lines = 120) => api.get(`/api/app/${id}/pm2-logs`, { params: { lines } }),
+  getServerFilesStatus: () => api.get('/api/server/files/status'),
+  unlockServerFiles: (passphrase) => api.post('/api/server/files/unlock', { passphrase }),
+  lockServerFiles: () => api.post('/api/server/files/lock'),
 
   // File manager (scoped to app's deploy directory)
   listAppFiles: (id, path = '', showHidden = false) =>
@@ -157,6 +160,7 @@ export function makeFileApi(prefix) {
 }
 export const appFileApi = (id) => makeFileApi(`/api/app/${id}`)
 export const projectFileApi = (id) => makeFileApi(`/api/project/${id}`)
+export const serverFileApi = () => makeFileApi('/api/server')
 
 export { API_URL }
 export default api
