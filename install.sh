@@ -591,12 +591,15 @@ NGINX
 }
 
 # Start (or reload) nginx after our site is in place. Recover from the most
-# common failure: a stock nginx install's default site competing for port 80
-# with another web server (CyberPanel/LiteSpeed, Apache, etc.). Our site only
-# binds $PANEL_PORT, so the default "Welcome to nginx!" site is the only
-# thing forcing the port-80 conflict, and disabling it is safe in that case.
+# common failure: another web server (CyberPanel/LiteSpeed, Apache, etc.)
+# already owns port 80/443, and stock nginx configs (default site, distro
+# extras dropped into conf.d) compete for the same port. Our Ascend site only
+# binds $PANEL_PORT, so any nginx config touching the conflicting port is
+# safe to disable on this kind of host.
 #
-# We rename the symlink (don't delete) so the change is trivially reversible.
+# Recovery scans every file under sites-enabled/ and conf.d/, renames the
+# offenders to *.disabled-by-ascend (reversible — original config kept), and
+# retries. If recovery fails we restore everything we touched and abort.
 nginx_start_or_recover() {
     if systemctl reload nginx 2>/dev/null; then
         return 0
@@ -611,36 +614,66 @@ nginx_start_or_recover() {
     # nginx reports the bind failure as either "Address already in use" (errno
     # text) or just "(98: Unknown error)" depending on glibc/nginx build.
     # Errno 98 == EADDRINUSE on Linux either way, so match the bind() line.
-    if echo "$err" | grep -qiE 'bind\(\) to .+ failed|address already in use'; then
-        local busy_port
-        busy_port=$(echo "$err" | grep -oE 'bind\(\) to (0\.0\.0\.0|\[::\]):[0-9]+' | grep -oE '[0-9]+$' | head -1)
-        busy_port="${busy_port:-80}"
-
-        local owner=""
-        if command -v ss &>/dev/null; then
-            owner=$(ss -tlnpH "sport = :$busy_port" 2>/dev/null | head -1 | grep -oE 'users:\(\("[^"]+"' | sed 's/users:(("//' || true)
-        fi
-
-        local default_link="/etc/nginx/sites-enabled/default"
-        if [[ -L "$default_link" || -f "$default_link" ]]; then
-            warn "Nginx couldn't bind port $busy_port (held by ${owner:-another process})."
-            warn "Disabling nginx's default site (config preserved at sites-available/default) and retrying…"
-            mv "$default_link" "${default_link}.disabled-by-ascend"
-            if systemctl start nginx 2>/dev/null; then
-                ok "Default site disabled — nginx started cleanly."
-                ok "To restore later: sudo mv ${default_link}.disabled-by-ascend $default_link && sudo systemctl reload nginx"
-                return 0
-            fi
-            # Recovery didn't help — restore the symlink so we leave no mess
-            mv "${default_link}.disabled-by-ascend" "$default_link"
-        fi
-
+    if ! echo "$err" | grep -qiE 'bind\(\) to .+ failed|address already in use'; then
         echo "$err" >&2
-        die "Nginx couldn't bind port $busy_port (held by ${owner:-unknown}) and disabling the default site didn't fix it. Free port $busy_port and re-run the installer."
+        die "Nginx failed to start. See 'systemctl status nginx' and 'journalctl -xeu nginx' for details."
     fi
 
+    local busy_port
+    busy_port=$(echo "$err" | grep -oE 'bind\(\) to (0\.0\.0\.0|\[::\]):[0-9]+' | grep -oE '[0-9]+$' | head -1)
+    busy_port="${busy_port:-80}"
+
+    local owner=""
+    if command -v ss &>/dev/null; then
+        owner=$(ss -tlnpH "sport = :$busy_port" 2>/dev/null | head -1 | sed -nE 's/.*users:\(\("([^"]+)".*/\1/p' || true)
+    fi
+
+    warn "Nginx couldn't bind port $busy_port (held by ${owner:-another web server})."
+    warn "Scanning nginx configs for files that bind port $busy_port and disabling them…"
+
+    # GNU grep word boundary (\b) keeps '80' from matching '8080' or '1080'.
+    local listen_re="^[[:space:]]*listen[[:space:]]+([^;#]*[: ])?\b${busy_port}\b"
+    local disabled=()
+    local cfg base actual dir
+    for dir in /etc/nginx/sites-enabled /etc/nginx/conf.d; do
+        [[ -d "$dir" ]] || continue
+        for cfg in "$dir"/*; do
+            [[ -e "$cfg" ]] || continue
+            base=$(basename "$cfg")
+            # Don't touch our own site or already-disabled files
+            [[ "$base" == "ascend" || "$base" == "ascend.conf" ]] && continue
+            [[ "$base" == *.disabled-by-ascend ]] && continue
+            actual=$(readlink -f "$cfg" 2>/dev/null || echo "$cfg")
+            if grep -qE "$listen_re" "$actual" 2>/dev/null; then
+                info "  Disabling $cfg (binds port $busy_port)"
+                mv "$cfg" "${cfg}.disabled-by-ascend"
+                disabled+=("$cfg")
+            fi
+        done
+    done
+
+    if [[ ${#disabled[@]} -eq 0 ]]; then
+        echo "$err" >&2
+        die "Nothing in /etc/nginx/sites-enabled or /etc/nginx/conf.d binds port $busy_port — the conflicting listen directive is probably in /etc/nginx/nginx.conf or an included snippet. Edit it manually and re-run."
+    fi
+
+    if systemctl start nginx 2>/dev/null; then
+        ok "Disabled ${#disabled[@]} conflicting nginx config(s) — nginx started cleanly."
+        local f
+        for f in "${disabled[@]}"; do
+            ok "  $f → ${f}.disabled-by-ascend  (restore: sudo mv ${f}.disabled-by-ascend $f && sudo systemctl reload nginx)"
+        done
+        return 0
+    fi
+
+    # Retry didn't help — put everything back so the operator's nginx state is unchanged
+    local f
+    for f in "${disabled[@]}"; do
+        mv "${f}.disabled-by-ascend" "$f"
+    done
+
     echo "$err" >&2
-    die "Nginx failed to start. See 'systemctl status nginx' and 'journalctl -xeu nginx' for details."
+    die "Nginx still couldn't bind port $busy_port after disabling ${#disabled[@]} site(s). The conflict is likely from /etc/nginx/nginx.conf or an included snippet. All disabled files have been restored."
 }
 
 # ── Systemd services ────────────────────────────────────────────
