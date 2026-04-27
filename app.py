@@ -4133,8 +4133,14 @@ def api_db_databases_list(conn_id):
         with client.cursor() as cur:
             cur.execute('SHOW DATABASES')
             names = [row[0] for row in cur.fetchall()]
-    finally:
+    except Exception as e:
         client.close()
+        return jsonify({'error': f'Query failed: {str(e)}'}), 400
+    finally:
+        try:
+            client.close()
+        except:
+            pass
     # Hide MySQL internals by default; UI can toggle later if needed
     hidden = {'information_schema', 'performance_schema', 'mysql', 'sys'}
     return jsonify({
@@ -4171,8 +4177,14 @@ def api_db_tables_list(conn_id):
                 {'name': r[0], 'rows': int(r[1] or 0), 'size_bytes': int(r[2] or 0)}
                 for r in cur.fetchall()
             ]
-    finally:
+    except Exception as e:
         client.close()
+        return jsonify({'error': f'Query failed: {str(e)}'}), 400
+    finally:
+        try:
+            client.close()
+        except:
+            pass
     return jsonify({'tables': rows})
 
 
@@ -4211,8 +4223,14 @@ def api_db_table_rows(conn_id):
             cur.execute(f'SELECT * FROM `{table}` LIMIT %s OFFSET %s', (per_page, offset))
             cols = [d[0] for d in cur.description] if cur.description else []
             rows = [list(r) for r in cur.fetchall()]
-    finally:
+    except Exception as e:
         client.close()
+        return jsonify({'error': f'Query failed: {str(e)}'}), 400
+    finally:
+        try:
+            client.close()
+        except:
+            pass
     # Coerce non-JSON-safe types (datetime, bytes, Decimal) to strings
     def _coerce(v):
         if v is None or isinstance(v, (str, int, float, bool)):
