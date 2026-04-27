@@ -202,7 +202,10 @@ wait_for_apt_lock() {
             die "Timed out waiting for apt lock. If the holding process is stuck (e.g. apt-get update wedged for hours), see the README troubleshooting section."
         fi
     done
-    [[ $waited -gt 0 ]] && ok "apt lock released after ${waited}s — continuing."
+    if [[ $waited -gt 0 ]]; then
+        ok "apt lock released after ${waited}s — continuing."
+    fi
+    return 0
 }
 
 # Check a binary; install apt packages only if it is missing.
