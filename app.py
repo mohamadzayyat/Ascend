@@ -284,6 +284,17 @@ class App(db.Model):
         }
 
 
+class AppSetting(db.Model):
+    """Generic key/value store for installation-wide settings.
+
+    Used today to hold the shell passphrase hash so each install has its own
+    secret instead of relying on the public-repo default. Keep keys lowercase.
+    """
+    key = db.Column(db.String(64), primary_key=True)
+    value = db.Column(db.Text)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class Deployment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)
@@ -2690,9 +2701,56 @@ def _fm_owned_project(project_id):
     return p, None
 
 
+SHELL_PASSPHRASE_SETTING_KEY = 'shell_passphrase_hash'
+
+
+def _shell_passphrase_env():
+    """Optional env-var override. Lets operators pin a passphrase outside the DB.
+
+    Honoured by both the terminal and the server-files endpoints. SERVER_FILES_PASSPHRASE
+    is recognised for backward compat but is no longer required.
+    """
+    raw = os.environ.get('TERMINAL_PASSPHRASE') or os.environ.get('SERVER_FILES_PASSPHRASE')
+    return raw or None
+
+
+def _shell_passphrase_hash():
+    rec = db.session.get(AppSetting, SHELL_PASSPHRASE_SETTING_KEY)
+    return rec.value if rec and rec.value else None
+
+
+def shell_passphrase_is_configured():
+    return bool(_shell_passphrase_env() or _shell_passphrase_hash())
+
+
+def _shell_passphrase_ok(given):
+    if not given:
+        return False
+    env = _shell_passphrase_env()
+    if env is not None:
+        return hmac.compare_digest(str(given), env)
+    stored = _shell_passphrase_hash()
+    if not stored:
+        return False
+    return check_password_hash(stored, str(given))
+
+
+def set_shell_passphrase(plaintext):
+    """Persist a new shell passphrase. Plaintext is hashed before storage."""
+    if not plaintext or len(plaintext) < 8:
+        raise ValueError('Passphrase must be at least 8 characters.')
+    hashed = generate_password_hash(plaintext)
+    rec = db.session.get(AppSetting, SHELL_PASSPHRASE_SETTING_KEY)
+    if rec is None:
+        rec = AppSetting(key=SHELL_PASSPHRASE_SETTING_KEY, value=hashed)
+        db.session.add(rec)
+    else:
+        rec.value = hashed
+    db.session.commit()
+
+
 def _server_files_passphrase_ok(given):
-    expected = os.environ.get('SERVER_FILES_PASSPHRASE') or os.environ.get('TERMINAL_PASSPHRASE', 'Open my shell now !@')
-    return hmac.compare_digest(str(given or ''), expected)
+    return _shell_passphrase_ok(given)
 
 
 def _server_files_unlocked():
@@ -3388,6 +3446,8 @@ def api_server_files_status():
     return jsonify({
         'unlocked': _server_files_unlocked(),
         'root': str(SERVER_FILES_ROOT),
+        'needs_setup': not shell_passphrase_is_configured(),
+        'can_setup': bool(getattr(current_user, 'is_admin', False)),
     })
 
 
@@ -3521,8 +3581,8 @@ except ImportError:
     _TERMINAL_SUPPORTED = False
 
 # Session-scoped passphrase gate. Unlock persists until the Flask session is
-# cleared (logout), after which the user must re-enter it.
-TERMINAL_PASSPHRASE = os.environ.get('TERMINAL_PASSPHRASE', 'Open my shell now !@')
+# cleared (logout), after which the user must re-enter it. The passphrase
+# itself is stored in the AppSetting table (or pinned via TERMINAL_PASSPHRASE).
 _TERMINAL_ATTEMPTS = {}  # user_id -> {'count': int, 'until': float}
 _TERMINAL_ATTEMPT_LIMIT = 5
 _TERMINAL_LOCKOUT_SECONDS = 60
@@ -3530,7 +3590,7 @@ _TERMINAL_WS_SUPPORTED = False
 
 
 def _terminal_passphrase_ok(given):
-    return hmac.compare_digest(str(given or ''), TERMINAL_PASSPHRASE)
+    return _shell_passphrase_ok(given)
 
 
 def _terminal_unlocked():
@@ -3543,6 +3603,8 @@ def api_terminal_status():
     return jsonify({
         'supported': _TERMINAL_SUPPORTED and _TERMINAL_WS_SUPPORTED,
         'unlocked': _terminal_unlocked(),
+        'needs_setup': not shell_passphrase_is_configured(),
+        'can_setup': bool(getattr(current_user, 'is_admin', False)),
     })
 
 
@@ -3577,6 +3639,41 @@ def api_terminal_unlock():
 @login_required
 def api_terminal_lock():
     session.pop('terminal_unlocked', None)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/shell-passphrase', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_set_shell_passphrase():
+    """Admin-only: set or rotate the shell passphrase used by the terminal
+    and server-files unlock screens.
+
+    Setting it for the first time (initial setup) requires no current passphrase.
+    Rotating an existing passphrase requires `current` to match. The env-var
+    pin (TERMINAL_PASSPHRASE) cannot be changed from the UI."""
+    if not getattr(current_user, 'is_admin', False):
+        return jsonify({'error': 'Admin only.'}), 403
+    if _shell_passphrase_env() is not None:
+        return jsonify({'error': 'Passphrase is pinned by TERMINAL_PASSPHRASE env var; unset it to manage from the UI.'}), 409
+
+    data = request.get_json(silent=True) or {}
+    new_pass = (data.get('new') or data.get('passphrase') or '').strip()
+    current_pass = data.get('current') or ''
+
+    existing_hash = _shell_passphrase_hash()
+    if existing_hash and not check_password_hash(existing_hash, str(current_pass)):
+        return jsonify({'error': 'Current passphrase is incorrect.'}), 401
+
+    try:
+        set_shell_passphrase(new_pass)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    # Auto-unlock both gates for the user who just set it — saves an extra
+    # round trip on the very next request.
+    session['terminal_unlocked'] = True
+    session['server_files_unlocked'] = True
     return jsonify({'ok': True})
 
 
@@ -3731,7 +3828,7 @@ def payload_too_large(e):
 
 @app.shell_context_processor
 def make_shell_context():
-    return {'db': db, 'User': User, 'Project': Project, 'App': App, 'Deployment': Deployment}
+    return {'db': db, 'User': User, 'Project': Project, 'App': App, 'Deployment': Deployment, 'AppSetting': AppSetting}
 
 
 with app.app_context():

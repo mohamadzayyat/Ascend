@@ -2,21 +2,37 @@ import { useEffect, useRef, useState } from 'react'
 import Head from 'next/head'
 import { Terminal as TerminalIcon, Lock, Loader2 } from 'lucide-react'
 import { apiClient, terminalWebSocketUrl } from '@/lib/api'
+import ShellPassphraseGate from '@/components/ShellPassphraseGate'
 
 export default function TerminalPage() {
   const [state, setState] = useState('loading') // loading | locked | unlocked | unsupported
-  const [passphrase, setPassphrase] = useState('')
-  const [unlockError, setUnlockError] = useState('')
-  const [unlocking, setUnlocking] = useState(false)
+  const [needsSetup, setNeedsSetup] = useState(false)
+  const [canSetup, setCanSetup] = useState(false)
   const [wsState, setWsState] = useState('connecting') // connecting | open | closed
   const [fontSize, setFontSize] = useState(16)
+
+  const refreshStatus = async () => {
+    try {
+      const res = await apiClient.getTerminalStatus()
+      const { supported, unlocked, needs_setup, can_setup } = res.data
+      setNeedsSetup(!!needs_setup)
+      setCanSetup(!!can_setup)
+      if (!supported) setState('unsupported')
+      else if (unlocked) setState('unlocked')
+      else setState('locked')
+    } catch {
+      setState('locked')
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
     apiClient.getTerminalStatus()
       .then((res) => {
         if (cancelled) return
-        const { supported, unlocked } = res.data
+        const { supported, unlocked, needs_setup, can_setup } = res.data
+        setNeedsSetup(!!needs_setup)
+        setCanSetup(!!can_setup)
         if (!supported) setState('unsupported')
         else if (unlocked) setState('unlocked')
         else setState('locked')
@@ -24,22 +40,6 @@ export default function TerminalPage() {
       .catch(() => { if (!cancelled) setState('locked') })
     return () => { cancelled = true }
   }, [])
-
-  const onUnlock = async (e) => {
-    e.preventDefault()
-    if (unlocking) return
-    setUnlockError('')
-    setUnlocking(true)
-    try {
-      await apiClient.unlockTerminal(passphrase)
-      setPassphrase('')
-      setState('unlocked')
-    } catch (err) {
-      setUnlockError(err.response?.data?.error || 'Unlock failed')
-    } finally {
-      setUnlocking(false)
-    }
-  }
 
   const onLock = async () => {
     try { await apiClient.lockTerminal() } catch { /* ignore */ }
@@ -104,37 +104,21 @@ export default function TerminalPage() {
         )}
 
         {state === 'locked' && (
-          <form
-            onSubmit={onUnlock}
-            className="max-w-md w-full rounded border border-gray-700 bg-secondary p-6 space-y-4"
-          >
-            <div>
-              <h2 className="text-white font-semibold mb-1">Unlock terminal</h2>
-              <p className="text-gray-400 text-sm">
-                Enter the passphrase to open a shell. Stays unlocked until you log out.
-              </p>
-            </div>
-            <input
-              autoFocus
-              type="password"
-              value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="Passphrase"
-              className="w-full px-3 py-2 bg-primary border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-accent"
-            />
-            {unlockError && (
-              <div className="rounded border border-red-500/30 bg-red-500/10 p-2 text-red-300 text-sm">
-                {unlockError}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={unlocking || !passphrase}
-              className="w-full px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold disabled:opacity-50"
-            >
-              {unlocking ? 'Unlocking…' : 'Unlock'}
-            </button>
-          </form>
+          <ShellPassphraseGate
+            needsSetup={needsSetup}
+            canSetup={canSetup}
+            title="Unlock terminal"
+            description="Enter the passphrase to open a shell. Stays unlocked until you log out."
+            setupDescription="No shell passphrase is set yet for this install. Choose one to unlock the web terminal — it also gates the server files browser."
+            onUnlock={async (pass) => {
+              await apiClient.unlockTerminal(pass)
+              setState('unlocked')
+            }}
+            onUnlocked={async () => {
+              await refreshStatus()
+              setState('unlocked')
+            }}
+          />
         )}
 
         {state === 'unlocked' && (

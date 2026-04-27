@@ -2,15 +2,27 @@ import { useEffect, useMemo, useState } from 'react'
 import Head from 'next/head'
 import { FolderTree, Lock, Loader2 } from 'lucide-react'
 import AppFileManager from '@/components/AppFileManager'
+import ShellPassphraseGate from '@/components/ShellPassphraseGate'
 import { apiClient, serverFileApi } from '@/lib/api'
 
 export default function ServerFilesPage() {
   const [state, setState] = useState('loading')
   const [root, setRoot] = useState('')
-  const [passphrase, setPassphrase] = useState('')
-  const [error, setError] = useState('')
-  const [unlocking, setUnlocking] = useState(false)
+  const [needsSetup, setNeedsSetup] = useState(false)
+  const [canSetup, setCanSetup] = useState(false)
   const fileApi = useMemo(() => serverFileApi(), [])
+
+  const refreshStatus = async () => {
+    try {
+      const res = await apiClient.getServerFilesStatus()
+      setRoot(res.data.root || '')
+      setNeedsSetup(!!res.data.needs_setup)
+      setCanSetup(!!res.data.can_setup)
+      setState(res.data.unlocked ? 'unlocked' : 'locked')
+    } catch {
+      setState('locked')
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -18,6 +30,8 @@ export default function ServerFilesPage() {
       .then((res) => {
         if (cancelled) return
         setRoot(res.data.root || '')
+        setNeedsSetup(!!res.data.needs_setup)
+        setCanSetup(!!res.data.can_setup)
         setState(res.data.unlocked ? 'unlocked' : 'locked')
       })
       .catch(() => {
@@ -25,23 +39,6 @@ export default function ServerFilesPage() {
       })
     return () => { cancelled = true }
   }, [])
-
-  const onUnlock = async (e) => {
-    e.preventDefault()
-    if (unlocking) return
-    setError('')
-    setUnlocking(true)
-    try {
-      const res = await apiClient.unlockServerFiles(passphrase)
-      setRoot(res.data.root || root)
-      setPassphrase('')
-      setState('unlocked')
-    } catch (err) {
-      setError(err.response?.data?.error || 'Unlock failed')
-    } finally {
-      setUnlocking(false)
-    }
-  }
 
   const onLock = async () => {
     try { await apiClient.lockServerFiles() } catch { /* ignore */ }
@@ -80,37 +77,22 @@ export default function ServerFilesPage() {
         )}
 
         {state === 'locked' && (
-          <form
-            onSubmit={onUnlock}
-            className="max-w-md w-full rounded border border-gray-700 bg-secondary p-6 space-y-4"
-          >
-            <div>
-              <h2 className="text-white font-semibold mb-1">Unlock server files</h2>
-              <p className="text-gray-400 text-sm">
-                Enter the server file passphrase to browse and edit files outside Ascend projects.
-              </p>
-            </div>
-            <input
-              autoFocus
-              type="password"
-              value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="Passphrase"
-              className="w-full px-3 py-2 bg-primary border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-accent"
-            />
-            {error && (
-              <div className="rounded border border-red-500/30 bg-red-500/10 p-2 text-red-300 text-sm">
-                {error}
-              </div>
-            )}
-            <button
-              type="submit"
-              disabled={unlocking || !passphrase}
-              className="w-full px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold disabled:opacity-50"
-            >
-              {unlocking ? 'Unlocking...' : 'Unlock'}
-            </button>
-          </form>
+          <ShellPassphraseGate
+            needsSetup={needsSetup}
+            canSetup={canSetup}
+            title="Unlock server files"
+            description="Enter the shell passphrase to browse and edit files outside Ascend projects."
+            setupDescription="No shell passphrase is set yet for this install. Choose one to unlock the server files browser — it also gates the web terminal."
+            onUnlock={async (pass) => {
+              const res = await apiClient.unlockServerFiles(pass)
+              setRoot(res.data.root || root)
+              setState('unlocked')
+            }}
+            onUnlocked={async () => {
+              await refreshStatus()
+              setState('unlocked')
+            }}
+          />
         )}
 
         {state === 'unlocked' && (

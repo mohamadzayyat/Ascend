@@ -104,6 +104,11 @@ export const apiClient = {
   getTerminalStatus: () => api.get('/api/terminal/status'),
   unlockTerminal: (passphrase) => api.post('/api/terminal/unlock', { passphrase }),
   lockTerminal: () => api.post('/api/terminal/lock'),
+
+  // Shell passphrase — shared by terminal and server-files unlock screens.
+  // First-time setup omits `current`; rotation requires it.
+  setShellPassphrase: (newPass, current) =>
+    api.post('/api/shell-passphrase', { new: newPass, current: current || '' }),
 }
 
 // Build the WebSocket URL for the server-shell endpoint. Respects

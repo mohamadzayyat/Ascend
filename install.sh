@@ -173,14 +173,50 @@ detect_worker_count() {
 
 # ── System packages ─────────────────────────────────────────────
 
+# Wait for any other process holding the apt/dpkg locks to release them.
+# Fresh Ubuntu VPSes auto-run unattended-upgrades on first boot, which can
+# tie up the lock for several minutes — so just wait politely and explain
+# what's happening instead of crashing on "Could not get lock".
+wait_for_apt_lock() {
+    local locks=(/var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock)
+    local waited=0
+    local max_wait=600   # 10 min
+    while fuser "${locks[@]}" >/dev/null 2>&1; do
+        if [[ $waited -eq 0 ]]; then
+            local holders
+            holders=$(fuser "${locks[@]}" 2>&1 | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' || true)
+            warn "Another apt/dpkg process is holding the package lock (PIDs: ${holders:-?})."
+            warn "This is normal on freshly-booted servers — waiting up to ${max_wait}s for it to finish…"
+        elif (( waited % 30 == 0 )); then
+            info "Still waiting on apt lock (${waited}s elapsed)…"
+        fi
+        sleep 5
+        waited=$(( waited + 5 ))
+        if (( waited >= max_wait )); then
+            local stuck
+            stuck=$(fuser "${locks[@]}" 2>&1 | grep -oE '[0-9]+' | sort -u | head -1 || true)
+            if [[ -n "$stuck" ]]; then
+                warn "apt lock still held after ${max_wait}s. Holding process:"
+                ps -fp "$stuck" 2>&1 | sed 's/^/    /' >&2 || true
+            fi
+            die "Timed out waiting for apt lock. If the holding process is stuck (e.g. apt-get update wedged for hours), see the README troubleshooting section."
+        fi
+    done
+    [[ $waited -gt 0 ]] && ok "apt lock released after ${waited}s — continuing."
+}
+
 # Check a binary; install apt packages only if it is missing.
+# Note: we deliberately do NOT redirect stderr to /dev/null on apt-get install
+# — silent failures here are nearly impossible to debug (the user just sees
+# the next "ok" line missing).
 apt_install() {
     local cmd=$1 label=$2; shift 2
     if command -v "$cmd" &>/dev/null; then
         ok "$label already installed  ($($cmd --version 2>&1 | head -1))"
     else
         info "Installing $label…"
-        apt-get install -y -qq "$@" 2>/dev/null
+        wait_for_apt_lock
+        apt-get install -y -qq "$@"
         ok "$label installed"
     fi
 }
@@ -188,6 +224,7 @@ apt_install() {
 install_system_deps() {
     section "Checking system packages"
     export DEBIAN_FRONTEND=noninteractive
+    wait_for_apt_lock
     apt-get update -qq
 
     apt_install python3  "Python 3" python3 python3-pip python3-venv
@@ -200,7 +237,8 @@ install_system_deps() {
         ok "build-essential already installed  (gcc $(gcc --version | head -1 | awk '{print $NF}'))"
     else
         info "Installing build-essential…"
-        apt-get install -y -qq build-essential 2>/dev/null
+        wait_for_apt_lock
+        apt-get install -y -qq build-essential
         ok "build-essential installed"
     fi
 }
@@ -362,12 +400,39 @@ PYEOF
         generated=1
     fi
 
-    ASCEND_ADMIN_USERNAME="$username" ASCEND_ADMIN_PASSWORD="$password" venv/bin/python - <<'PYEOF'
+    # Shell passphrase gates the web terminal and server-files browser.
+    # If the operator didn't pin one via env, generate a random one so we
+    # never ship the public-repo default. Skip generation if a hash already
+    # exists in the DB (covers re-runs after a partial first install).
+    local shell_passphrase shell_generated=0 shell_action="kept"
+    if [[ -n "${ASCEND_SHELL_PASSPHRASE:-}" ]]; then
+        shell_passphrase="$ASCEND_SHELL_PASSPHRASE"
+        shell_action="set"
+    else
+        local existing_shell_hash
+        existing_shell_hash=$(venv/bin/python - <<'PYEOF'
+import app
+with app.app.app_context():
+    print(app._shell_passphrase_hash() or '')
+PYEOF
+)
+        if [[ -z "$existing_shell_hash" ]]; then
+            shell_passphrase=$(python3 -c "import secrets; print(secrets.token_urlsafe(18))")
+            shell_generated=1
+            shell_action="generated"
+        fi
+    fi
+
+    ASCEND_ADMIN_USERNAME="$username" \
+    ASCEND_ADMIN_PASSWORD="$password" \
+    ASCEND_SHELL_PASSPHRASE_INTERNAL="${shell_passphrase:-}" \
+    venv/bin/python - <<'PYEOF'
 import os
 import app
 
 username = os.environ['ASCEND_ADMIN_USERNAME']
 password = os.environ['ASCEND_ADMIN_PASSWORD']
+shell_pass = os.environ.get('ASCEND_SHELL_PASSPHRASE_INTERNAL', '')
 
 with app.app.app_context():
     if app.User.query.first():
@@ -377,19 +442,40 @@ with app.app.app_context():
     user.set_password(password)
     app.db.session.add(user)
     app.db.session.commit()
+
+    if shell_pass:
+        app.set_shell_passphrase(shell_pass)
 PYEOF
 
+    {
+        echo "Ascend initial admin"
+        echo "URL: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PANEL_PORT"
+        echo "Username: $username"
+        if [[ "$generated" -eq 1 ]]; then
+            echo "Password: $password"
+        else
+            echo "Password: (provided via ASCEND_ADMIN_PASSWORD)"
+        fi
+        echo
+        echo "Shell / server-files passphrase"
+        if [[ "$shell_action" == "generated" ]]; then
+            echo "  Passphrase: $shell_passphrase"
+            echo "  (generated — change it later from the terminal/server-files unlock screen)"
+        elif [[ "$shell_action" == "set" ]]; then
+            echo "  Passphrase: (provided via ASCEND_SHELL_PASSPHRASE)"
+        else
+            echo "  Passphrase: (kept — admin will be prompted to set one on first use)"
+        fi
+    } > "$ADMIN_CREDENTIALS_FILE"
+    chmod 600 "$ADMIN_CREDENTIALS_FILE"
+
     if [[ "$generated" -eq 1 ]]; then
-        cat > "$ADMIN_CREDENTIALS_FILE" <<EOF
-Ascend initial admin
-URL: http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PANEL_PORT
-Username: $username
-Password: $password
-EOF
-        chmod 600 "$ADMIN_CREDENTIALS_FILE"
         ok "Generated admin user '$username' and saved credentials to $ADMIN_CREDENTIALS_FILE"
     else
         ok "Created admin user '$username' from ASCEND_ADMIN_USERNAME/ASCEND_ADMIN_PASSWORD"
+    fi
+    if [[ "$shell_generated" -eq 1 ]]; then
+        ok "Generated random shell passphrase (saved alongside admin credentials)"
     fi
 }
 
@@ -486,19 +572,69 @@ NGINX
     fi
     ln -s "$nginx_conf" "$enabled"
 
-    # Note: we do NOT touch /etc/nginx/sites-enabled/default —
-    # Ascend uses port $PANEL_PORT so there is no conflict with the default site,
-    # and other projects on this VPS may rely on it.
+    # We deliberately don't pre-emptively touch /etc/nginx/sites-enabled/default
+    # because real user sites might depend on it. nginx_start_or_recover will
+    # only disable it if (a) nginx fails to bind a port and (b) the default
+    # site is the offender.
 
-    # Test and reload
-    if nginx -t 2>/dev/null; then
-        systemctl enable nginx --quiet
-        systemctl reload nginx 2>/dev/null || systemctl start nginx
-        ok "Nginx configured — panel accessible on port $PANEL_PORT"
-    else
-        nginx -t   # print error
+    if ! nginx -t 2>/dev/null; then
+        nginx -t   # print the actual error
         die "Nginx config test failed"
     fi
+
+    systemctl enable nginx --quiet
+    nginx_start_or_recover
+    ok "Nginx configured — panel accessible on port $PANEL_PORT"
+}
+
+# Start (or reload) nginx after our site is in place. Recover from the most
+# common failure: a stock nginx install's default site competing for port 80
+# with another web server (CyberPanel/LiteSpeed, Apache, etc.). Our site only
+# binds $PANEL_PORT, so the default "Welcome to nginx!" site is the only
+# thing forcing the port-80 conflict, and disabling it is safe in that case.
+#
+# We rename the symlink (don't delete) so the change is trivially reversible.
+nginx_start_or_recover() {
+    if systemctl reload nginx 2>/dev/null; then
+        return 0
+    fi
+    if systemctl start nginx 2>/dev/null; then
+        return 0
+    fi
+
+    local err
+    err=$(journalctl -u nginx.service --no-pager -n 30 2>/dev/null || true)
+
+    if echo "$err" | grep -qi "address already in use"; then
+        local busy_port
+        busy_port=$(echo "$err" | grep -oE '0\.0\.0\.0:[0-9]+|\[::\]:[0-9]+' | grep -oE '[0-9]+$' | head -1)
+        busy_port="${busy_port:-80}"
+
+        local owner=""
+        if command -v ss &>/dev/null; then
+            owner=$(ss -tlnpH "sport = :$busy_port" 2>/dev/null | head -1 | grep -oE 'users:\(\("[^"]+"' | sed 's/users:(("//' || true)
+        fi
+
+        local default_link="/etc/nginx/sites-enabled/default"
+        if [[ -L "$default_link" || -f "$default_link" ]]; then
+            warn "Nginx couldn't bind port $busy_port (held by ${owner:-another process})."
+            warn "Disabling nginx's default site (config preserved at sites-available/default) and retrying…"
+            mv "$default_link" "${default_link}.disabled-by-ascend"
+            if systemctl start nginx 2>/dev/null; then
+                ok "Default site disabled — nginx started cleanly."
+                ok "To restore later: sudo mv ${default_link}.disabled-by-ascend $default_link && sudo systemctl reload nginx"
+                return 0
+            fi
+            # Recovery didn't help — restore the symlink so we leave no mess
+            mv "${default_link}.disabled-by-ascend" "$default_link"
+        fi
+
+        echo "$err" >&2
+        die "Nginx couldn't bind port $busy_port (held by ${owner:-unknown}) and disabling the default site didn't fix it. Free port $busy_port and re-run the installer."
+    fi
+
+    echo "$err" >&2
+    die "Nginx failed to start. See 'systemctl status nginx' and 'journalctl -xeu nginx' for details."
 }
 
 # ── Systemd services ────────────────────────────────────────────
