@@ -236,6 +236,18 @@ install_system_deps() {
     apt_install nginx    "Nginx"    nginx
     apt_install certbot  "Certbot"  certbot python3-certbot-nginx
 
+    # mysql-client provides mysqldump and the mysql CLI — needed by the database
+    # screen for backups and ad-hoc queries even when the actual MySQL server
+    # lives on a different host (or doesn't exist on this server at all).
+    if command -v mysqldump &>/dev/null; then
+        ok "mysql-client already installed  ($(mysqldump --version | head -1))"
+    else
+        info "Installing mysql-client (for mysqldump/mysql CLI)…"
+        wait_for_apt_lock
+        apt-get install -y -qq mysql-client
+        ok "mysql-client installed"
+    fi
+
     if command -v gcc &>/dev/null; then
         ok "build-essential already installed  (gcc $(gcc --version | head -1 | awk '{print $NF}'))"
     else
@@ -244,6 +256,57 @@ install_system_deps() {
         apt-get install -y -qq build-essential
         ok "build-essential installed"
     fi
+}
+
+# Detect a running or installed MySQL/MariaDB server. Returns 0 if found.
+mysql_server_present() {
+    if systemctl is-active --quiet mysql 2>/dev/null; then return 0; fi
+    if systemctl is-active --quiet mariadb 2>/dev/null; then return 0; fi
+    if command -v mysqld &>/dev/null || command -v mariadbd &>/dev/null; then return 0; fi
+    return 1
+}
+
+# Decide whether to install a MySQL server. Skipped if one is already present.
+# Otherwise:
+#   - If ASCEND_INSTALL_MYSQL=yes  → install non-interactively
+#   - If ASCEND_INSTALL_MYSQL=no   → skip non-interactively
+#   - Else if a TTY is attached    → prompt y/N
+#   - Else                         → skip (default; opens no surprise daemon)
+install_mysql_server_if_wanted() {
+    section "MySQL/MariaDB server"
+
+    if mysql_server_present; then
+        local svc="(detected)"
+        if systemctl is-active --quiet mariadb 2>/dev/null; then svc="(mariadb running)"; fi
+        if systemctl is-active --quiet mysql 2>/dev/null;   then svc="(mysql running)"; fi
+        ok "MySQL/MariaDB server already present $svc — skipping install."
+        return 0
+    fi
+
+    local choice="${ASCEND_INSTALL_MYSQL:-}"
+    if [[ -z "$choice" ]]; then
+        if [[ -t 0 ]]; then
+            echo
+            echo -e "  ${BOLD}No MySQL/MariaDB server detected on this host.${NC}"
+            echo -e "  Ascend's database screen can manage remote MySQL servers without one."
+            echo -e "  Install MySQL server locally now? [y/N] "
+            read -r -t 30 reply || reply=""
+            choice=$([[ "$reply" =~ ^[Yy]$ ]] && echo "yes" || echo "no")
+        else
+            choice="no"
+        fi
+    fi
+
+    if [[ "$choice" != "yes" ]]; then
+        info "Skipping MySQL server install. Set ASCEND_INSTALL_MYSQL=yes to install later, or manage a remote DB from the panel."
+        return 0
+    fi
+
+    info "Installing MySQL server (this can take a minute)…"
+    wait_for_apt_lock
+    apt-get install -y -qq mysql-server
+    systemctl enable --now mysql 2>/dev/null || systemctl enable --now mariadb 2>/dev/null || true
+    ok "MySQL server installed and started. Run 'sudo mysql_secure_installation' to lock it down."
 }
 
 install_node() {
@@ -863,6 +926,7 @@ main() {
     info "Gunicorn workers: $GUNICORN_WORKERS  (based on $(nproc) CPU core(s))"
 
     install_system_deps
+    install_mysql_server_if_wanted
     install_node
     install_pm2
 

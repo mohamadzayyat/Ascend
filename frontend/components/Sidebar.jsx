@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { FolderTree, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
+import { Database, FolderTree, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -69,6 +69,12 @@ export default function Sidebar() {
               active={isActive('/server-files')}
               icon={<FolderTree className="w-5 h-5" />}
               label="Server Files"
+            />
+            <NavLink
+              href="/databases"
+              active={router.pathname.startsWith('/databases')}
+              icon={<Database className="w-5 h-5" />}
+              label="Databases"
             />
             <NavLink
               href="/settings/github"

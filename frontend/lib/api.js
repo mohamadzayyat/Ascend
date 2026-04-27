@@ -109,6 +109,32 @@ export const apiClient = {
   // First-time setup omits `current`; rotation requires it.
   setShellPassphrase: (newPass, current) =>
     api.post('/api/shell-passphrase', { new: newPass, current: current || '' }),
+
+  // Database screen — connections, browse, SQL runner, backups
+  listDbConnections: () => api.get('/api/databases/connections'),
+  createDbConnection: (data) => api.post('/api/databases/connections', data),
+  updateDbConnection: (id, data) => api.put(`/api/databases/connections/${id}`, data),
+  deleteDbConnection: (id) => api.delete(`/api/databases/connections/${id}`),
+  testDbConnection: (id) => api.post(`/api/databases/connections/${id}/test`),
+  listDatabases: (id) => api.get(`/api/databases/connections/${id}/databases`),
+  listTables: (id, database) =>
+    api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
+  getTableRows: (id, database, table, page = 1, perPage = 50) =>
+    api.get(`/api/databases/connections/${id}/table-rows`, {
+      params: { database, table, page, per_page: perPage },
+    }),
+  runDbQuery: (id, sql, database, confirmDestructive = false) =>
+    api.post(`/api/databases/connections/${id}/query`, {
+      sql, database, confirm_destructive: confirmDestructive,
+    }),
+  listDbBackups: (id) => api.get(`/api/databases/connections/${id}/backups`),
+  runDbBackup: (id) => api.post(`/api/databases/connections/${id}/backups/run`),
+  downloadDbBackupUrl: (backupId) =>
+    `${API_URL}/api/databases/backups/${backupId}/download`,
+  deleteDbBackup: (backupId) => api.delete(`/api/databases/backups/${backupId}`),
+  getDbSchedule: (id) => api.get(`/api/databases/connections/${id}/schedule`),
+  upsertDbSchedule: (id, data) =>
+    api.put(`/api/databases/connections/${id}/schedule`, data),
 }
 
 // Build the WebSocket URL for the server-shell endpoint. Respects

@@ -22,6 +22,8 @@ import ipaddress
 import tempfile
 import platform
 import struct
+import base64
+import gzip
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -293,6 +295,100 @@ class AppSetting(db.Model):
     key = db.Column(db.String(64), primary_key=True)
     value = db.Column(db.Text)
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class DatabaseConnection(db.Model):
+    """A saved MySQL/MariaDB connection. Passwords are Fernet-encrypted at
+    rest; never returned in plaintext through the API."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    host = db.Column(db.String(255), nullable=False)
+    port = db.Column(db.Integer, default=3306, nullable=False)
+    username = db.Column(db.String(120), nullable=False)
+    password_encrypted = db.Column(db.Text, nullable=False)
+    default_database = db.Column(db.String(120))  # optional default DB name
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    schedules = db.relationship('BackupSchedule', backref='connection', lazy=True, cascade='all, delete-orphan')
+    backups = db.relationship('BackupArchive', backref='connection', lazy=True, cascade='all, delete-orphan')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'host': self.host,
+            'port': self.port,
+            'username': self.username,
+            'default_database': self.default_database,
+            'created_at': iso_utc(self.created_at),
+            'updated_at': iso_utc(self.updated_at),
+        }
+
+
+class BackupSchedule(db.Model):
+    """A recurring backup job for a single connection. One schedule per
+    connection keeps the UI simple — operators who want multiple cadences
+    can rotate retention or add per-DB filters later."""
+    id = db.Column(db.Integer, primary_key=True)
+    connection_id = db.Column(db.Integer, db.ForeignKey('database_connection.id'), nullable=False)
+    enabled = db.Column(db.Boolean, default=True, nullable=False)
+    # Simple schedule: every_hours + at_minute is enough for "daily at 03:30"
+    # or "every 6 hours". Avoids exposing cron syntax to non-experts.
+    every_hours = db.Column(db.Integer, default=24, nullable=False)
+    at_minute = db.Column(db.Integer, default=0, nullable=False)  # 0–59
+    retention_days = db.Column(db.Integer, default=14, nullable=False)
+    databases = db.Column(db.Text)  # JSON list of DB names; null/empty == all
+    last_run_at = db.Column(db.DateTime)
+    last_run_status = db.Column(db.String(20))  # success | failed
+    last_run_error = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'connection_id': self.connection_id,
+            'enabled': self.enabled,
+            'every_hours': self.every_hours,
+            'at_minute': self.at_minute,
+            'retention_days': self.retention_days,
+            'databases': json.loads(self.databases) if self.databases else [],
+            'last_run_at': iso_utc(self.last_run_at),
+            'last_run_status': self.last_run_status,
+            'last_run_error': self.last_run_error,
+        }
+
+
+class BackupArchive(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    connection_id = db.Column(db.Integer, db.ForeignKey('database_connection.id'), nullable=False)
+    schedule_id = db.Column(db.Integer, db.ForeignKey('backup_schedule.id'))  # null for manual
+    filename = db.Column(db.String(255), nullable=False)
+    filepath = db.Column(db.String(500), nullable=False)
+    size_bytes = db.Column(db.BigInteger, default=0)
+    status = db.Column(db.String(20), default='pending', nullable=False)  # pending|success|failed
+    error_message = db.Column(db.Text)
+    triggered_by = db.Column(db.String(20), default='manual')  # manual|scheduled
+    started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    completed_at = db.Column(db.DateTime)
+    duration_seconds = db.Column(db.Integer)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'connection_id': self.connection_id,
+            'schedule_id': self.schedule_id,
+            'filename': self.filename,
+            'size_bytes': self.size_bytes,
+            'status': self.status,
+            'error_message': self.error_message,
+            'triggered_by': self.triggered_by,
+            'started_at': iso_utc(self.started_at),
+            'completed_at': iso_utc(self.completed_at),
+            'duration_seconds': self.duration_seconds,
+        }
 
 
 class Deployment(db.Model):
@@ -3800,6 +3896,720 @@ except ImportError:
 
 
 # ═══════════════════════════════════════════
+# Database screen — MySQL/MariaDB connections, browse, SQL runner, backups
+# ═══════════════════════════════════════════
+
+DB_BACKUPS_ROOT = BASE_DIR / 'db-backups'
+DB_BACKUPS_ROOT.mkdir(exist_ok=True)
+
+# Destructive SQL the runner requires explicit confirmation for. We trip on
+# the first whitespace-delimited keyword; the goal is "did the user mean to
+# nuke data?" not perfect SQL parsing.
+_DESTRUCTIVE_PREFIXES = ('drop', 'truncate', 'rename')
+_UNSAFE_WRITE_RE = re.compile(r'^\s*(update|delete)\b(?![^;]*\bwhere\b)', re.IGNORECASE | re.DOTALL)
+
+
+def _fernet_cipher():
+    """Derive a Fernet key from SECRET_KEY. Stable across restarts as long
+    as SECRET_KEY doesn't change. Avoids managing yet another secret in .env."""
+    from cryptography.fernet import Fernet
+    secret = (app.config.get('SECRET_KEY') or '').encode('utf-8')
+    if not secret:
+        raise RuntimeError('SECRET_KEY is empty — cannot derive DB credential cipher.')
+    key_material = hashlib.sha256(secret + b'|db-creds-v1').digest()
+    return Fernet(base64.urlsafe_b64encode(key_material))
+
+
+def _encrypt_password(plaintext):
+    if plaintext is None:
+        plaintext = ''
+    return _fernet_cipher().encrypt(plaintext.encode('utf-8')).decode('ascii')
+
+
+def _decrypt_password(ciphertext):
+    if not ciphertext:
+        return ''
+    return _fernet_cipher().decrypt(ciphertext.encode('ascii')).decode('utf-8')
+
+
+def _safe_dir_name(name):
+    """Sanitize a connection name for use as a directory under db-backups/."""
+    safe = re.sub(r'[^A-Za-z0-9_.-]', '_', name or '').strip('._') or 'connection'
+    return safe[:80]
+
+
+def _admin_required():
+    if not getattr(current_user, 'is_admin', False):
+        return jsonify({'error': 'Admin only.'}), 403
+    return None
+
+
+def _conn_owned(conn_id):
+    conn = db.session.get(DatabaseConnection, conn_id)
+    if conn is None:
+        return None, (jsonify({'error': 'Connection not found.'}), 404)
+    if conn.user_id != current_user.id:
+        return None, (jsonify({'error': 'Unauthorized'}), 403)
+    return conn, None
+
+
+def _open_mysql(conn, database=None):
+    """Open a PyMySQL connection. Caller is responsible for closing it.
+    `database` overrides the connection's default DB; pass '' to connect
+    server-wide (needed for SHOW DATABASES)."""
+    import pymysql
+    db_name = database if database is not None else (conn.default_database or '')
+    kwargs = {
+        'host': conn.host,
+        'port': int(conn.port or 3306),
+        'user': conn.username,
+        'password': _decrypt_password(conn.password_encrypted),
+        'connect_timeout': 8,
+        'read_timeout': 30,
+        'write_timeout': 30,
+        'charset': 'utf8mb4',
+    }
+    if db_name:
+        kwargs['database'] = db_name
+    return pymysql.connect(**kwargs)
+
+
+def _mysqldump_env(conn):
+    """Build env + argv prefix for invoking mysqldump/mysql without leaking
+    the password on the command line (uses MYSQL_PWD env var)."""
+    env = os.environ.copy()
+    env['MYSQL_PWD'] = _decrypt_password(conn.password_encrypted)
+    base_args = [
+        '--host', conn.host,
+        '--port', str(conn.port or 3306),
+        '--user', conn.username,
+    ]
+    return env, base_args
+
+
+# ── Connection CRUD ─────────────────────────────────────────────
+
+@app.route('/api/databases/connections', methods=['GET'])
+@login_required
+def api_db_connections_list():
+    err = _admin_required()
+    if err:
+        return err
+    rows = DatabaseConnection.query.filter_by(user_id=current_user.id).order_by(DatabaseConnection.name).all()
+    return jsonify({'connections': [r.to_dict() for r in rows]})
+
+
+@app.route('/api/databases/connections', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_db_connections_create():
+    err = _admin_required()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    host = (data.get('host') or '').strip()
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    if not name or not host or not username:
+        return jsonify({'error': 'name, host, and username are required.'}), 400
+    if DatabaseConnection.query.filter_by(user_id=current_user.id, name=name).first():
+        return jsonify({'error': 'A connection with that name already exists.'}), 409
+    try:
+        port = int(data.get('port') or 3306)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'port must be an integer.'}), 400
+    conn = DatabaseConnection(
+        user_id=current_user.id,
+        name=name,
+        host=host,
+        port=port,
+        username=username,
+        password_encrypted=_encrypt_password(password),
+        default_database=(data.get('default_database') or '').strip() or None,
+    )
+    db.session.add(conn)
+    db.session.commit()
+    return jsonify({'connection': conn.to_dict()}), 201
+
+
+@app.route('/api/databases/connections/<int:conn_id>', methods=['PUT'])
+@csrf.exempt
+@login_required
+def api_db_connections_update(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if 'name' in data:
+        new_name = (data['name'] or '').strip()
+        if not new_name:
+            return jsonify({'error': 'name cannot be empty.'}), 400
+        if new_name != conn.name and DatabaseConnection.query.filter_by(user_id=current_user.id, name=new_name).first():
+            return jsonify({'error': 'A connection with that name already exists.'}), 409
+        conn.name = new_name
+    for field in ('host', 'username', 'default_database'):
+        if field in data:
+            val = (data[field] or '').strip() or (None if field == 'default_database' else '')
+            if field != 'default_database' and not val:
+                return jsonify({'error': f'{field} cannot be empty.'}), 400
+            setattr(conn, field, val)
+    if 'port' in data:
+        try:
+            conn.port = int(data['port'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'port must be an integer.'}), 400
+    if 'password' in data and data['password']:
+        conn.password_encrypted = _encrypt_password(data['password'])
+    db.session.commit()
+    return jsonify({'connection': conn.to_dict()})
+
+
+@app.route('/api/databases/connections/<int:conn_id>', methods=['DELETE'])
+@csrf.exempt
+@login_required
+def api_db_connections_delete(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    # Also remove any backup files on disk for this connection
+    safe = _safe_dir_name(conn.name)
+    backup_dir = DB_BACKUPS_ROOT / safe
+    if backup_dir.exists():
+        try:
+            shutil.rmtree(backup_dir)
+        except OSError:
+            pass
+    db.session.delete(conn)
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/test', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_db_connections_test(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 200
+    try:
+        with client.cursor() as cur:
+            cur.execute('SELECT VERSION()')
+            version = (cur.fetchone() or [''])[0]
+    finally:
+        client.close()
+    return jsonify({'ok': True, 'server_version': version})
+
+
+# ── Browse: databases, tables, table viewer ─────────────────────
+
+@app.route('/api/databases/connections/<int:conn_id>/databases')
+@login_required
+def api_db_databases_list(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute('SHOW DATABASES')
+            names = [row[0] for row in cur.fetchall()]
+    finally:
+        client.close()
+    # Hide MySQL internals by default; UI can toggle later if needed
+    hidden = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+    return jsonify({
+        'databases': [n for n in names if n not in hidden],
+        'system_databases': [n for n in names if n in hidden],
+    })
+
+
+@app.route('/api/databases/connections/<int:conn_id>/tables')
+@login_required
+def api_db_tables_list(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    database = (request.args.get('database') or '').strip()
+    if not database:
+        return jsonify({'error': 'database query param is required.'}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute("""
+                SELECT table_name, table_rows, data_length + index_length AS size_bytes
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                ORDER BY table_name
+            """, (database,))
+            rows = [
+                {'name': r[0], 'rows': int(r[1] or 0), 'size_bytes': int(r[2] or 0)}
+                for r in cur.fetchall()
+            ]
+    finally:
+        client.close()
+    return jsonify({'tables': rows})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/table-rows')
+@login_required
+def api_db_table_rows(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    database = (request.args.get('database') or '').strip()
+    table = (request.args.get('table') or '').strip()
+    if not database or not table:
+        return jsonify({'error': 'database and table are required.'}), 400
+    # Identifier sanity: backtick-safe chars only. Prevents SQL injection
+    # since we have to interpolate identifiers (parameterized binds don't
+    # cover schema/table names).
+    if not re.fullmatch(r'[A-Za-z0-9_$]+', database) or not re.fullmatch(r'[A-Za-z0-9_$]+', table):
+        return jsonify({'error': 'Invalid database or table name.'}), 400
+    try:
+        page = max(int(request.args.get('page') or 1), 1)
+        per_page = min(max(int(request.args.get('per_page') or 50), 1), 500)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'page/per_page must be integers.'}), 400
+    offset = (page - 1) * per_page
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM `{table}`')
+            total = (cur.fetchone() or [0])[0]
+            cur.execute(f'SELECT * FROM `{table}` LIMIT %s OFFSET %s', (per_page, offset))
+            cols = [d[0] for d in cur.description] if cur.description else []
+            rows = [list(r) for r in cur.fetchall()]
+    finally:
+        client.close()
+    # Coerce non-JSON-safe types (datetime, bytes, Decimal) to strings
+    def _coerce(v):
+        if v is None or isinstance(v, (str, int, float, bool)):
+            return v
+        if isinstance(v, bytes):
+            try:
+                return v.decode('utf-8')
+            except UnicodeDecodeError:
+                return f'<binary {len(v)} bytes>'
+        return str(v)
+    rows = [[_coerce(c) for c in r] for r in rows]
+    return jsonify({
+        'columns': cols,
+        'rows': rows,
+        'page': page,
+        'per_page': per_page,
+        'total': int(total),
+    })
+
+
+# ── SQL runner with destructive-query guard ─────────────────────
+
+@app.route('/api/databases/connections/<int:conn_id>/query', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_db_query(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    sql = (data.get('sql') or '').strip()
+    database = (data.get('database') or '').strip()
+    confirm_destructive = bool(data.get('confirm_destructive'))
+    if not sql:
+        return jsonify({'error': 'sql is required.'}), 400
+
+    # Detect risky statements unless the caller explicitly confirmed
+    if not confirm_destructive:
+        first_kw = sql.split(None, 1)[0].lower() if sql.split() else ''
+        if first_kw in _DESTRUCTIVE_PREFIXES:
+            return jsonify({
+                'requires_confirmation': True,
+                'reason': f'Statement starts with {first_kw.upper()} — destructive. Re-submit with confirm_destructive=true.',
+            }), 200
+        if _UNSAFE_WRITE_RE.match(sql):
+            return jsonify({
+                'requires_confirmation': True,
+                'reason': 'UPDATE/DELETE without WHERE will affect every row. Re-submit with confirm_destructive=true.',
+            }), 200
+
+    try:
+        client = _open_mysql(conn, database=database or None)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    started = time.time()
+    try:
+        with client.cursor() as cur:
+            affected = cur.execute(sql)
+            rows = []
+            cols = []
+            if cur.description:
+                cols = [d[0] for d in cur.description]
+                rows = [list(r) for r in cur.fetchall()]
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e), 'duration_ms': int((time.time() - started) * 1000)}), 200
+    client.close()
+    def _coerce(v):
+        if v is None or isinstance(v, (str, int, float, bool)):
+            return v
+        if isinstance(v, bytes):
+            try:
+                return v.decode('utf-8')
+            except UnicodeDecodeError:
+                return f'<binary {len(v)} bytes>'
+        return str(v)
+    return jsonify({
+        'columns': cols,
+        'rows': [[_coerce(c) for c in r] for r in rows],
+        'affected_rows': int(affected or 0),
+        'duration_ms': int((time.time() - started) * 1000),
+    })
+
+
+# ── Backup engine ───────────────────────────────────────────────
+
+def _connection_backup_dir(conn):
+    d = DB_BACKUPS_ROOT / _safe_dir_name(conn.name)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
+    """Synchronously run mysqldump for a connection. Records a BackupArchive
+    row in either success or failed state. Used by both the manual endpoint
+    and the scheduler."""
+    with app.app_context():
+        conn = db.session.get(DatabaseConnection, conn_id)
+        if conn is None:
+            return None
+        backup_dir = _connection_backup_dir(conn)
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        filename = f'{_safe_dir_name(conn.name)}-{ts}.sql.gz'
+        filepath = backup_dir / filename
+
+        archive = BackupArchive(
+            connection_id=conn.id,
+            schedule_id=schedule_id,
+            filename=filename,
+            filepath=str(filepath),
+            triggered_by=triggered_by,
+            status='pending',
+        )
+        db.session.add(archive)
+        db.session.commit()
+
+        # Build mysqldump argv. --all-databases when no per-schedule filter,
+        # otherwise dump only the listed databases.
+        env, base_args = _mysqldump_env(conn)
+        argv = ['mysqldump', *base_args,
+                '--single-transaction', '--quick', '--routines', '--events',
+                '--triggers', '--default-character-set=utf8mb4',
+                '--set-gtid-purged=OFF']
+        databases = []
+        if schedule_id is not None:
+            sched = db.session.get(BackupSchedule, schedule_id)
+            if sched and sched.databases:
+                try:
+                    databases = json.loads(sched.databases) or []
+                except (TypeError, ValueError):
+                    databases = []
+        if databases:
+            argv += ['--databases', *databases]
+        else:
+            argv += ['--all-databases']
+
+        started = time.time()
+        try:
+            with gzip.open(filepath, 'wb') as gz:
+                proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                # stream stdout into the gzip file in chunks; capture stderr in full
+                try:
+                    while True:
+                        chunk = proc.stdout.read(64 * 1024)
+                        if not chunk:
+                            break
+                        gz.write(chunk)
+                except Exception as inner_exc:
+                    proc.kill()
+                    raise inner_exc
+                stderr = proc.stderr.read()
+                proc.wait()
+                if proc.returncode != 0:
+                    raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+            archive.size_bytes = filepath.stat().st_size
+            archive.status = 'success'
+            archive.error_message = None
+        except Exception as e:
+            archive.status = 'failed'
+            archive.error_message = str(e)[:1000]
+            try:
+                if filepath.exists():
+                    filepath.unlink()
+            except OSError:
+                pass
+        archive.completed_at = datetime.now(timezone.utc)
+        archive.duration_seconds = int(time.time() - started)
+        db.session.commit()
+
+        # Retention sweep: only when this run came from a schedule
+        if schedule_id is not None:
+            sched = db.session.get(BackupSchedule, schedule_id)
+            if sched and sched.retention_days and sched.retention_days > 0:
+                _apply_retention(conn.id, sched.retention_days)
+
+        # Update schedule last-run metadata
+        if schedule_id is not None:
+            sched = db.session.get(BackupSchedule, schedule_id)
+            if sched:
+                sched.last_run_at = archive.completed_at
+                sched.last_run_status = archive.status
+                sched.last_run_error = archive.error_message
+                db.session.commit()
+        return archive.id
+
+
+def _apply_retention(connection_id, retention_days):
+    cutoff = datetime.now(timezone.utc) - _timedelta(days=retention_days)
+    old = BackupArchive.query.filter(
+        BackupArchive.connection_id == connection_id,
+        BackupArchive.started_at < cutoff,
+    ).all()
+    for a in old:
+        try:
+            p = Path(a.filepath)
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+        db.session.delete(a)
+    db.session.commit()
+
+
+# Avoid circular: we already imported datetime+timezone at the top of app.py
+from datetime import timedelta as _timedelta
+
+
+@app.route('/api/databases/connections/<int:conn_id>/backups')
+@login_required
+def api_db_backups_list(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    rows = BackupArchive.query.filter_by(connection_id=conn.id).order_by(BackupArchive.started_at.desc()).limit(200).all()
+    return jsonify({'backups': [r.to_dict() for r in rows]})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/backups/run', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_db_backups_run(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    # Run in a background thread so the HTTP request doesn't block on a long dump
+    def _run():
+        _run_backup(conn.id, schedule_id=None, triggered_by='manual')
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'started': True})
+
+
+@app.route('/api/databases/backups/<int:backup_id>/download')
+@login_required
+def api_db_backup_download(backup_id):
+    err = _admin_required()
+    if err:
+        return err
+    a = db.session.get(BackupArchive, backup_id)
+    if a is None:
+        return jsonify({'error': 'Backup not found.'}), 404
+    conn = db.session.get(DatabaseConnection, a.connection_id)
+    if conn is None or conn.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if a.status != 'success' or not Path(a.filepath).exists():
+        return jsonify({'error': 'Backup file is not available.'}), 410
+    return send_file(a.filepath, as_attachment=True, download_name=a.filename)
+
+
+@app.route('/api/databases/backups/<int:backup_id>', methods=['DELETE'])
+@csrf.exempt
+@login_required
+def api_db_backup_delete(backup_id):
+    err = _admin_required()
+    if err:
+        return err
+    a = db.session.get(BackupArchive, backup_id)
+    if a is None:
+        return jsonify({'error': 'Backup not found.'}), 404
+    conn = db.session.get(DatabaseConnection, a.connection_id)
+    if conn is None or conn.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    try:
+        p = Path(a.filepath)
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+    db.session.delete(a)
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+# ── Schedules ───────────────────────────────────────────────────
+
+@app.route('/api/databases/connections/<int:conn_id>/schedule', methods=['GET'])
+@login_required
+def api_db_schedule_get(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    sched = BackupSchedule.query.filter_by(connection_id=conn.id).first()
+    return jsonify({'schedule': sched.to_dict() if sched else None})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/schedule', methods=['PUT'])
+@csrf.exempt
+@login_required
+def api_db_schedule_upsert(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    sched = BackupSchedule.query.filter_by(connection_id=conn.id).first()
+    if sched is None:
+        sched = BackupSchedule(connection_id=conn.id)
+        db.session.add(sched)
+    if 'enabled' in data:
+        sched.enabled = bool(data['enabled'])
+    if 'every_hours' in data:
+        try:
+            v = int(data['every_hours'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'every_hours must be an integer.'}), 400
+        if not 1 <= v <= 24 * 30:
+            return jsonify({'error': 'every_hours must be between 1 and 720.'}), 400
+        sched.every_hours = v
+    if 'at_minute' in data:
+        try:
+            m = int(data['at_minute'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'at_minute must be an integer.'}), 400
+        if not 0 <= m <= 59:
+            return jsonify({'error': 'at_minute must be 0–59.'}), 400
+        sched.at_minute = m
+    if 'retention_days' in data:
+        try:
+            r = int(data['retention_days'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'retention_days must be an integer.'}), 400
+        if not 1 <= r <= 365 * 5:
+            return jsonify({'error': 'retention_days must be between 1 and 1825.'}), 400
+        sched.retention_days = r
+    if 'databases' in data:
+        dbs = data['databases'] or []
+        if not isinstance(dbs, list):
+            return jsonify({'error': 'databases must be a list of names.'}), 400
+        sched.databases = json.dumps([str(d) for d in dbs])
+    db.session.commit()
+    _reschedule_backup_jobs()
+    return jsonify({'schedule': sched.to_dict()})
+
+
+# ── APScheduler wiring ──────────────────────────────────────────
+# In-process so the panel needs no external cron. Single BackgroundScheduler
+# shared across endpoints; rebuilt whenever schedules are upserted.
+
+_db_scheduler = None
+
+
+def _ensure_scheduler():
+    global _db_scheduler
+    if _db_scheduler is not None:
+        return _db_scheduler
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+    except ImportError:
+        return None
+    _db_scheduler = BackgroundScheduler(timezone='UTC', daemon=True)
+    _db_scheduler.start()
+    return _db_scheduler
+
+
+def _reschedule_backup_jobs():
+    sched = _ensure_scheduler()
+    if sched is None:
+        return
+    # Remove all existing jobs we own and re-add from current DB state
+    for job in list(sched.get_jobs()):
+        if job.id.startswith('db-backup-'):
+            sched.remove_job(job.id)
+    for s in BackupSchedule.query.filter_by(enabled=True).all():
+        from apscheduler.triggers.interval import IntervalTrigger
+        # IntervalTrigger doesn't have an "at minute" concept; align by setting
+        # start_date to the next occurrence of at_minute, then run every N hours.
+        now = datetime.now(timezone.utc)
+        start = now.replace(second=0, microsecond=0, minute=s.at_minute or 0)
+        if start <= now:
+            start = start + _timedelta(hours=s.every_hours)
+        trigger = IntervalTrigger(hours=s.every_hours, start_date=start)
+        sched.add_job(
+            func=_run_backup,
+            trigger=trigger,
+            id=f'db-backup-{s.id}',
+            args=[s.connection_id, s.id, 'scheduled'],
+            misfire_grace_time=600,
+            coalesce=True,
+            max_instances=1,
+        )
+
+
+# ═══════════════════════════════════════════
 # Error Handlers
 # ═══════════════════════════════════════════
 
@@ -3828,12 +4638,22 @@ def payload_too_large(e):
 
 @app.shell_context_processor
 def make_shell_context():
-    return {'db': db, 'User': User, 'Project': Project, 'App': App, 'Deployment': Deployment, 'AppSetting': AppSetting}
+    return {
+        'db': db, 'User': User, 'Project': Project, 'App': App,
+        'Deployment': Deployment, 'AppSetting': AppSetting,
+        'DatabaseConnection': DatabaseConnection,
+        'BackupSchedule': BackupSchedule, 'BackupArchive': BackupArchive,
+    }
 
 
 with app.app_context():
     db.create_all()
     migrate_schema()
+    # Boot the backup scheduler. Safe to call repeatedly (no-op on reload).
+    try:
+        _reschedule_backup_jobs()
+    except Exception as e:
+        print(f'[scheduler] WARNING: backup scheduler boot failed: {e}', file=sys.stderr)
 
 
 if __name__ == '__main__':
