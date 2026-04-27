@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Head from 'next/head'
 import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
   CheckCircle2, XCircle, AlertTriangle, Save, Calendar, Table as TableIcon,
+  ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
@@ -19,6 +20,11 @@ export default function DatabasesPage() {
   const [error, setError] = useState('')
   const [activeId, setActiveId] = useState(null)
   const [showAddForm, setShowAddForm] = useState(false)
+  const [panelTab, setPanelTab] = useState('browse')
+  const [browseSelection, setBrowseSelection] = useState(null)
+  /** When set, SQL tab applies this to the editor once then clears via callback. */
+  const [pendingSql, setPendingSql] = useState(null)
+  const consumePendingSql = useCallback(() => setPendingSql(null), [])
   const active = useMemo(
     () => connections.find((c) => c.id === activeId) || null,
     [connections, activeId],
@@ -45,9 +51,30 @@ export default function DatabasesPage() {
   const onConnectionDeleted = (id) => {
     setConnections((prev) => {
       const next = prev.filter((c) => c.id !== id)
-      if (activeId === id) setActiveId(next[0]?.id || null)
+      if (activeId === id) {
+        setActiveId(next[0]?.id || null)
+        setBrowseSelection(null)
+      }
       return next
     })
+  }
+
+  const handleActivateConnection = (connId) => {
+    setActiveId(connId)
+    setBrowseSelection((sel) => (sel?.connectionId === connId ? sel : null))
+  }
+
+  const onBrowseObject = (connId, database, name, kind) => {
+    setActiveId(connId)
+    setBrowseSelection({ connectionId: connId, database, name, kind })
+    setPanelTab('browse')
+  }
+
+  const onRoutineInspect = (connId, database, name, routineType) => {
+    setActiveId(connId)
+    const rt = routineType === 'FUNCTION' ? 'FUNCTION' : 'PROCEDURE'
+    setPendingSql(`SHOW CREATE ${rt} \`${database}\`.\`${name}\``)
+    setPanelTab('sql')
   }
 
   return (
@@ -103,14 +130,27 @@ export default function DatabasesPage() {
 
         {connections.length > 0 && (
           <div className="flex flex-1 min-h-0 gap-4">
-            <ConnectionList
+            <SchemaNavigator
               connections={connections}
-              activeId={activeId}
-              onSelect={setActiveId}
+              activeConnectionId={activeId}
+              browseSelection={browseSelection}
+              onConnectionActivate={handleActivateConnection}
+              onBrowseObject={onBrowseObject}
+              onRoutineInspect={onRoutineInspect}
               onDeleted={onConnectionDeleted}
               onRefresh={refresh}
             />
-            {active && <ConnectionPanel connection={active} />}
+            {active && (
+              <ConnectionPanel
+                connection={active}
+                tab={panelTab}
+                onTabChange={setPanelTab}
+                browseSelection={browseSelection}
+                onBrowseSelectionChange={setBrowseSelection}
+                pendingSql={pendingSql}
+                onPendingSqlConsumed={consumePendingSql}
+              />
+            )}
           </div>
         )}
       </div>
@@ -118,11 +158,95 @@ export default function DatabasesPage() {
   )
 }
 
-// ── Sidebar list ─────────────────────────────────────────────────
+// ── Sidebar: connection → databases → tables / views / routines ─
 
-function ConnectionList({ connections, activeId, onSelect, onDeleted, onRefresh }) {
+const SCHEMA_CATEGORIES = [
+  { id: 'tables', label: 'Tables', icon: TableIcon, key: 'tables' },
+  { id: 'views', label: 'Views', icon: Eye, key: 'views' },
+  { id: 'functions', label: 'Functions', icon: Code2, key: 'functions' },
+  { id: 'procedures', label: 'Procedures', icon: ScrollText, key: 'procedures' },
+]
+
+function SchemaNavigator({
+  connections,
+  activeConnectionId,
+  browseSelection,
+  onConnectionActivate,
+  onBrowseObject,
+  onRoutineInspect,
+  onDeleted,
+  onRefresh,
+}) {
   const [busyId, setBusyId] = useState(null)
   const [testResults, setTestResults] = useState({})
+  const [expandedConn, setExpandedConn] = useState(() => new Set())
+  const [expandedDb, setExpandedDb] = useState(() => new Set())
+  const [expandedCat, setExpandedCat] = useState(() => new Set())
+  const [dbsByConn, setDbsByConn] = useState({})
+  const [loadingDbs, setLoadingDbs] = useState({})
+  const [schemaByKey, setSchemaByKey] = useState({})
+  const [loadingSchema, setLoadingSchema] = useState({})
+
+  const toggleSet = (setter, key) => {
+    setter((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const loadDatabases = async (cid) => {
+    if (dbsByConn[cid] || loadingDbs[cid]) return
+    setLoadingDbs((m) => ({ ...m, [cid]: true }))
+    try {
+      const res = await apiClient.listDatabases(cid)
+      const user = res.data.databases || []
+      const system = res.data.system_databases || []
+      setDbsByConn((m) => ({ ...m, [cid]: [...user, ...system] }))
+    } catch {
+      setDbsByConn((m) => ({ ...m, [cid]: [] }))
+    } finally {
+      setLoadingDbs((m) => ({ ...m, [cid]: false }))
+    }
+  }
+
+  const loadSchema = async (cid, dbName) => {
+    const sk = `${cid}:${dbName}`
+    if (schemaByKey[sk] || loadingSchema[sk]) return
+    setLoadingSchema((m) => ({ ...m, [sk]: true }))
+    try {
+      const res = await apiClient.getDatabaseSchema(cid, dbName)
+      setSchemaByKey((m) => ({ ...m, [sk]: res.data }))
+    } catch {
+      setSchemaByKey((m) => ({
+        ...m,
+        [sk]: { tables: [], views: [], functions: [], procedures: [] },
+      }))
+    } finally {
+      setLoadingSchema((m) => ({ ...m, [sk]: false }))
+    }
+  }
+
+  const onToggleConnection = (e, cid) => {
+    e.stopPropagation()
+    const open = expandedConn.has(cid)
+    toggleSet(setExpandedConn, cid)
+    if (!open) loadDatabases(cid)
+  }
+
+  const onToggleDb = (e, cid, dbName) => {
+    e.stopPropagation()
+    const dk = `${cid}:${dbName}`
+    const open = expandedDb.has(dk)
+    toggleSet(setExpandedDb, dk)
+    if (!open) loadSchema(cid, dbName)
+  }
+
+  const onToggleCat = (e, cid, dbName, catId) => {
+    e.stopPropagation()
+    toggleSet(setExpandedCat, `${cid}:${dbName}:${catId}`)
+  }
 
   const onTest = async (c) => {
     setBusyId(c.id)
@@ -145,6 +269,11 @@ function ConnectionList({ connections, activeId, onSelect, onDeleted, onRefresh 
     try {
       await apiClient.deleteDbConnection(c.id)
       onDeleted(c.id)
+      setExpandedConn((s) => {
+        const next = new Set(s)
+        next.delete(c.id)
+        return next
+      })
     } catch (err) {
       alert(err.response?.data?.error || 'Delete failed')
     } finally {
@@ -152,72 +281,217 @@ function ConnectionList({ connections, activeId, onSelect, onDeleted, onRefresh 
     }
   }
 
+  const leafSelected = (cid, dbName, name, kind) =>
+    browseSelection?.connectionId === cid
+    && browseSelection.database === dbName
+    && browseSelection.name === name
+    && browseSelection.kind === kind
+
   return (
-    <div className="w-72 shrink-0 rounded border border-gray-700 bg-secondary overflow-y-auto">
-      <div className="p-3 border-b border-gray-700 flex items-center justify-between">
-        <span className="text-xs uppercase tracking-wide text-gray-400">Connections</span>
-        <button onClick={onRefresh} className="text-gray-400 hover:text-white" title="Refresh">
+    <div className="w-80 shrink-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-0 max-h-full">
+      <div className="p-3 border-b border-gray-700 flex items-center justify-between shrink-0">
+        <span className="text-xs uppercase tracking-wide text-gray-400">Navigator</span>
+        <button
+          type="button"
+          onClick={() => {
+            onRefresh()
+            setDbsByConn({})
+            setSchemaByKey({})
+          }}
+          className="text-gray-400 hover:text-white"
+          title="Refresh tree"
+        >
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
-      <ul>
+      <div className="overflow-y-auto flex-1 min-h-0 text-sm">
         {connections.map((c) => {
-          const isActive = c.id === activeId
+          const connOpen = expandedConn.has(c.id)
+          const isActiveConn = c.id === activeConnectionId
           const test = testResults[c.id]
+          const dbs = dbsByConn[c.id]
+          const loadingD = loadingDbs[c.id]
+
           return (
-            <li
-              key={c.id}
-              onClick={() => onSelect(c.id)}
-              className={`px-3 py-3 cursor-pointer border-b border-gray-700 ${
-                isActive ? 'bg-primary' : 'hover:bg-primary/40'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="text-white text-sm font-semibold truncate">{c.name}</div>
-                  <div className="text-gray-400 text-xs truncate">
-                    {c.username}@{c.host}:{c.port}
+            <div key={c.id} className="border-b border-gray-700/80">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => onConnectionActivate(c.id)}
+                onKeyDown={(e) => { if (e.key === 'Enter') onConnectionActivate(c.id) }}
+                className={`flex items-start gap-1 px-2 py-2 cursor-pointer ${
+                  isActiveConn ? 'bg-primary/60' : 'hover:bg-primary/30'
+                }`}
+              >
+                <button
+                  type="button"
+                  className="p-0.5 mt-0.5 text-gray-400 hover:text-white shrink-0"
+                  aria-expanded={connOpen}
+                  title={connOpen ? 'Collapse connection' : 'Expand databases'}
+                  onClick={(e) => onToggleConnection(e, c.id)}
+                >
+                  {connOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                </button>
+                <Server className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-white font-medium truncate">{c.name}</div>
+                  <div className="text-gray-500 text-xs truncate">{c.username}@{c.host}:{c.port}</div>
+                  {test?.ok && (
+                    <div className="text-green-400/80 text-xs mt-0.5 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" /> {test.server_version}
+                    </div>
+                  )}
+                  {test?.ok === false && (
+                    <div className="text-red-400/80 text-xs mt-0.5 truncate" title={test.error}>{test.error}</div>
+                  )}
+                  <div className="flex gap-2 mt-1">
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onTest(c) }}
+                      disabled={busyId === c.id}
+                      className="text-[11px] text-accent hover:underline disabled:opacity-50"
+                    >
+                      Test
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onDelete(c) }}
+                      disabled={busyId === c.id}
+                      className="text-[11px] text-red-400 hover:underline disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
                   </div>
                 </div>
-                {test?.ok && <CheckCircle2 className="w-4 h-4 text-green-400" />}
-                {test?.ok === false && <XCircle className="w-4 h-4 text-red-400" />}
               </div>
-              {test?.ok && (
-                <div className="text-green-400/80 text-xs mt-1">{test.server_version}</div>
+
+              {connOpen && (
+                <div className="pb-2 pl-1">
+                  {loadingD && (
+                    <div className="pl-7 py-1 text-gray-500 text-xs flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Loading databases…
+                    </div>
+                  )}
+                  {!loadingD && dbs && dbs.length === 0 && (
+                    <div className="pl-7 py-1 text-gray-500 text-xs">No databases</div>
+                  )}
+                  {dbs?.map((dbName) => {
+                    const dk = `${c.id}:${dbName}`
+                    const dbOpen = expandedDb.has(dk)
+                    const sk = `${c.id}:${dbName}`
+                    const schema = schemaByKey[sk]
+                    const loadingS = loadingSchema[sk]
+
+                    return (
+                      <div key={dk} className="mt-0.5">
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          className="flex items-center gap-1 pl-5 pr-2 py-1 rounded hover:bg-primary/25 cursor-pointer"
+                          onClick={(e) => onToggleDb(e, c.id, dbName)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') onToggleDb(e, c.id, dbName) }}
+                        >
+                          <span className="text-gray-400 shrink-0">
+                            {dbOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                          </span>
+                          <Folder className="w-3.5 h-3.5 text-amber-400/90 shrink-0" />
+                          <span className="text-gray-200 truncate">{dbName}</span>
+                        </div>
+
+                        {dbOpen && (
+                          <div className="pl-4">
+                            {loadingS && (
+                              <div className="pl-7 py-1 text-gray-500 text-xs flex items-center gap-1">
+                                <Loader2 className="w-3 h-3 animate-spin" /> Loading schema…
+                              </div>
+                            )}
+                            {schema && SCHEMA_CATEGORIES.map((cat) => {
+                              const items = schema[cat.key] || []
+                              if (items.length === 0) return null
+                              const ck = `${c.id}:${dbName}:${cat.id}`
+                              const catOpen = expandedCat.has(ck)
+                              const Icon = cat.icon
+
+                              return (
+                                <div key={ck} className="mt-0.5">
+                                  <button
+                                    type="button"
+                                    className="w-full flex items-center gap-1 pl-6 pr-2 py-0.5 rounded text-left text-gray-400 hover:text-gray-200 hover:bg-primary/20"
+                                    onClick={(e) => onToggleCat(e, c.id, dbName, cat.id)}
+                                  >
+                                    {catOpen ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+                                    <Icon className="w-3.5 h-3.5 shrink-0 text-gray-500" />
+                                    <span>{cat.label}</span>
+                                    <span className="text-gray-600 text-xs ml-auto tabular-nums">{items.length}</span>
+                                  </button>
+                                  {catOpen && (
+                                    <ul className="pl-12 pr-1 mt-0.5 space-y-0.5">
+                                      {items.map((item) => {
+                                        const name = item.name
+                                        if (cat.id === 'tables' || cat.id === 'views') {
+                                          const kind = cat.id === 'tables' ? 'table' : 'view'
+                                          const sel = leafSelected(c.id, dbName, name, kind)
+                                          return (
+                                            <li key={`${kind}:${name}`}>
+                                              <button
+                                                type="button"
+                                                className={`w-full text-left truncate py-0.5 px-1.5 rounded flex items-center gap-1.5 ${
+                                                  sel ? 'bg-accent/25 text-white' : 'text-gray-300 hover:bg-primary/30'
+                                                }`}
+                                                onClick={() => onBrowseObject(c.id, dbName, name, kind)}
+                                              >
+                                                <TableIcon className="w-3 h-3 shrink-0 opacity-70" />
+                                                <span className="truncate">{name}</span>
+                                              </button>
+                                            </li>
+                                          )
+                                        }
+                                        const rt = cat.id === 'functions' ? 'FUNCTION' : 'PROCEDURE'
+                                        return (
+                                          <li key={`${rt}:${name}`}>
+                                            <button
+                                              type="button"
+                                              className="w-full text-left truncate py-0.5 px-1.5 rounded text-gray-300 hover:bg-primary/30 flex items-center gap-1.5"
+                                              title={`Open SHOW CREATE in SQL tab`}
+                                              onClick={() => onRoutineInspect(c.id, dbName, name, rt)}
+                                            >
+                                              <Icon className="w-3 h-3 shrink-0 opacity-70" />
+                                              <span className="truncate">{name}</span>
+                                            </button>
+                                          </li>
+                                        )
+                                      })}
+                                    </ul>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
               )}
-              {test?.ok === false && (
-                <div className="text-red-400/80 text-xs mt-1 truncate" title={test.error}>{test.error}</div>
-              )}
-              <div className="flex gap-2 mt-2">
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); onTest(c) }}
-                  disabled={busyId === c.id}
-                  className="text-xs text-accent hover:underline disabled:opacity-50"
-                >
-                  Test
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); onDelete(c) }}
-                  disabled={busyId === c.id}
-                  className="text-xs text-red-400 hover:underline disabled:opacity-50"
-                >
-                  Delete
-                </button>
-              </div>
-            </li>
+            </div>
           )
         })}
-      </ul>
+      </div>
     </div>
   )
 }
 
 // ── Right-side panel with tabs ───────────────────────────────────
 
-function ConnectionPanel({ connection }) {
-  const [tab, setTab] = useState('browse')
+function ConnectionPanel({
+  connection,
+  tab,
+  onTabChange,
+  browseSelection,
+  onBrowseSelectionChange,
+  pendingSql,
+  onPendingSqlConsumed,
+}) {
   return (
     <div className="flex-1 min-w-0 rounded border border-gray-700 bg-secondary flex flex-col">
       <div className="border-b border-gray-700 flex items-center gap-1 px-2">
@@ -228,7 +502,7 @@ function ConnectionPanel({ connection }) {
             <button
               key={t.id}
               type="button"
-              onClick={() => setTab(t.id)}
+              onClick={() => onTabChange(t.id)}
               className={`px-3 py-2 text-sm flex items-center gap-2 border-b-2 ${
                 active
                   ? 'border-accent text-white'
@@ -241,8 +515,21 @@ function ConnectionPanel({ connection }) {
         })}
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
-        {tab === 'browse' && <BrowseTab connection={connection} />}
-        {tab === 'sql' && <SqlTab connection={connection} />}
+        {tab === 'browse' && (
+          <BrowseTab
+            key={connection.id}
+            connection={connection}
+            browseSelection={browseSelection}
+            onBrowseSelectionChange={onBrowseSelectionChange}
+          />
+        )}
+        {tab === 'sql' && (
+          <SqlTab
+            connection={connection}
+            pendingSql={pendingSql}
+            onPendingSqlConsumed={onPendingSqlConsumed}
+          />
+        )}
         {tab === 'backups' && <BackupsTab connection={connection} />}
         {tab === 'schedule' && <ScheduleTab connection={connection} />}
       </div>
@@ -252,13 +539,17 @@ function ConnectionPanel({ connection }) {
 
 // ── Browse: pick a DB → pick a table → paginated rows ───────────
 
-function BrowseTab({ connection }) {
+function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
   const [databases, setDatabases] = useState([])
   const [database, setDatabase] = useState('')
   const [tables, setTables] = useState([])
   const [table, setTable] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  const treeSel = browseSelection?.connectionId === connection.id ? browseSelection : null
+  const browseRef = useRef(browseSelection)
+  browseRef.current = browseSelection
 
   useEffect(() => {
     let cancelled = false
@@ -268,10 +559,15 @@ function BrowseTab({ connection }) {
         if (cancelled) return
         const all = [...(res.data.databases || []), ...(res.data.system_databases || [])]
         setDatabases(all)
-        const def = connection.default_database && all.includes(connection.default_database)
-          ? connection.default_database
-          : (res.data.databases?.[0] || '')
-        setDatabase(def)
+        const ts = browseRef.current?.connectionId === connection.id ? browseRef.current : null
+        if (ts?.database) {
+          setDatabase(ts.database)
+        } else {
+          const def = connection.default_database && all.includes(connection.default_database)
+            ? connection.default_database
+            : (res.data.databases?.[0] || '')
+          setDatabase(def)
+        }
         setError('')
       })
       .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load databases'))
@@ -280,17 +576,52 @@ function BrowseTab({ connection }) {
   }, [connection.id, connection.default_database])
 
   useEffect(() => {
+    if (!treeSel) return
+    setDatabase(treeSel.database)
+    setTable(treeSel.name)
+  }, [treeSel?.database, treeSel?.name, treeSel?.kind, treeSel?.connectionId])
+
+  useEffect(() => {
     if (!database) { setTables([]); setTable(''); return }
     let cancelled = false
     apiClient.listTables(connection.id, database)
       .then((res) => {
         if (cancelled) return
-        setTables(res.data.tables || [])
-        setTable(res.data.tables?.[0]?.name || '')
+        const tlist = res.data.tables || []
+        setTables(tlist)
+        const ts = browseRef.current?.connectionId === connection.id ? browseRef.current : null
+        const fromTree = ts
+          && ts.database === database
+          && (ts.kind === 'table' || ts.kind === 'view')
+        if (fromTree) setTable(ts.name)
+        else setTable(tlist[0]?.name || '')
       })
       .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load tables'))
     return () => { cancelled = true }
   }, [connection.id, database])
+
+  useEffect(() => {
+    if (!treeSel || treeSel.database !== database) return
+    if (treeSel.kind !== 'table' && treeSel.kind !== 'view') return
+    setTable(treeSel.name)
+  }, [treeSel, database, tables])
+
+  const onDatabaseChange = (value) => {
+    setDatabase(value)
+    onBrowseSelectionChange(null)
+  }
+
+  const onTableChange = (value) => {
+    setTable(value)
+    if (database && value) {
+      onBrowseSelectionChange({
+        connectionId: connection.id,
+        database,
+        name: value,
+        kind: 'table',
+      })
+    }
+  }
 
   return (
     <div className="p-4 flex flex-col gap-4 h-full">
@@ -298,15 +629,15 @@ function BrowseTab({ connection }) {
         <label className="text-sm text-gray-400">Database</label>
         <select
           value={database}
-          onChange={(e) => setDatabase(e.target.value)}
+          onChange={(e) => onDatabaseChange(e.target.value)}
           className="bg-primary border border-gray-700 text-white text-sm px-2 py-1 rounded"
         >
           {databases.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
-        <label className="text-sm text-gray-400 ml-4">Table</label>
+        <label className="text-sm text-gray-400 ml-4">Table / view</label>
         <select
           value={table}
-          onChange={(e) => setTable(e.target.value)}
+          onChange={(e) => onTableChange(e.target.value)}
           className="bg-primary border border-gray-700 text-white text-sm px-2 py-1 rounded min-w-[12rem]"
         >
           {tables.map((t) => (
@@ -317,6 +648,16 @@ function BrowseTab({ connection }) {
         </select>
         {loading && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
       </div>
+
+      {treeSel && (treeSel.kind === 'table' || treeSel.kind === 'view') && (
+        <div className="text-xs text-gray-500">
+          Navigator: <span className="text-gray-400">{treeSel.database}</span>
+          <span className="mx-1 text-gray-600">›</span>
+          <span className="text-accent">{treeSel.kind}</span>
+          <span className="mx-1 text-gray-600">›</span>
+          <span className="text-gray-300">{treeSel.name}</span>
+        </div>
+      )}
 
       {error && (
         <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">
@@ -394,7 +735,7 @@ function TableViewer({ connectionId, database, table }) {
 
 // ── SQL runner ──────────────────────────────────────────────────
 
-function SqlTab({ connection }) {
+function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
   const [databases, setDatabases] = useState([])
   const [database, setDatabase] = useState('')
   const [sql, setSql] = useState('SHOW DATABASES;')
@@ -402,6 +743,12 @@ function SqlTab({ connection }) {
   const [error, setError] = useState('')
   const [confirmation, setConfirmation] = useState(null) // { reason }
   const [running, setRunning] = useState(false)
+
+  useEffect(() => {
+    if (!pendingSql) return
+    setSql(pendingSql)
+    onPendingSqlConsumed()
+  }, [pendingSql, onPendingSqlConsumed])
 
   useEffect(() => {
     apiClient.listDatabases(connection.id)

@@ -4188,6 +4188,73 @@ def api_db_tables_list(conn_id):
     return jsonify({'tables': rows})
 
 
+@app.route('/api/databases/connections/<int:conn_id>/database-schema')
+@login_required
+def api_db_database_schema(conn_id):
+    """Categorized schema objects for one database (tables, views, routines)."""
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    database = (request.args.get('database') or '').strip()
+    if not database or not re.fullmatch(r'[A-Za-z0-9_$]+', database):
+        return jsonify({'error': 'Invalid database name.'}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute("""
+                SELECT table_name, table_type, table_rows,
+                       COALESCE(data_length, 0) + COALESCE(index_length, 0) AS size_bytes
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                ORDER BY table_type, table_name
+            """, (database,))
+            tables = []
+            views = []
+            for r in cur.fetchall():
+                name, ttype, trows, size_b = r[0], r[1], r[2], r[3]
+                row = {'name': name}
+                if ttype == 'BASE TABLE':
+                    row['rows'] = int(trows or 0)
+                    row['size_bytes'] = int(size_b or 0)
+                    tables.append(row)
+                elif ttype == 'VIEW':
+                    views.append(row)
+            cur.execute("""
+                SELECT routine_name, routine_type
+                FROM information_schema.routines
+                WHERE routine_schema = %s
+                ORDER BY routine_type, routine_name
+            """, (database,))
+            functions = []
+            procedures = []
+            for rname, rtype in cur.fetchall():
+                item = {'name': rname}
+                if rtype == 'FUNCTION':
+                    functions.append(item)
+                elif rtype == 'PROCEDURE':
+                    procedures.append(item)
+    except Exception as e:
+        client.close()
+        return jsonify({'error': f'Query failed: {str(e)}'}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({
+        'tables': tables,
+        'views': views,
+        'functions': functions,
+        'procedures': procedures,
+    })
+
+
 @app.route('/api/databases/connections/<int:conn_id>/table-rows')
 @login_required
 def api_db_table_rows(conn_id):

@@ -119,6 +119,8 @@ export const apiClient = {
   listDatabases: (id) => api.get(`/api/databases/connections/${id}/databases`),
   listTables: (id, database) =>
     api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
+  getDatabaseSchema: (id, database) =>
+    api.get(`/api/databases/connections/${id}/database-schema`, { params: { database } }),
   getTableRows: (id, database, table, page = 1, perPage = 50) =>
     api.get(`/api/databases/connections/${id}/table-rows`, {
       params: { database, table, page, per_page: perPage },
