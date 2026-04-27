@@ -631,23 +631,36 @@ nginx_start_or_recover() {
     warn "Nginx couldn't bind port $busy_port (held by ${owner:-another web server})."
     warn "Scanning nginx configs for files that bind port $busy_port and disabling them…"
 
+    # Disabled files go into a graveyard dir OUTSIDE the include paths.
+    # Renaming inside sites-enabled doesn't help because the include uses
+    # 'sites-enabled/*' (no extension filter), so even '*.disabled-by-ascend'
+    # files still get loaded. The graveyard is only scanned by us.
+    local graveyard=/etc/nginx/disabled-by-ascend
+    mkdir -p "$graveyard"
+
     # GNU grep word boundary (\b) keeps '80' from matching '8080' or '1080'.
     local listen_re="^[[:space:]]*listen[[:space:]]+([^;#]*[: ])?\b${busy_port}\b"
+    # Each entry is "original_path|graveyard_path" so we can both restore on
+    # failure and print accurate restore commands on success.
     local disabled=()
-    local cfg base actual dir
+    local cfg base actual dir rel safe dest
     for dir in /etc/nginx/sites-enabled /etc/nginx/conf.d; do
         [[ -d "$dir" ]] || continue
         for cfg in "$dir"/*; do
             [[ -e "$cfg" ]] || continue
             base=$(basename "$cfg")
-            # Don't touch our own site or already-disabled files
+            # Don't touch our own site
             [[ "$base" == "ascend" || "$base" == "ascend.conf" ]] && continue
-            [[ "$base" == *.disabled-by-ascend ]] && continue
+            # Resolve symlinks before grepping (sites-enabled entries are usually
+            # symlinks into sites-available)
             actual=$(readlink -f "$cfg" 2>/dev/null || echo "$cfg")
             if grep -qE "$listen_re" "$actual" 2>/dev/null; then
+                rel="${cfg#/etc/nginx/}"
+                safe="${rel//\//__}"
+                dest="${graveyard}/${safe}"
                 info "  Disabling $cfg (binds port $busy_port)"
-                mv "$cfg" "${cfg}.disabled-by-ascend"
-                disabled+=("$cfg")
+                mv "$cfg" "$dest"
+                disabled+=("${cfg}|${dest}")
             fi
         done
     done
@@ -659,18 +672,23 @@ nginx_start_or_recover() {
 
     if systemctl start nginx 2>/dev/null; then
         ok "Disabled ${#disabled[@]} conflicting nginx config(s) — nginx started cleanly."
-        local f
-        for f in "${disabled[@]}"; do
-            ok "  $f → ${f}.disabled-by-ascend  (restore: sudo mv ${f}.disabled-by-ascend $f && sudo systemctl reload nginx)"
+        local entry orig moved
+        for entry in "${disabled[@]}"; do
+            orig="${entry%%|*}"
+            moved="${entry##*|}"
+            ok "  $orig → $moved  (restore: sudo mv $moved $orig && sudo systemctl reload nginx)"
         done
         return 0
     fi
 
     # Retry didn't help — put everything back so the operator's nginx state is unchanged
-    local f
-    for f in "${disabled[@]}"; do
-        mv "${f}.disabled-by-ascend" "$f"
+    local entry orig moved
+    for entry in "${disabled[@]}"; do
+        orig="${entry%%|*}"
+        moved="${entry##*|}"
+        mv "$moved" "$orig"
     done
+    rmdir "$graveyard" 2>/dev/null || true
 
     echo "$err" >&2
     die "Nginx still couldn't bind port $busy_port after disabling ${#disabled[@]} site(s). The conflict is likely from /etc/nginx/nginx.conf or an included snippet. All disabled files have been restored."
