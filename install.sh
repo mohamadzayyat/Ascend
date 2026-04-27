@@ -608,9 +608,12 @@ nginx_start_or_recover() {
     local err
     err=$(journalctl -u nginx.service --no-pager -n 30 2>/dev/null || true)
 
-    if echo "$err" | grep -qi "address already in use"; then
+    # nginx reports the bind failure as either "Address already in use" (errno
+    # text) or just "(98: Unknown error)" depending on glibc/nginx build.
+    # Errno 98 == EADDRINUSE on Linux either way, so match the bind() line.
+    if echo "$err" | grep -qiE 'bind\(\) to .+ failed|address already in use'; then
         local busy_port
-        busy_port=$(echo "$err" | grep -oE '0\.0\.0\.0:[0-9]+|\[::\]:[0-9]+' | grep -oE '[0-9]+$' | head -1)
+        busy_port=$(echo "$err" | grep -oE 'bind\(\) to (0\.0\.0\.0|\[::\]):[0-9]+' | grep -oE '[0-9]+$' | head -1)
         busy_port="${busy_port:-80}"
 
         local owner=""
