@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { Github, Shield } from 'lucide-react'
+import { Github, Mail, Shield } from 'lucide-react'
 import { useAuth } from '@/lib/hooks/useAuth'
 
 export default function Settings() {
@@ -39,6 +39,22 @@ export default function Settings() {
 
       {/* Quick links */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {user?.is_admin && (
+          <Link
+            href="/settings/email"
+            className="bg-secondary rounded-lg border border-gray-700 hover:border-accent p-6 transition group"
+          >
+            <div className="flex items-center gap-3 mb-2">
+              <Mail className="w-6 h-6 text-accent" />
+              <h3 className="text-white font-bold group-hover:text-accent transition">
+                Email &amp; alerts
+              </h3>
+            </div>
+            <p className="text-gray-400 text-sm">
+              SMTP for backup, login, project, deployment, and terminal unlock notifications.
+            </p>
+          </Link>
+        )}
         <Link
           href="/settings/github"
           className="bg-secondary rounded-lg border border-gray-700 hover:border-accent p-6 transition group"

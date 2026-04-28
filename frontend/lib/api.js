@@ -50,6 +50,10 @@ export const apiClient = {
   getProjectDeployments: (projectId) => api.get(`/api/project/${projectId}/deployments`),
 
   // GitHub Credentials
+  getEmailNotifications: () => api.get('/api/settings/email-notifications'),
+  updateEmailNotifications: (data) => api.put('/api/settings/email-notifications', data),
+  testEmailNotifications: (data) => api.post('/api/settings/email-notifications/test', data || {}),
+
   getGitHubCredentials: () => api.get('/api/github-credentials'),
   addGitHubCredential: (username, token) => api.post('/api/github-credentials', { username, token }),
   deleteGitHubCredential: (id) => api.delete(`/api/github-credentials/${id}`),

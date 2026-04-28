@@ -586,6 +586,12 @@ def api_login():
     user = User.query.filter_by(username=username).first()
     if user and user.check_password(password):
         login_user(user, remember=data.get('remember', False))
+        ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+        _notify_email_async(
+            'panel_login',
+            f'Ascend: login — {user.username}',
+            f'User {user.username} signed in to the panel.\nIP: {ip}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+        )
         return jsonify({
             'id': user.id,
             'username': user.username,
@@ -673,6 +679,12 @@ def login():
         user = User.query.filter_by(username=username).first()
         if user and user.check_password(password):
             login_user(user, remember=request.form.get('remember'))
+            ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+            _notify_email_async(
+                'panel_login',
+                f'Ascend: login — {user.username}',
+                f'User {user.username} signed in (web form).\nIP: {ip}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+            )
             return redirect(url_for('dashboard'))
         flash('Invalid username or password', 'error')
 
@@ -742,6 +754,91 @@ def api_current_user():
     })
 
 
+@app.route('/api/settings/email-notifications', methods=['GET', 'PUT'])
+@csrf.exempt
+@login_required
+def api_settings_email_notifications():
+    err = _admin_required()
+    if err:
+        return err
+    if request.method == 'GET':
+        full = _email_notify_settings_load()
+        return jsonify(_email_notify_settings_to_api_dict(full))
+    data = request.get_json(silent=True) or {}
+    cur = _email_notify_settings_load()
+    if 'enabled' in data:
+        cur['enabled'] = bool(data['enabled'])
+    for k in ('host', 'username', 'from_addr', 'notify_to'):
+        if k in data and isinstance(data[k], str):
+            cur[k] = data[k].strip()
+    if 'port' in data:
+        try:
+            cur['port'] = int(data['port'])
+        except (TypeError, ValueError):
+            pass
+    if 'use_tls' in data:
+        cur['use_tls'] = bool(data['use_tls'])
+    if 'use_starttls' in data:
+        cur['use_starttls'] = bool(data['use_starttls'])
+    if 'events' in data and isinstance(data['events'], dict):
+        for ek in _EMAIL_NOTIFY_EVENT_DEFAULTS:
+            if ek in data['events']:
+                cur['events'][ek] = bool(data['events'][ek])
+    if bool(data.get('clear_smtp_password')):
+        cur['smtp_password'] = ''
+    elif isinstance(data.get('smtp_password'), str) and data['smtp_password'].strip():
+        cur['smtp_password'] = data['smtp_password'].strip()
+
+    persist = {
+        'enabled': bool(cur['enabled']),
+        'host': (cur.get('host') or '').strip(),
+        'port': int(cur.get('port') or 587),
+        'use_tls': bool(cur.get('use_tls')),
+        'use_starttls': bool(cur.get('use_starttls')),
+        'username': (cur.get('username') or '').strip(),
+        'from_addr': (cur.get('from_addr') or '').strip(),
+        'notify_to': (cur.get('notify_to') or '').strip(),
+        'events': dict(cur['events']),
+        'smtp_password_encrypted': _encrypt_password(cur['smtp_password']) if cur.get('smtp_password') else '',
+    }
+    rec = db.session.get(AppSetting, EMAIL_NOTIFY_SETTING_KEY)
+    if rec is None:
+        rec = AppSetting(key=EMAIL_NOTIFY_SETTING_KEY, value=json.dumps(persist))
+        db.session.add(rec)
+    else:
+        rec.value = json.dumps(persist)
+    db.session.commit()
+    fresh = _email_notify_settings_load()
+    return jsonify(_email_notify_settings_to_api_dict(fresh))
+
+
+@app.route('/api/settings/email-notifications/test', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_settings_email_notifications_test():
+    err = _admin_required()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    full = _email_notify_settings_load()
+    if not (full.get('host') or '').strip():
+        return jsonify({'error': 'Configure SMTP host and save before testing.'}), 400
+    to_override = (data.get('to') or '').strip()
+    recipients = _parse_notify_emails(to_override) if to_override else _parse_notify_emails(full.get('notify_to') or '')
+    if not recipients:
+        return jsonify({'error': 'Set “Send alerts to” and save, or pass `to` in the request body.'}), 400
+    subject = (data.get('subject') or 'Ascend: test email').strip()[:900]
+    body = (data.get('body') or (
+        'This is a test message from Ascend.\n\n'
+        'If you received this, SMTP settings are working.'
+    )).strip()[:500000]
+    try:
+        _smtp_send_raw(full, recipients, subject, body)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    return jsonify({'ok': True, 'sent_to': recipients})
+
+
 @app.route('/api/projects', methods=['GET'])
 @login_required
 def api_projects():
@@ -778,6 +875,13 @@ def api_create_project():
     )
     db.session.add(project)
     db.session.commit()
+
+    _notify_email_async(
+        'project_created',
+        f'Ascend: project created — {project.name}',
+        f'Project: {project.name}\nFolder: {project.folder_name}\nGitHub: {project.github_url}\n'
+        f'By user id: {current_user.id} ({current_user.username})\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+    )
 
     # If auto_deploy was enabled, try to install the webhook in GitHub now.
     webhook_result = None
@@ -840,12 +944,21 @@ def api_delete_project(project_id):
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
 
+    pname = project.name
+    pfolder = project.folder_name
+
     # Best-effort cleanup of the GitHub webhook before we delete the row
     if project.github_hook_id:
         _delete_github_webhook(project)
 
     db.session.delete(project)
     db.session.commit()
+    _notify_email_async(
+        'project_deleted',
+        f'Ascend: project deleted — {pname}',
+        f'Project “{pname}” (folder {pfolder}) was deleted by {current_user.username}.\n'
+        f'Time (UTC): {datetime.now(timezone.utc).isoformat()}',
+    )
     return jsonify({'status': 'deleted'})
 
 
@@ -1155,6 +1268,9 @@ def api_delete_app(app_id):
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
 
+    proj_name = a.project.name
+    app_name = a.name
+
     # Best-effort: stop the pm2 process so the port is freed
     if a.pm2_name:
         try:
@@ -1164,6 +1280,12 @@ def api_delete_app(app_id):
 
     db.session.delete(a)
     db.session.commit()
+    _notify_email_async(
+        'app_deleted',
+        f'Ascend: app deleted — {proj_name} / {app_name}',
+        f'App “{app_name}” in project “{proj_name}” was deleted by {current_user.username}.\n'
+        f'Time (UTC): {datetime.now(timezone.utc).isoformat()}',
+    )
     return jsonify({'status': 'deleted'})
 
 
@@ -1804,6 +1926,26 @@ def deploy_app_bg(deployment_id, github_username, github_token):
             deployment.completed_at = datetime.now(timezone.utc)
             deployment.duration_seconds = int(time.time() - start_time)
             db.session.commit()
+            try:
+                st = deployment.status
+                label = f'{project.name} / {app_row.name}'
+                if st == 'success':
+                    _notify_email_async(
+                        'deployment_success',
+                        f'Ascend: deployment succeeded — {label}',
+                        f'Deployment finished successfully for {label}.\n'
+                        f'Time (UTC): {datetime.now(timezone.utc).isoformat()}',
+                    )
+                elif st == 'failed':
+                    err = (deployment.error_message or '')[:2000]
+                    _notify_email_async(
+                        'deployment_failed',
+                        f'Ascend: deployment failed — {label}',
+                        f'Deployment failed for {label}.\nError: {err}\n'
+                        f'Time (UTC): {datetime.now(timezone.utc).isoformat()}',
+                    )
+            except Exception:
+                pass
 
 
 def retry_app_ssl_bg(deployment_id):
@@ -1872,6 +2014,24 @@ def retry_app_ssl_bg(deployment_id):
             deployment.completed_at = datetime.now(timezone.utc)
             deployment.duration_seconds = int(time.time() - start_time)
             db.session.commit()
+            try:
+                st = deployment.status
+                label = f'{project.name} / {app_row.name} (SSL retry)'
+                if st == 'success':
+                    _notify_email_async(
+                        'deployment_success',
+                        f'Ascend: SSL retry succeeded — {project.name} / {app_row.name}',
+                        f'{label} completed.\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+                    )
+                elif st == 'failed':
+                    err = (deployment.error_message or '')[:2000]
+                    _notify_email_async(
+                        'deployment_failed',
+                        f'Ascend: SSL retry failed — {project.name} / {app_row.name}',
+                        f'{label}.\nError: {err}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+                    )
+            except Exception:
+                pass
 
 
 def restart_app_bg(deployment_id):
@@ -1948,6 +2108,24 @@ def restart_app_bg(deployment_id):
             deployment.completed_at = datetime.now(timezone.utc)
             deployment.duration_seconds = int(time.time() - start_time)
             db.session.commit()
+            try:
+                st = deployment.status
+                label = f'{project.name} / {app_row.name} (restart)'
+                if st == 'success':
+                    _notify_email_async(
+                        'deployment_success',
+                        f'Ascend: app restart succeeded — {project.name} / {app_row.name}',
+                        f'{label} completed.\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+                    )
+                elif st == 'failed':
+                    err = (deployment.error_message or '')[:2000]
+                    _notify_email_async(
+                        'deployment_failed',
+                        f'Ascend: app restart failed — {project.name} / {app_row.name}',
+                        f'{label}.\nError: {err}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+                    )
+            except Exception:
+                pass
 
 
 def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
@@ -2859,6 +3037,20 @@ def _fm_owned_project(project_id):
 
 
 SHELL_PASSPHRASE_SETTING_KEY = 'shell_passphrase_hash'
+EMAIL_NOTIFY_SETTING_KEY = 'email_notifications_v1'
+
+_EMAIL_NOTIFY_EVENT_DEFAULTS = {
+    'backup_success': False,
+    'backup_failed': True,
+    'panel_login': False,
+    'project_created': True,
+    'project_deleted': True,
+    'app_deleted': False,
+    'deployment_success': False,
+    'deployment_failed': True,
+    'terminal_unlock': True,
+    'server_files_unlock': True,
+}
 
 
 def _shell_passphrase_env():
@@ -3622,6 +3814,13 @@ def api_server_files_unlock():
     if _server_files_passphrase_ok(given):
         session['server_files_unlocked'] = True
         _SERVER_FILES_ATTEMPTS.pop(current_user.id, None)
+        ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+        _notify_email_async(
+            'server_files_unlock',
+            f'Ascend: server files unlocked — {current_user.username}',
+            f'User {current_user.username} unlocked server-wide file manager (root: {SERVER_FILES_ROOT}).\n'
+            f'IP: {ip}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+        )
         return jsonify({'unlocked': True, 'root': str(SERVER_FILES_ROOT)})
     rec['count'] += 1
     if rec['count'] >= _SERVER_FILES_ATTEMPT_LIMIT:
@@ -3783,6 +3982,13 @@ def api_terminal_unlock():
     if _terminal_passphrase_ok(given):
         session['terminal_unlocked'] = True
         _TERMINAL_ATTEMPTS.pop(current_user.id, None)
+        ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+        _notify_email_async(
+            'terminal_unlock',
+            f'Ascend: web terminal unlocked — {current_user.username}',
+            f'User {current_user.username} unlocked the web terminal (server shell session).\n'
+            f'IP: {ip}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+        )
         return jsonify({'unlocked': True})
     rec['count'] += 1
     if rec['count'] >= _TERMINAL_ATTEMPT_LIMIT:
@@ -3991,6 +4197,152 @@ def _decrypt_password(ciphertext):
     if not ciphertext:
         return ''
     return _fernet_cipher().decrypt(ciphertext.encode('ascii')).decode('utf-8')
+
+
+def _email_notify_defaults():
+    return {
+        'enabled': False,
+        'host': '',
+        'port': 587,
+        'use_tls': False,
+        'use_starttls': True,
+        'username': '',
+        'from_addr': '',
+        'notify_to': '',
+        'events': dict(_EMAIL_NOTIFY_EVENT_DEFAULTS),
+    }
+
+
+def _email_notify_settings_load():
+    """Return merged settings dict (includes decrypted SMTP password as smtp_password)."""
+    d = _email_notify_defaults()
+    rec = db.session.get(AppSetting, EMAIL_NOTIFY_SETTING_KEY)
+    if not rec or not rec.value:
+        return d
+    try:
+        parsed = json.loads(rec.value)
+    except (TypeError, ValueError):
+        return d
+    if not isinstance(parsed, dict):
+        return d
+    for k in ('enabled', 'host', 'port', 'use_tls', 'use_starttls', 'username', 'from_addr', 'notify_to'):
+        if k in parsed:
+            d[k] = parsed[k]
+    ev = parsed.get('events')
+    if isinstance(ev, dict):
+        merged = dict(_EMAIL_NOTIFY_EVENT_DEFAULTS)
+        for ek, evl in ev.items():
+            if ek in merged:
+                merged[ek] = bool(evl)
+        d['events'] = merged
+    pwd_enc = parsed.get('smtp_password_encrypted') or ''
+    d['smtp_password'] = _decrypt_password(pwd_enc) if pwd_enc else ''
+    return d
+
+
+def _email_notify_settings_to_api_dict(full):
+    """Safe subset for JSON (no password)."""
+    out = {k: v for k, v in full.items() if k != 'smtp_password'}
+    out['has_password'] = bool(full.get('smtp_password'))
+    return out
+
+
+def _parse_notify_emails(s):
+    if not s or not str(s).strip():
+        return []
+    parts = re.split(r'[\s,;]+', str(s).strip())
+    out = []
+    seen = set()
+    for p in parts:
+        q = p.strip()
+        if not q or '@' not in q or len(q) > 254:
+            continue
+        key = q.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out
+
+
+def _smtp_send_raw(settings_dict, recipients, subject, body_plain):
+    import smtplib
+    from email.message import EmailMessage
+
+    host = (settings_dict.get('host') or '').strip()
+    if not host:
+        raise ValueError('SMTP host is not configured.')
+    if not recipients:
+        raise ValueError('No recipient addresses.')
+    try:
+        port = int(settings_dict.get('port') or 587)
+    except (TypeError, ValueError):
+        port = 587
+    use_tls = bool(settings_dict.get('use_tls'))
+    use_starttls = bool(settings_dict.get('use_starttls'))
+    username = (settings_dict.get('username') or '').strip()
+    password = settings_dict.get('smtp_password') or ''
+    from_addr = (settings_dict.get('from_addr') or '').strip() or username or 'noreply@localhost'
+
+    msg = EmailMessage()
+    msg['Subject'] = str(subject)[:900]
+    msg['From'] = from_addr
+    msg['To'] = ', '.join(recipients)
+    msg.set_content(str(body_plain)[:500000])
+
+    implicit_ssl = use_tls or (port == 465)
+    if implicit_ssl:
+        with smtplib.SMTP_SSL(host, port, timeout=45) as smtp:
+            if username:
+                smtp.login(username, password)
+            smtp.send_message(msg)
+        return
+
+    import ssl as _ssl
+    with smtplib.SMTP(host, port, timeout=45) as smtp:
+        smtp.ehlo()
+        if use_starttls:
+            smtp.starttls(context=_ssl.create_default_context())
+            smtp.ehlo()
+        if username:
+            smtp.login(username, password)
+        smtp.send_message(msg)
+
+
+def _notify_email_send_if_subscribed(event_key, subject, body_plain):
+    try:
+        full = _email_notify_settings_load()
+    except Exception:
+        return
+    if not full.get('enabled'):
+        return
+    ev = full.get('events') or {}
+    if not ev.get(event_key):
+        return
+    host = (full.get('host') or '').strip()
+    if not host:
+        return
+    recipients = _parse_notify_emails(full.get('notify_to') or '')
+    if not recipients:
+        return
+    try:
+        _smtp_send_raw(full, recipients, subject, body_plain)
+    except Exception as e:
+        print(f'[email-notify] send failed ({event_key}): {e}', file=sys.stderr)
+
+
+def _notify_email_async(event_key, subject, body_plain):
+    subject = str(subject)[:500]
+    body_plain = str(body_plain)[:8000]
+
+    def worker():
+        try:
+            with app.app_context():
+                _notify_email_send_if_subscribed(event_key, subject, body_plain)
+        except Exception as ex:
+            print(f'[email-notify] worker ({event_key}): {ex}', file=sys.stderr)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def _safe_dir_name(name):
@@ -4561,6 +4913,25 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
         archive.completed_at = datetime.now(timezone.utc)
         archive.duration_seconds = int(time.time() - started)
         db.session.commit()
+
+        cname = conn.name
+        st = archive.status
+        dblist = ', '.join(databases) if databases else 'all databases'
+        if st == 'success':
+            _notify_email_async(
+                'backup_success',
+                f'Ascend: backup succeeded — {cname}',
+                f'Connection: {cname}\nFile: {archive.filename}\nDatabases: {dblist}\nTrigger: {triggered_by}\n'
+                f'Size: {archive.size_bytes or 0} bytes\nTime (UTC): {archive.completed_at.isoformat()}',
+            )
+        else:
+            err = (archive.error_message or '')[:3000]
+            _notify_email_async(
+                'backup_failed',
+                f'Ascend: backup failed — {cname}',
+                f'Connection: {cname}\nDatabases: {dblist}\nTrigger: {triggered_by}\nError:\n{err}\n'
+                f'Time (UTC): {archive.completed_at.isoformat()}',
+            )
 
         # Retention sweep: only when this run came from a schedule
         if schedule_id is not None:
