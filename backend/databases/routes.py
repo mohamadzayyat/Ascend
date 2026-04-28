@@ -69,6 +69,37 @@ _DESTRUCTIVE_PREFIXES = ('drop', 'truncate', 'rename')
 _UNSAFE_WRITE_RE = re.compile(r'^\s*(update|delete)\b(?![^;]*\bwhere\b)', re.IGNORECASE | re.DOTALL)
 
 
+def _valid_identifier(name):
+    return bool(re.fullmatch(r'[A-Za-z0-9_$]+', name or ''))
+
+
+def _qi(name):
+    if not _valid_identifier(name):
+        raise ValueError('Invalid identifier.')
+    return f'`{name}`'
+
+
+def _coerce_json_value(v):
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, bytes):
+        try:
+            return v.decode('utf-8')
+        except UnicodeDecodeError:
+            return f'<binary {len(v)} bytes>'
+    return str(v)
+
+
+def _table_primary_key_columns(cur, database, table):
+    cur.execute("""
+        SELECT COLUMN_NAME
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND CONSTRAINT_NAME = 'PRIMARY'
+        ORDER BY ORDINAL_POSITION
+    """, (database, table))
+    return [r[0] for r in cur.fetchall()]
+
+
 def _safe_dir_name(name):
     """Sanitize a connection name for use as a directory under db-backups/."""
     safe = re.sub(r'[^A-Za-z0-9_.-]', '_', name or '').strip('._') or 'connection'
@@ -405,7 +436,7 @@ def api_db_table_rows(conn_id):
     # Identifier sanity: backtick-safe chars only. Prevents SQL injection
     # since we have to interpolate identifiers (parameterized binds don't
     # cover schema/table names).
-    if not re.fullmatch(r'[A-Za-z0-9_$]+', database) or not re.fullmatch(r'[A-Za-z0-9_$]+', table):
+    if not _valid_identifier(database) or not _valid_identifier(table):
         return jsonify({'error': 'Invalid database or table name.'}), 400
     try:
         page = max(int(request.args.get('page') or 1), 1)
@@ -424,6 +455,7 @@ def api_db_table_rows(conn_id):
         return jsonify({'error': str(e)}), 502
     try:
         with client.cursor() as cur:
+            primary_key = _table_primary_key_columns(cur, database, table)
             where_sql = ''
             where_args = ()
             if search_safe:
@@ -457,25 +489,268 @@ def api_db_table_rows(conn_id):
             client.close()
         except:
             pass
-    # Coerce non-JSON-safe types (datetime, bytes, Decimal) to strings
-    def _coerce(v):
-        if v is None or isinstance(v, (str, int, float, bool)):
-            return v
-        if isinstance(v, bytes):
-            try:
-                return v.decode('utf-8')
-            except UnicodeDecodeError:
-                return f'<binary {len(v)} bytes>'
-        return str(v)
-    rows = [[_coerce(c) for c in r] for r in rows]
+    rows = [[_coerce_json_value(c) for c in r] for r in rows]
+    row_keys = []
+    pk_indexes = [cols.index(c) for c in primary_key if c in cols]
+    if primary_key and len(pk_indexes) == len(primary_key):
+        for r in rows:
+            row_keys.append({primary_key[i]: r[pk_indexes[i]] for i in range(len(primary_key))})
     return jsonify({
         'columns': cols,
         'rows': rows,
+        'primary_key': primary_key,
+        'row_keys': row_keys,
         'page': page,
         'per_page': per_page,
         'total': int(total),
         'search': search or None,
     })
+
+
+def _db_table_request_data():
+    data = request.get_json(silent=True) or {}
+    database = (data.get('database') or request.args.get('database') or '').strip()
+    table = (data.get('table') or request.args.get('table') or '').strip()
+    if not _valid_identifier(database) or not _valid_identifier(table):
+        raise ValueError('Invalid database or table name.')
+    return data, database, table
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/table-design')
+@login_required
+def api_db_table_design(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    database = (request.args.get('database') or '').strip()
+    table = (request.args.get('table') or '').strip()
+    if not _valid_identifier(database) or not _valid_identifier(table):
+        return jsonify({'error': 'Invalid database or table name.'}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute("""
+                SELECT ORDINAL_POSITION, COLUMN_NAME, COLUMN_TYPE, DATA_TYPE,
+                       CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
+                       IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA,
+                       COLUMN_COMMENT, CHARACTER_SET_NAME, COLLATION_NAME
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                ORDER BY ORDINAL_POSITION
+            """, (database, table))
+            columns = [{
+                'position': int(r[0] or 0),
+                'name': r[1],
+                'column_type': r[2],
+                'data_type': r[3],
+                'char_length': r[4],
+                'numeric_precision': r[5],
+                'numeric_scale': r[6],
+                'nullable': r[7] == 'YES',
+                'default': _coerce_json_value(r[8]),
+                'key': r[9],
+                'extra': r[10],
+                'comment': r[11],
+                'charset': r[12],
+                'collation': r[13],
+            } for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, INDEX_TYPE, COLLATION, CARDINALITY, NULLABLE
+                FROM information_schema.STATISTICS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """, (database, table))
+            indexes = []
+            for r in cur.fetchall():
+                indexes.append({
+                    'name': r[0],
+                    'unique': int(r[1] or 0) == 0,
+                    'sequence': int(r[2] or 0),
+                    'column': r[3],
+                    'type': r[4],
+                    'collation': r[5],
+                    'cardinality': r[6],
+                    'nullable': r[7],
+                })
+
+            cur.execute("""
+                SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA,
+                       REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+                FROM information_schema.KEY_COLUMN_USAGE
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND REFERENCED_TABLE_NAME IS NOT NULL
+                ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+            """, (database, table))
+            foreign_keys = [{
+                'constraint': r[0],
+                'column': r[1],
+                'referenced_schema': r[2],
+                'referenced_table': r[3],
+                'referenced_column': r[4],
+            } for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT
+                FROM information_schema.TRIGGERS
+                WHERE TRIGGER_SCHEMA = %s AND EVENT_OBJECT_TABLE = %s
+                ORDER BY TRIGGER_NAME
+            """, (database, table))
+            triggers = [{
+                'name': r[0],
+                'event': r[1],
+                'timing': r[2],
+                'statement': r[3],
+            } for r in cur.fetchall()]
+
+            cur.execute(f'SHOW CREATE TABLE {_qi(table)}')
+            create_row = cur.fetchone()
+            create_sql = create_row[1] if create_row and len(create_row) > 1 else ''
+    except Exception as e:
+        client.close()
+        return jsonify({'error': f'Query failed: {str(e)}'}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({
+        'database': database,
+        'table': table,
+        'columns': columns,
+        'indexes': indexes,
+        'foreign_keys': foreign_keys,
+        'triggers': triggers,
+        'create_sql': create_sql,
+    })
+
+
+def _row_key_where(key):
+    if not isinstance(key, dict) or not key:
+        raise ValueError('A primary-key row identity is required.')
+    parts = []
+    args = []
+    for col, val in key.items():
+        if not _valid_identifier(col):
+            raise ValueError('Invalid key column.')
+        parts.append(f'{_qi(col)} <=> %s')
+        args.append(val)
+    return ' AND '.join(parts), args
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/table-row', methods=['POST'])
+@login_required
+def api_db_table_row_insert(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    try:
+        data, database, table = _db_table_request_data()
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    values = data.get('values') or {}
+    if not isinstance(values, dict) or not values:
+        return jsonify({'error': 'values object is required.'}), 400
+    cols = []
+    args = []
+    for col, val in values.items():
+        if not _valid_identifier(col):
+            return jsonify({'error': f'Invalid column: {col}'}), 400
+        cols.append(_qi(col))
+        args.append(val)
+    sql = f'INSERT INTO {_qi(table)} ({", ".join(cols)}) VALUES ({", ".join(["%s"] * len(cols))})'
+    try:
+        client = _open_mysql(conn, database=database)
+        with client.cursor() as cur:
+            affected = cur.execute(sql, tuple(args))
+            last_id = getattr(cur, 'lastrowid', None)
+        client.commit()
+        client.close()
+        return jsonify({'ok': True, 'affected_rows': int(affected or 0), 'last_insert_id': last_id})
+    except Exception as e:
+        try:
+            client.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 400
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/table-row', methods=['PUT'])
+@login_required
+def api_db_table_row_update(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    try:
+        data, database, table = _db_table_request_data()
+        where_sql, where_args = _row_key_where(data.get('key'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    values = data.get('values') or {}
+    if not isinstance(values, dict) or not values:
+        return jsonify({'error': 'No changed values to save.'}), 400
+    sets = []
+    args = []
+    for col, val in values.items():
+        if not _valid_identifier(col):
+            return jsonify({'error': f'Invalid column: {col}'}), 400
+        sets.append(f'{_qi(col)} = %s')
+        args.append(val)
+    sql = f'UPDATE {_qi(table)} SET {", ".join(sets)} WHERE {where_sql} LIMIT 1'
+    try:
+        client = _open_mysql(conn, database=database)
+        with client.cursor() as cur:
+            affected = cur.execute(sql, tuple(args + where_args))
+        client.commit()
+        client.close()
+        return jsonify({'ok': True, 'affected_rows': int(affected or 0)})
+    except Exception as e:
+        try:
+            client.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 400
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/table-row', methods=['DELETE'])
+@login_required
+def api_db_table_row_delete(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    try:
+        data, database, table = _db_table_request_data()
+        where_sql, where_args = _row_key_where(data.get('key'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    sql = f'DELETE FROM {_qi(table)} WHERE {where_sql} LIMIT 1'
+    try:
+        client = _open_mysql(conn, database=database)
+        with client.cursor() as cur:
+            affected = cur.execute(sql, tuple(where_args))
+        client.commit()
+        client.close()
+        return jsonify({'ok': True, 'affected_rows': int(affected or 0)})
+    except Exception as e:
+        try:
+            client.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 400
 
 
 # ── SQL runner with destructive-query guard ─────────────────────

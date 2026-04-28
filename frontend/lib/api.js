@@ -174,6 +174,14 @@ export const apiClient = {
         ...(search && String(search).trim() ? { search: String(search).trim() } : {}),
       },
     }),
+  getTableDesign: (id, database, table) =>
+    api.get(`/api/databases/connections/${id}/table-design`, { params: { database, table } }),
+  insertTableRow: (id, database, table, values) =>
+    api.post(`/api/databases/connections/${id}/table-row`, { database, table, values }),
+  updateTableRow: (id, database, table, key, values) =>
+    api.put(`/api/databases/connections/${id}/table-row`, { database, table, key, values }),
+  deleteTableRow: (id, database, table, key) =>
+    api.delete(`/api/databases/connections/${id}/table-row`, { data: { database, table, key } }),
   runDbQuery: (id, sql, database, confirmDestructive = false) =>
     api.post(`/api/databases/connections/${id}/query`, {
       sql, database, confirm_destructive: confirmDestructive,

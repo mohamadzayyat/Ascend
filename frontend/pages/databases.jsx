@@ -666,7 +666,7 @@ function ConnectionPanel({
               <span className="text-gray-300">{activeTable.name}</span>
               <span className="text-gray-600 ml-2">({activeTable.kind})</span>
             </div>
-            <TableViewer
+            <TableViewerEnhanced
               connectionId={connection.id}
               database={activeTable.database}
               table={activeTable.name}
@@ -784,6 +784,144 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
 }
 
 // ── Browse: pick a DB → pick a table → paginated rows ───────────
+
+function TableViewerEnhanced({ connectionId, database, table, showSearch = false }) {
+  const [view, setView] = useState('data')
+  const [data, setData] = useState(null)
+  const [design, setDesign] = useState(null)
+  const [page, setPage] = useState(1)
+  const [perPage] = useState(50)
+  const [loading, setLoading] = useState(false)
+  const [designLoading, setDesignLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const [searchDebounced, setSearchDebounced] = useState('')
+  const [editing, setEditing] = useState(null)
+  const [changes, setChanges] = useState({})
+  const [insertOpen, setInsertOpen] = useState(false)
+  const [newRow, setNewRow] = useState({})
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(searchInput.trim()), 350)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  useEffect(() => {
+    setSearchInput('')
+    setSearchDebounced('')
+    setChanges({})
+    setEditing(null)
+    setInsertOpen(false)
+    setNewRow({})
+    setDesign(null)
+    setView('data')
+  }, [database, table])
+
+  useEffect(() => { setPage(1) }, [database, table, searchDebounced])
+
+  const loadRows = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const q = showSearch ? searchDebounced : ''
+      const res = await apiClient.getTableRows(connectionId, database, table, page, perPage, q)
+      setData(res.data)
+      setChanges({})
+      setEditing(null)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load rows')
+    } finally {
+      setLoading(false)
+    }
+  }, [connectionId, database, table, page, perPage, searchDebounced, showSearch])
+
+  useEffect(() => { loadRows() }, [loadRows])
+
+  useEffect(() => {
+    if (view !== 'design' || design) return
+    let cancelled = false
+    setDesignLoading(true)
+    setError('')
+    apiClient.getTableDesign(connectionId, database, table)
+      .then((res) => !cancelled && setDesign(res.data))
+      .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load table design'))
+      .finally(() => !cancelled && setDesignLoading(false))
+    return () => { cancelled = true }
+  }, [view, design, connectionId, database, table])
+
+  if (error) return <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}<button type="button" onClick={() => { setError(''); loadRows() }} className="ml-3 underline">Retry</button></div>
+  if (!data) return <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading...</div>
+
+  const totalPages = Math.max(1, Math.ceil(data.total / data.per_page))
+  const hasPrimaryKey = (data.primary_key || []).length > 0
+  const changedCount = Object.keys(changes).length
+
+  const setCellValue = (rowIndex, col, value) => {
+    setChanges((prev) => ({ ...prev, [rowIndex]: { ...(prev[rowIndex] || {}), [col]: value } }))
+  }
+  const saveRow = async (rowIndex) => {
+    const key = data.row_keys?.[rowIndex]
+    if (!key) return setError('This table has no primary key, so Ascend cannot safely update this row.')
+    const values = changes[rowIndex] || {}
+    if (!Object.keys(values).length) return
+    await apiClient.updateTableRow(connectionId, database, table, key, values)
+    setMessage('Row saved.')
+    await loadRows()
+  }
+  const deleteRow = async (rowIndex) => {
+    const key = data.row_keys?.[rowIndex]
+    if (!key) return setError('This table has no primary key, so Ascend cannot safely delete this row.')
+    if (!typedConfirm(`Delete this row from ${table}?`, JSON.stringify(key))) return
+    await apiClient.deleteTableRow(connectionId, database, table, key)
+    setMessage('Row deleted.')
+    await loadRows()
+  }
+  const insertRow = async () => {
+    const values = Object.fromEntries(Object.entries(newRow).filter(([, v]) => v !== ''))
+    if (!Object.keys(values).length) return setError('Fill at least one value before inserting.')
+    await apiClient.insertTableRow(connectionId, database, table, values)
+    setMessage('Row inserted.')
+    setInsertOpen(false)
+    setNewRow({})
+    await loadRows()
+  }
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => setView('data')} className={`px-3 py-1.5 rounded text-sm ${view === 'data' ? 'bg-accent text-white' : 'bg-primary text-gray-300 hover:text-white'}`}>Data</button>
+          <button type="button" onClick={() => setView('design')} className={`px-3 py-1.5 rounded text-sm ${view === 'design' ? 'bg-accent text-white' : 'bg-primary text-gray-300 hover:text-white'}`}>Design</button>
+        </div>
+        {view === 'data' && <div className="flex flex-wrap items-center gap-2">
+          {!hasPrimaryKey && <span className="text-xs text-yellow-300">No primary key: row edit/delete disabled</span>}
+          {changedCount > 0 && <span className="text-xs text-yellow-300">{changedCount} changed row(s)</span>}
+          <button type="button" onClick={() => setInsertOpen((v) => !v)} className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1"><Plus className="w-3 h-3" /> Insert row</button>
+          <button type="button" onClick={loadRows} disabled={loading} className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1 disabled:opacity-50"><RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} /> Refresh</button>
+        </div>}
+      </div>
+      {message && <div className="rounded border border-green-500/30 bg-green-500/10 px-3 py-2 text-green-300 text-xs">{message}</div>}
+      {view === 'design' ? <TableDesignPanel design={design} loading={designLoading} /> : <>
+        {showSearch && <div className="relative max-w-md shrink-0"><Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" /><input type="search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search rows (any column)..." className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600" /></div>}
+        <div className="flex items-center justify-between text-xs text-gray-400 shrink-0"><span>{data.total.toLocaleString()} row{data.total === 1 ? '' : 's'}{data.search ? ' matching search' : ' total'} - page {data.page} of {totalPages}</span><div className="flex items-center gap-2"><button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Prev</button><button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Next</button></div></div>
+        {insertOpen && <div className="rounded border border-gray-700 bg-secondary p-3"><div className="text-sm font-semibold text-white mb-2">Insert row</div><div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">{data.columns.map((col) => <label key={col} className="text-xs text-gray-400">{col}<input value={newRow[col] ?? ''} onChange={(e) => setNewRow((r) => ({ ...r, [col]: e.target.value }))} placeholder="leave empty for default/null" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label>)}</div><div className="mt-3 flex gap-2"><button type="button" onClick={insertRow} className="px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold">Insert</button><button type="button" onClick={() => { setInsertOpen(false); setNewRow({}) }} className="px-3 py-1.5 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs">Cancel</button></div></div>}
+        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0"><tr><th className="px-3 py-2 font-semibold whitespace-nowrap w-24">Actions</th>{data.columns.map((c) => <th key={c} className="px-3 py-2 font-semibold whitespace-nowrap">{c}</th>)}</tr></thead><tbody>{data.rows.map((row, i) => <tr key={i} className="border-t border-gray-700 hover:bg-primary/40"><td className="px-3 py-1.5 whitespace-nowrap"><div className="flex gap-1"><button type="button" onClick={() => saveRow(i)} disabled={!changes[i]} title="Save row" className="p-1 rounded bg-primary hover:bg-gray-700 text-green-300 disabled:opacity-30"><Save className="w-3.5 h-3.5" /></button><button type="button" onClick={() => deleteRow(i)} disabled={!hasPrimaryKey} title="Delete row" className="p-1 rounded bg-primary hover:bg-gray-700 text-red-300 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button></div></td>{data.columns.map((col, j) => { const v = changes[i]?.[col] !== undefined ? changes[i][col] : row[j]; const isEditing = editing?.row === i && editing?.col === col; return <td key={col} className="px-3 py-1.5 text-gray-200 whitespace-nowrap max-w-xs truncate" title={v === null ? 'NULL' : String(v)} onDoubleClick={() => hasPrimaryKey && setEditing({ row: i, col })}>{isEditing ? <input autoFocus value={v ?? ''} onChange={(e) => setCellValue(i, col, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(null) }} className="w-full min-w-[10rem] bg-black/30 border border-accent rounded px-2 py-1 text-white" /> : v === null ? <span className="text-gray-500 italic">NULL</span> : <span className={changes[i]?.[col] !== undefined ? 'text-yellow-200' : ''}>{String(v)}</span>}</td> })}</tr>)}</tbody></table></div>
+      </>}
+    </div>
+  )
+}
+
+function TableDesignPanel({ design, loading }) {
+  const [tab, setTab] = useState('fields')
+  if (loading || !design) return <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading table design...</div>
+  const tabs = [['fields', 'Fields'], ['indexes', 'Indexes'], ['foreign_keys', 'Foreign Keys'], ['triggers', 'Triggers'], ['sql', 'SQL Preview']]
+  return <div className="flex-1 min-h-0 flex flex-col gap-3"><div className="flex flex-wrap gap-2">{tabs.map(([id, label]) => <button key={id} type="button" onClick={() => setTab(id)} className={`px-3 py-1.5 rounded text-sm ${tab === id ? 'bg-accent text-white' : 'bg-primary text-gray-300 hover:text-white'}`}>{label}</button>)}</div>{tab === 'fields' && <DesignTable columns={['Name', 'Type', 'Length', 'Decimals', 'Not null', 'Key', 'Default', 'Extra', 'Charset', 'Collation', 'Comment']}>{design.columns.map((c) => <tr key={c.name} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{c.name}</td><td className="px-3 py-1.5">{c.data_type}</td><td className="px-3 py-1.5">{c.char_length || c.numeric_precision || ''}</td><td className="px-3 py-1.5">{c.numeric_scale ?? ''}</td><td className="px-3 py-1.5">{c.nullable ? '' : 'yes'}</td><td className="px-3 py-1.5">{c.key || ''}</td><td className="px-3 py-1.5 font-mono text-xs">{c.default ?? ''}</td><td className="px-3 py-1.5">{c.extra || ''}</td><td className="px-3 py-1.5">{c.charset || ''}</td><td className="px-3 py-1.5">{c.collation || ''}</td><td className="px-3 py-1.5">{c.comment || ''}</td></tr>)}</DesignTable>}{tab === 'indexes' && <DesignTable columns={['Name', 'Unique', 'Seq', 'Column', 'Type', 'Collation', 'Cardinality', 'Nullable']}>{design.indexes.map((idx, i) => <tr key={`${idx.name}-${i}`} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{idx.name}</td><td className="px-3 py-1.5">{idx.unique ? 'yes' : 'no'}</td><td className="px-3 py-1.5">{idx.sequence}</td><td className="px-3 py-1.5 font-mono text-xs">{idx.column}</td><td className="px-3 py-1.5">{idx.type}</td><td className="px-3 py-1.5">{idx.collation || ''}</td><td className="px-3 py-1.5">{idx.cardinality ?? ''}</td><td className="px-3 py-1.5">{idx.nullable || ''}</td></tr>)}</DesignTable>}{tab === 'foreign_keys' && <DesignTable columns={['Constraint', 'Column', 'References']}>{design.foreign_keys.map((fk, i) => <tr key={`${fk.constraint}-${i}`} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{fk.constraint}</td><td className="px-3 py-1.5 font-mono text-xs">{fk.column}</td><td className="px-3 py-1.5 font-mono text-xs">{fk.referenced_schema}.{fk.referenced_table}.{fk.referenced_column}</td></tr>)}</DesignTable>}{tab === 'triggers' && <DesignTable columns={['Name', 'Timing', 'Event', 'Statement']}>{design.triggers.map((tr) => <tr key={tr.name} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{tr.name}</td><td className="px-3 py-1.5">{tr.timing}</td><td className="px-3 py-1.5">{tr.event}</td><td className="px-3 py-1.5 font-mono text-xs whitespace-pre-wrap">{tr.statement}</td></tr>)}</DesignTable>}{tab === 'sql' && <pre className="flex-1 min-h-0 overflow-auto rounded border border-gray-700 bg-primary p-3 text-xs text-gray-200 whitespace-pre-wrap">{design.create_sql || 'No SQL returned.'}</pre>}</div>
+}
+
+function DesignTable({ columns, children }) {
+  return <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0"><tr>{columns.map((c) => <th key={c} className="px-3 py-2 font-semibold whitespace-nowrap">{c}</th>)}</tr></thead><tbody className="text-gray-300">{children}</tbody></table></div>
+}
 
 function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab }) {
   const [databases, setDatabases] = useState([])
@@ -931,7 +1069,7 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
       )}
 
       {database && table && (
-        <TableViewer connectionId={connection.id} database={database} table={table} showSearch />
+        <TableViewerEnhanced connectionId={connection.id} database={database} table={table} showSearch />
       )}
     </div>
   )
