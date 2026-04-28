@@ -69,6 +69,7 @@ from backend.services.email_notifications import (
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
 ACME_WEBROOT = Path("/var/www/letsencrypt")
+STATIC_SITES_DIR = Path("/var/www/ascend-sites")
 
 # On Linux as root: deploy to /root; otherwise local deployments dir
 try:
@@ -81,6 +82,8 @@ ASCEND_BACKUPS_DIR = BASE_DIR / "ascend-backups"
 LOG_DIR.mkdir(exist_ok=True)
 DEPLOYMENTS_DIR.mkdir(exist_ok=True)
 ASCEND_BACKUPS_DIR.mkdir(exist_ok=True)
+if os.name != 'nt':
+    STATIC_SITES_DIR.mkdir(parents=True, exist_ok=True)
 
 dotenv.load_dotenv(BASE_DIR / '.env')
 
@@ -2889,15 +2892,11 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                             raise RuntimeError("Build failed")
 
                 if _is_static_app(app_row):
-                    static_root = _static_public_dir(app_row)
-                    log.write(f"\nStep 5: Preparing static site from {static_root}...\n")
+                    log.write(f"\nStep 5: Preparing static site from {_static_public_dir(app_row)}...\n")
                     if app_row.pm2_name:
                         run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
                         run_cmd(['pm2', 'save'], log, check=False)
-                    if not static_root.exists() or not static_root.is_dir():
-                        raise RuntimeError(f"Static output directory not found: {app_row.static_output_path or 'dist'}")
-                    if not (static_root / 'index.html').exists():
-                        raise RuntimeError(f"Static output directory is missing index.html: {app_row.static_output_path or 'dist'}")
+                    _publish_static_site(app_row, log)
                     log.write("  Static output is ready for Nginx.\n")
                 elif not _is_php_app(app_row) and app_row.start_command and app_row.pm2_name:
                     log.write(f"\nStep 5: Starting with PM2 as '{app_row.pm2_name}'...\n")
@@ -3099,6 +3098,8 @@ def restart_app_bg(deployment_id):
                     log.write("\nStep 2: Reloading Nginx for static app...\n")
                     if not app_row.domain:
                         raise RuntimeError('Static app has no domain configured')
+                    if not _static_nginx_root(app_row).exists():
+                        _publish_static_site(app_row, log)
                     if not setup_nginx_config(app_row, log):
                         raise RuntimeError('Nginx reload failed')
                 else:
@@ -3310,6 +3311,39 @@ def _static_public_dir(app_row):
     return deploy_dir / output_path if output_path else deploy_dir
 
 
+def _safe_static_site_name(app_row):
+    raw = app_row.domain or f'{app_row.project.folder_name}-{app_row.name}'
+    safe = re.sub(r'[^A-Za-z0-9_.-]+', '-', raw).strip('.-') or f'app-{app_row.id}'
+    return safe[:120]
+
+
+def _static_nginx_root(app_row):
+    if os.name == 'nt':
+        return _static_public_dir(app_row)
+    return STATIC_SITES_DIR / _safe_static_site_name(app_row)
+
+
+def _publish_static_site(app_row, log):
+    source = _static_public_dir(app_row)
+    if not source.exists() or not source.is_dir():
+        raise RuntimeError(f"Static output directory not found: {app_row.static_output_path or 'dist'}")
+    if not (source / 'index.html').exists():
+        raise RuntimeError(f"Static output directory is missing index.html: {app_row.static_output_path or 'dist'}")
+    target = _static_nginx_root(app_row)
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target)
+    if os.name != 'nt':
+        try:
+            subprocess.run(['chmod', '-R', 'a+rX', str(target)], capture_output=True, timeout=15)
+            subprocess.run(['chmod', 'a+x', str(target.parent)], capture_output=True, timeout=15)
+        except Exception as exc:
+            log.write(f"  Warning: could not adjust static file permissions: {exc}\n")
+    log.write(f"  Published static files to {target}\n")
+    return target
+
+
 def _php_fpm_socket(app_row):
     version = (app_row.php_version or '').strip()
     candidates = []
@@ -3356,7 +3390,7 @@ def _build_php_locations(app_row):
 
 
 def _build_static_locations(app_row):
-    root = str(_static_public_dir(app_row))
+    root = str(_static_nginx_root(app_row))
     return (
         f"    root {root};\n"
         f"    index index.html;\n"
@@ -4306,7 +4340,7 @@ def api_app_runtime(app_id):
         'php_version': a.php_version,
         'php_fpm_socket': _php_fpm_socket(a) if _is_php_app(a) else None,
         'php_public_path': str(_php_public_dir(a)) if _is_php_app(a) else None,
-        'static_output_path': str(_static_public_dir(a)) if _is_static_app(a) else None,
+        'static_output_path': str(_static_nginx_root(a)) if _is_static_app(a) else None,
         'webhook_path': webhook_path,
         'domain': a.domain,
         'status': a.status,
