@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Head from 'next/head'
 import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
-  CheckCircle2, XCircle, AlertTriangle, Save, Calendar, Table as TableIcon,
+  CheckCircle2, XCircle, AlertTriangle, Save, Pencil, Calendar, Table as TableIcon,
   ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText, Search, X,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
@@ -1297,6 +1297,7 @@ function ScheduleTab({ connection }) {
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const [busyId, setBusyId] = useState(null)
+  const [editingId, setEditingId] = useState(null)
 
   const load = async () => {
     try {
@@ -1318,11 +1319,19 @@ function ScheduleTab({ connection }) {
 
   useEffect(() => {
     setLoaded(false)
+    setEditingId(null)
     load()
-    const t = setInterval(load, 45000)
-    return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connection.id])
+
+  useEffect(() => {
+    if (!loaded) return
+    const t = setInterval(() => {
+      if (editingId == null) load()
+    }, 45000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection.id, loaded, editingId])
 
   const patchRow = (id, updates) => {
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...updates } : r)))
@@ -1355,6 +1364,7 @@ function ScheduleTab({ connection }) {
         target_database: td,
         schedule_timezone: (r.schedule_timezone || '').trim().replace(/\\/g, '/') || null,
       })
+      setEditingId(null)
       await load()
     } catch (err) {
       alert(err.response?.data?.error || 'Save failed')
@@ -1387,6 +1397,7 @@ function ScheduleTab({ connection }) {
     setBusyId(scheduleId)
     try {
       await apiClient.deleteDbBackupSchedule(connection.id, scheduleId)
+      setEditingId((eid) => (eid === scheduleId ? null : eid))
       await load()
     } catch (err) {
       alert(err.response?.data?.error || 'Delete failed')
@@ -1403,214 +1414,280 @@ function ScheduleTab({ connection }) {
     )
   }
 
+  const cancelEdit = async () => {
+    setEditingId(null)
+    await load()
+  }
+
   return (
-    <div className="p-3 space-y-3 max-w-3xl">
-      <div className="rounded border border-blue-500/25 bg-blue-500/10 p-2.5 text-xs text-blue-100/90 leading-relaxed">
-        <strong className="text-blue-200">APScheduler</strong> runs jobs in this process while Ascend is up.
-        Set <strong className="text-blue-200">Every (h)</strong> to <strong className="text-blue-200">24</strong> for daily runs.
-        Enter <strong className="text-blue-200">Hour</strong> and <strong className="text-blue-200">Minute</strong> as{' '}
-        <strong className="text-blue-200">your local wall clock</strong> in the timezone field (e.g.{' '}
+    <div className="p-4 flex flex-col gap-3 h-full min-h-0">
+      <div className="rounded border border-blue-500/25 bg-blue-500/10 p-2.5 text-xs text-blue-100/90 leading-relaxed max-w-4xl">
+        <strong className="text-blue-200">APScheduler</strong> runs while Ascend is up. Use <strong className="text-blue-200">24</strong> h for daily runs;
+        hour and minute are <strong className="text-blue-200">wall clock</strong> in the timezone column (e.g.{' '}
         <span className="font-mono text-blue-100">Asia/Beirut</span>
-        ) — not the server time. Backslashes in names are accepted and normalized to slashes.
+        ). Blank timezone → server default{' '}
+        <span className="font-mono text-gray-300">{serverTimezone}</span>
+        . Polling pauses while a row is open for edit.
       </div>
 
       {error && (
         <div className="rounded border border-red-500/30 bg-red-500/10 p-2 text-red-300 text-sm">{error}</div>
       )}
 
-      <div className="text-xs text-gray-500">
-        If timezone is blank, times use the server default:{' '}
-        <span className="font-mono text-gray-400">{serverTimezone}</span>
-        . Next run refreshes on save and every 45s.
-      </div>
-
-      {rows.length === 0 && (
-        <div className="text-gray-400 text-sm rounded border border-gray-700 p-4 bg-primary/20">
-          No backup schedules yet. Add one to get started.
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm text-gray-400">{rows.length} schedule(s)</span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => load()}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-300 border border-gray-600 rounded hover:bg-primary/60"
+            title="Reload schedules and database names"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={addSchedule}
+            disabled={busyId === -1 || editingId != null}
+            className="inline-flex items-center gap-2 px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold disabled:opacity-50"
+            title={editingId != null ? 'Finish or cancel the current edit first' : ''}
+          >
+            {busyId === -1 ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            Add schedule
+          </button>
         </div>
-      )}
-
-      <div className="space-y-3">
-        {rows.map((r) => {
-          const daily = Number(r.every_hours) === 24
-          const target = (r.target_database || '').trim()
-          const nextLabel = !r.enabled
-            ? '— (disabled)'
-            : (r.next_run_at ? formatTime(r.next_run_at) : '—')
-          return (
-            <div
-              key={r.id}
-              className="rounded border border-gray-700 bg-primary/30 p-3 space-y-2"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="text-sm text-white font-medium">
-                    {target ? `Database: ${target}` : 'All databases'}
-                  </div>
-                  <div className="text-xs text-green-400/90 mt-0.5">
-                    Next run: <span className="text-green-300">{nextLabel}</span>
-                  </div>
-                  {r.last_run_at && (
-                    <div className="text-xs text-gray-500 mt-1">
-                      Last: {formatTime(r.last_run_at)} — {r.last_run_status}
-                      {r.last_run_error && (
-                        <span className="text-red-400 ml-1 font-mono truncate" title={r.last_run_error}>
-                          {' '}
-                          (
-                          {r.last_run_error.length > 80 ? `${r.last_run_error.slice(0, 80)}…` : r.last_run_error}
-                          )
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <label className="flex items-center gap-1.5 text-xs text-gray-300">
-                    <input
-                      type="checkbox"
-                      checked={!!r.enabled}
-                      onChange={(e) => patchRow(r.id, { enabled: e.target.checked })}
-                    />
-                    On
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const cur = rows.find((x) => x.id === r.id)
-                      if (cur) saveRow(cur)
-                    }}
-                    disabled={busyId === r.id}
-                    className="px-2 py-1 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50"
-                  >
-                    {busyId === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteRow(r.id)}
-                    disabled={busyId === r.id}
-                    className="px-2 py-1 text-red-400 hover:bg-red-500/10 rounded text-xs disabled:opacity-50"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-end gap-2">
-                <label className="block text-xs text-gray-400 flex-1 min-w-[12rem]">
-                  <span className="flex items-center justify-between gap-2">
-                    <span>Backup database</span>
-                    <button
-                      type="button"
-                      onClick={() => load()}
-                      className="text-[10px] text-accent hover:underline font-normal"
-                      title="Reload names from the server"
-                    >
-                      Refresh DB list
-                    </button>
-                  </span>
-                  <select
-                    value={target}
-                    onChange={(e) => patchRow(r.id, { target_database: e.target.value })}
-                    className="mt-1 w-full max-w-md bg-primary border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
-                  >
-                    <option value="">All databases</option>
-                    {databasePickList.map((d) => <option key={d} value={d}>{d}</option>)}
-                  </select>
-                  <span className="text-[11px] text-gray-500 mt-1 block">
-                    Pick from the list — no typing, so the name always matches the server.
-                  </span>
-                </label>
-              </div>
-              {target && !dbNames.includes(target) && (
-                <div className="text-[11px] text-amber-400/90">
-                  This target is not in the latest server list (renamed or hidden DB?). Refresh DB list or pick another option.
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <label className="text-xs text-gray-400">
-                  Every (h)
-                  <input
-                    type="number"
-                    min={1}
-                    max={720}
-                    value={r.every_hours}
-                    onChange={(e) => patchRow(r.id, { every_hours: Number(e.target.value) })}
-                    className="mt-0.5 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white text-sm"
-                  />
-                </label>
-                <label className="text-xs text-gray-400">
-                  Hour (0–23)
-                  <input
-                    type="number"
-                    min={0}
-                    max={23}
-                    value={r.at_hour ?? 2}
-                    disabled={!daily}
-                    onChange={(e) => patchRow(r.id, { at_hour: Number(e.target.value) })}
-                    className="mt-0.5 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white text-sm disabled:opacity-40"
-                  />
-                </label>
-                <label className="text-xs text-gray-400">
-                  Minute
-                  <input
-                    type="number"
-                    min={0}
-                    max={59}
-                    value={r.at_minute ?? 0}
-                    onChange={(e) => patchRow(r.id, { at_minute: Number(e.target.value) })}
-                    className="mt-0.5 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white text-sm"
-                  />
-                </label>
-                <label className="text-xs text-gray-400">
-                  Retention (d)
-                  <input
-                    type="number"
-                    min={1}
-                    max={1825}
-                    value={r.retention_days ?? 14}
-                    onChange={(e) => patchRow(r.id, { retention_days: Number(e.target.value) })}
-                    className="mt-0.5 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white text-sm"
-                  />
-                </label>
-              </div>
-
-              <label className="block text-xs text-gray-400">
-                Timezone (IANA — hour/minute are in this zone)
-                <input
-                  type="text"
-                  value={r.schedule_timezone || ''}
-                  onChange={(e) => patchRow(r.id, { schedule_timezone: e.target.value })}
-                  list={`tzlist-${r.id}`}
-                  placeholder="Asia/Beirut or leave blank for server"
-                  className="mt-0.5 w-full max-w-md bg-primary border border-gray-700 rounded px-2 py-1 text-sm text-white placeholder:text-gray-600"
-                />
-                <span className="text-[11px] text-gray-500 mt-0.5 block">
-                  Example: <span className="font-mono text-gray-400">Asia/Beirut</span>
-                  {' — '}IANA uses slashes; you can also type{' '}
-                  <span className="font-mono text-gray-400">{'Asia\\Beirut'}</span>
-                  {' '}and we normalize it.
-                </span>
-                <datalist id={`tzlist-${r.id}`}>
-                  <option value="" />
-                  {COMMON_TIMEZONES.map((z) => <option key={z} value={z} />)}
-                </datalist>
-              </label>
-            </div>
-          )
-        })}
       </div>
 
-      <button
-        type="button"
-        onClick={addSchedule}
-        disabled={busyId === -1}
-        className="inline-flex items-center gap-2 px-3 py-2 bg-primary hover:bg-gray-700 border border-gray-600 rounded text-white text-sm font-semibold disabled:opacity-50"
-      >
-        {busyId === -1 ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-        Add schedule
-      </button>
+      <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700">
+        <table className="w-full text-sm text-left min-w-[920px]">
+          <thead className="bg-primary text-gray-300 sticky top-0 z-10">
+            <tr>
+              <th className="px-3 py-2 font-medium">Database</th>
+              <th className="px-3 py-2 font-medium w-14">On</th>
+              <th className="px-3 py-2 font-medium">Every (h)</th>
+              <th className="px-3 py-2 font-medium">Hour</th>
+              <th className="px-3 py-2 font-medium">Min</th>
+              <th className="px-3 py-2 font-medium">Ret. (d)</th>
+              <th className="px-3 py-2 font-medium min-w-[7rem]">Timezone</th>
+              <th className="px-3 py-2 font-medium min-w-[10rem]">Next run</th>
+              <th className="px-3 py-2 font-medium min-w-[8rem]">Last</th>
+              <th className="px-3 py-2 font-medium text-right w-36">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const daily = Number(r.every_hours) === 24
+              const target = (r.target_database || '').trim()
+              const displayTz = (r.schedule_timezone || '').trim() || serverTimezone || 'UTC'
+              const nextLabel = !r.enabled
+                ? '— (off)'
+                : (r.next_run_at ? formatTimeInZone(r.next_run_at, displayTz) : '—')
+              const atWall = `${String(r.at_hour ?? 0).padStart(2, '0')}:${String(r.at_minute ?? 0).padStart(2, '0')}`
+              const isEdit = editingId === r.id
+              const lastShort = r.last_run_at
+                ? `${formatTimeInZone(r.last_run_at, displayTz)} · ${r.last_run_status || '—'}`
+                : '—'
+              return (
+                <tr key={r.id} className={`border-t border-gray-700 ${isEdit ? 'bg-primary/50' : 'hover:bg-primary/40'}`}>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <select
+                        value={target}
+                        onChange={(e) => patchRow(r.id, { target_database: e.target.value })}
+                        className="w-full max-w-[11rem] bg-primary border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                      >
+                        <option value="">All databases</option>
+                        {databasePickList.map((d) => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-gray-200 font-mono text-xs">{target || 'All'}</span>
+                    )}
+                    {isEdit && target && !dbNames.includes(target) && (
+                      <div className="text-[10px] text-amber-400/90 mt-1 max-w-[11rem]">Not in latest DB list — refresh or change.</div>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <input
+                        type="checkbox"
+                        checked={!!r.enabled}
+                        onChange={(e) => patchRow(r.id, { enabled: e.target.checked })}
+                        className="rounded border-gray-600"
+                        title="Enabled"
+                      />
+                    ) : (
+                      <span className={r.enabled ? 'text-green-400 text-xs' : 'text-gray-500 text-xs'}>{r.enabled ? 'Yes' : 'No'}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <input
+                        type="number"
+                        min={1}
+                        max={720}
+                        value={r.every_hours}
+                        onChange={(e) => patchRow(r.id, { every_hours: Number(e.target.value) })}
+                        className="w-16 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs"
+                      />
+                    ) : (
+                      <span className="text-gray-300 text-xs">{r.every_hours ?? '—'}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <input
+                        type="number"
+                        min={0}
+                        max={23}
+                        value={r.at_hour ?? 0}
+                        disabled={!daily}
+                        onChange={(e) => patchRow(r.id, { at_hour: Number(e.target.value) })}
+                        className="w-14 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs disabled:opacity-40"
+                      />
+                    ) : (
+                      <span className="text-gray-300 text-xs">{daily ? (r.at_hour ?? 0) : '—'}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <input
+                        type="number"
+                        min={0}
+                        max={59}
+                        value={r.at_minute ?? 0}
+                        onChange={(e) => patchRow(r.id, { at_minute: Number(e.target.value) })}
+                        className="w-14 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs"
+                      />
+                    ) : (
+                      <span className="text-gray-300 text-xs">{daily ? (r.at_minute ?? 0) : '—'}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <input
+                        type="number"
+                        min={1}
+                        max={1825}
+                        value={r.retention_days ?? 14}
+                        onChange={(e) => patchRow(r.id, { retention_days: Number(e.target.value) })}
+                        className="w-16 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs"
+                      />
+                    ) : (
+                      <span className="text-gray-300 text-xs">{r.retention_days ?? '—'}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top">
+                    {isEdit ? (
+                      <>
+                        <input
+                          type="text"
+                          value={r.schedule_timezone || ''}
+                          onChange={(e) => patchRow(r.id, { schedule_timezone: e.target.value })}
+                          list={`tzlist-${r.id}`}
+                          placeholder={serverTimezone}
+                          className="w-full min-w-[6rem] max-w-[9rem] bg-primary border border-gray-700 rounded px-1.5 py-1 text-xs text-white placeholder:text-gray-600"
+                        />
+                        <datalist id={`tzlist-${r.id}`}>
+                          <option value="" />
+                          {COMMON_TIMEZONES.map((z) => <option key={z} value={z} />)}
+                        </datalist>
+                      </>
+                    ) : (
+                      <span className="text-gray-400 font-mono text-[11px] break-all" title={displayTz}>{displayTz}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top text-xs">
+                    {!isEdit && (
+                      <>
+                        <span className="text-green-300 whitespace-nowrap">{nextLabel}</span>
+                        {!r.enabled && <span className="text-gray-500 block mt-0.5">schedule off</span>}
+                        {r.enabled && (
+                          <span className="text-gray-500 font-mono text-[10px] block mt-0.5">{displayTz}</span>
+                        )}
+                      </>
+                    )}
+                    {isEdit && (
+                      <span className="text-gray-500 text-[11px] leading-snug">
+                        Save to refresh next run. Wall time when daily:{' '}
+                        <span className="font-mono text-gray-400">{atWall}</span>
+                        {' '}in TZ column.
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 align-top text-xs text-gray-400 max-w-[14rem]">
+                    {!isEdit && (
+                      <>
+                        <span className="line-clamp-2" title={r.last_run_error || lastShort}>{lastShort}</span>
+                        {r.last_run_error && (
+                          <span className="text-red-400/90 font-mono text-[10px] block truncate mt-0.5" title={r.last_run_error}>
+                            {r.last_run_error.length > 48 ? `${r.last_run_error.slice(0, 48)}…` : r.last_run_error}
+                          </span>
+                        )}
+                      </>
+                    )}
+                    {isEdit && <span className="text-gray-600">—</span>}
+                  </td>
+                  <td className="px-3 py-2 align-top text-right whitespace-nowrap">
+                    {isEdit ? (
+                      <div className="inline-flex flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const cur = rows.find((x) => x.id === r.id)
+                            if (cur) saveRow(cur)
+                          }}
+                          disabled={busyId === r.id}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold disabled:opacity-50"
+                        >
+                          {busyId === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEdit}
+                          disabled={busyId === r.id}
+                          className="text-gray-400 hover:text-white text-xs disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="inline-flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditingId(r.id)}
+                          disabled={editingId != null && editingId !== r.id}
+                          className="inline-flex items-center gap-1 text-accent hover:underline text-xs disabled:opacity-40 disabled:no-underline"
+                          title={editingId != null && editingId !== r.id ? 'Finish the other row first' : 'Edit this schedule'}
+                        >
+                          <Pencil className="w-3 h-3" />
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteRow(r.id)}
+                          disabled={busyId === r.id || (editingId != null && editingId !== r.id)}
+                          className="text-red-400 hover:underline text-xs disabled:opacity-40"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={10} className="px-3 py-8 text-center text-gray-500 text-sm">
+                  No backup schedules — click &quot;Add schedule&quot; to create one.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -1755,4 +1832,18 @@ function formatTime(iso) {
   try {
     return new Date(iso).toLocaleString()
   } catch { return iso }
+}
+
+/** Format an ISO instant in a specific IANA zone (matches schedule hour/minute semantics). */
+function formatTimeInZone(iso, timeZone) {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    const opts = { dateStyle: 'short', timeStyle: 'short' }
+    const z = (timeZone || '').trim().replace(/\\/g, '/')
+    if (z) opts.timeZone = z
+    return d.toLocaleString(undefined, opts)
+  } catch {
+    return formatTime(iso)
+  }
 }

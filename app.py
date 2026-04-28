@@ -23,7 +23,6 @@ import tempfile
 import platform
 import struct
 import base64
-import gzip
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -4492,7 +4491,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
             return None
         backup_dir = _connection_backup_dir(conn)
         ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-        filename = f'{_safe_dir_name(conn.name)}-{ts}.sql.gz'
+        filename = f'{_safe_dir_name(conn.name)}-{ts}.sql'
         filepath = backup_dir / filename
 
         archive = BackupArchive(
@@ -4509,10 +4508,10 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
         # Build mysqldump argv. --all-databases when no per-schedule filter,
         # otherwise dump only the listed databases.
         env, base_args = _mysqldump_env(conn)
+        # Note: omit --set-gtid-purged=OFF — not supported by some MariaDB/old mysqldump clients.
         argv = ['mysqldump', *base_args,
                 '--single-transaction', '--quick', '--routines', '--events',
-                '--triggers', '--default-character-set=utf8mb4',
-                '--set-gtid-purged=OFF']
+                '--triggers', '--default-character-set=utf8mb4']
         databases = []
         if schedule_id is not None:
             sched = db.session.get(BackupSchedule, schedule_id)
@@ -4532,15 +4531,14 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
 
         started = time.time()
         try:
-            with gzip.open(filepath, 'wb') as gz:
+            with open(filepath, 'wb') as out:
                 proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-                # stream stdout into the gzip file in chunks; capture stderr in full
                 try:
                     while True:
                         chunk = proc.stdout.read(64 * 1024)
                         if not chunk:
                             break
-                        gz.write(chunk)
+                        out.write(chunk)
                 except Exception as inner_exc:
                     proc.kill()
                     raise inner_exc
@@ -4645,7 +4643,8 @@ def api_db_backup_download(backup_id):
         return jsonify({'error': 'Unauthorized'}), 403
     if a.status != 'success' or not Path(a.filepath).exists():
         return jsonify({'error': 'Backup file is not available.'}), 410
-    return send_file(a.filepath, as_attachment=True, download_name=a.filename)
+    mimetype = 'text/plain; charset=utf-8' if a.filename.lower().endswith('.sql') else None
+    return send_file(a.filepath, as_attachment=True, download_name=a.filename, mimetype=mimetype)
 
 
 @app.route('/api/databases/backups/<int:backup_id>', methods=['DELETE'])
