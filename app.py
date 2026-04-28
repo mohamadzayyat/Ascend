@@ -4508,8 +4508,9 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
         # Build mysqldump argv. --all-databases when no per-schedule filter,
         # otherwise dump only the listed databases.
         env, base_args = _mysqldump_env(conn)
-        # Note: omit --set-gtid-purged=OFF — not supported by some MariaDB/old mysqldump clients.
-        argv = ['mysqldump', *base_args,
+        # --no-defaults must be first: skip ~/.my.cnf / etc. so a [client] or [mysqldump]
+        # line like set-gtid-purged=OFF does not break older MariaDB mysqldump builds.
+        argv = ['mysqldump', '--no-defaults', *base_args,
                 '--single-transaction', '--quick', '--routines', '--events',
                 '--triggers', '--default-character-set=utf8mb4']
         databases = []
