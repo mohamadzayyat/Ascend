@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
+import QRCode from 'qrcode'
 import { ArrowLeft, Copy, Loader2, ShieldCheck } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAuth } from '@/lib/hooks/useAuth'
@@ -8,6 +9,7 @@ export default function SecuritySettingsPage() {
   const { user, setUser } = useAuth()
   const [settings, setSettings] = useState(null)
   const [setup, setSetup] = useState(null)
+  const [qrDataUrl, setQrDataUrl] = useState('')
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -25,8 +27,14 @@ export default function SecuritySettingsPage() {
     try {
       const { data } = await apiClient.setupTwoFactor()
       setSetup(data)
+      setQrDataUrl(await QRCode.toDataURL(data.otpauth_uri, {
+        errorCorrectionLevel: 'M',
+        margin: 2,
+        width: 220,
+        color: { dark: '#0f172a', light: '#ffffff' },
+      }))
       setCode('')
-      setMessage('Add this secret to your authenticator, then enter the 6-digit code.')
+      setMessage('Scan the QR code with your authenticator, then enter the 6-digit code.')
     } catch (e) {
       setMessage(e.response?.data?.error || 'Failed to start 2FA setup')
     } finally {
@@ -40,7 +48,7 @@ export default function SecuritySettingsPage() {
       await apiClient.enableTwoFactor(code)
       await load()
       setUser({ ...user, two_factor_enabled: true })
-      setSetup(null); setCode('')
+      setSetup(null); setQrDataUrl(''); setCode('')
       setMessage('Two-factor authentication enabled.')
     } catch (e) {
       setMessage(e.response?.data?.error || 'Failed to enable 2FA')
@@ -102,6 +110,16 @@ export default function SecuritySettingsPage() {
 
           {!settings.two_factor_enabled && setup && (
             <div className="space-y-4">
+              {qrDataUrl && (
+                <div className="flex flex-col sm:flex-row gap-4 rounded border border-gray-700 bg-primary p-4">
+                  <div className="rounded bg-white p-3 w-fit">
+                    <img src={qrDataUrl} alt="Authenticator QR code" className="w-[220px] h-[220px]" />
+                  </div>
+                  <div className="text-sm text-gray-300 leading-relaxed max-w-sm">
+                    Scan this QR code in Google Authenticator, Microsoft Authenticator, 1Password, Bitwarden, Authy, or any TOTP app. Then type the 6-digit code below to activate 2FA.
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="text-sm text-gray-300">Authenticator setup URI</label>
                 <div className="mt-1 flex gap-2">
