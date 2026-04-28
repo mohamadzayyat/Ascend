@@ -185,10 +185,20 @@ export default function AppDetail() {
           <div className="bg-secondary rounded-lg border border-gray-700 p-6">
             <h2 className="text-xl font-bold text-white mb-4">Build Config</h2>
             <dl className="space-y-3 text-sm">
-              <Row label="Package manager" value={app.package_manager} />
-              <Row label="Build command" value={app.build_command} mono />
-              <Row label="Start command" value={app.start_command} mono />
-              <Row label="PM2 name" value={app.pm2_name} mono />
+              {app.app_type === 'php' ? (
+                <>
+                  <Row label="Runtime" value={app.php_version ? `PHP-FPM ${app.php_version}` : 'PHP-FPM default'} />
+                  <Row label="Public directory" value={app.php_public_path || 'public'} mono />
+                  <Row label="Composer" value={app.composer_install ? (app.composer_command || 'composer install') : 'Disabled'} mono />
+                </>
+              ) : (
+                <>
+                  <Row label="Package manager" value={app.package_manager} />
+                  <Row label="Build command" value={app.build_command} mono />
+                  <Row label="Start command" value={app.start_command} mono />
+                  <Row label="PM2 name" value={app.pm2_name} mono />
+                </>
+              )}
               <Row label="Subdirectory" value={app.subdirectory || '— (repo root)'} mono />
             </dl>
           </div>

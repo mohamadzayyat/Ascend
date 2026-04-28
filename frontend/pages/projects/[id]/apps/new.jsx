@@ -19,6 +19,10 @@ export default function NewApp() {
     build_command: 'npm run build',
     start_command: 'npm start',
     pm2_name: '',
+    php_version: '',
+    php_public_path: 'public',
+    composer_install: true,
+    composer_command: 'composer install --no-dev --optimize-autoloader',
     app_port: '',
     domain: '',
     enable_ssl: true,
@@ -35,10 +39,30 @@ export default function NewApp() {
   const onChange = (e) => {
     const { name, value, type, checked } = e.target
     if (name === 'app_port') setPortTouched(true)
-    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }))
+    setFormData((prev) => {
+      const next = { ...prev, [name]: type === 'checkbox' ? checked : value }
+      if (name === 'app_type' && value === 'php') {
+        next.package_manager = ''
+        next.build_command = ''
+        next.start_command = ''
+        next.pm2_name = ''
+        next.app_port = ''
+        next.php_public_path = next.php_public_path || 'public'
+        next.composer_command = next.composer_command || 'composer install --no-dev --optimize-autoloader'
+        setPortTouched(true)
+      }
+      if (name === 'app_type' && value !== 'php' && prev.app_type === 'php') {
+        next.package_manager = 'npm'
+        next.build_command = 'npm run build'
+        next.start_command = 'npm start'
+        setPortTouched(false)
+      }
+      return next
+    })
   }
 
   const suggestPort = async ({ force = false } = {}) => {
+    if (formData.app_type === 'php') return
     if (!force && (portTouched || formData.app_port)) return
     setPortLoading(true)
     setPortHint('')
@@ -58,8 +82,8 @@ export default function NewApp() {
   }
 
   useEffect(() => {
-    if (projectId) suggestPort()
-  }, [projectId]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (projectId && formData.app_type !== 'php') suggestPort()
+  }, [projectId, formData.app_type]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onSubmit = async (e) => {
     e.preventDefault()
@@ -68,7 +92,7 @@ export default function NewApp() {
     try {
       const res = await apiClient.createApp(projectId, {
         ...formData,
-        app_port: formData.app_port ? parseInt(formData.app_port, 10) : null,
+        app_port: formData.app_type === 'php' ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
       })
       router.push(`/app/${res.data.id}`)
     } catch (err) {
@@ -132,7 +156,7 @@ export default function NewApp() {
       <h1 className="text-4xl font-bold text-white mb-2">Add App</h1>
       <p className="text-gray-400 mb-8">
         A deployable piece of {project?.name || 'this project'} — for example a CMS, an API, or a web frontend.
-        Each app runs as its own PM2 process on its own port.
+        Node apps run under PM2. PHP apps use PHP-FPM with Nginx.
       </p>
 
       <form onSubmit={onSubmit} className="space-y-6">
@@ -145,7 +169,7 @@ export default function NewApp() {
           <div className="space-y-4">
             {input('Name', 'name', 'text', 'CMS / API / Web')}
             {select('Type', 'app_type', [
-              ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['custom', 'Custom'],
+              ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
             ])}
             {input('Subdirectory', 'subdirectory', 'text', 'apps/api', 'Relative path inside the repo. Leave empty for root.')}
           </div>
@@ -153,12 +177,23 @@ export default function NewApp() {
 
         <div className="bg-secondary rounded-lg border border-gray-700 p-6">
           <h2 className="text-lg font-bold text-white mb-4">Build & Run</h2>
-          <div className="space-y-4">
-            {select('Package Manager', 'package_manager', [['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM']])}
-            {input('Build Command', 'build_command', 'text', 'npm run build')}
-            {input('Start Command', 'start_command', 'text', 'npm start')}
-            {input('PM2 Name', 'pm2_name', 'text', '', 'Leave empty to auto-generate from project + app name.')}
-          </div>
+          {formData.app_type === 'php' ? (
+            <div className="space-y-4">
+              {select('PHP Version', 'php_version', [
+                ['', 'System default'], ['8.4', 'PHP 8.4'], ['8.3', 'PHP 8.3'], ['8.2', 'PHP 8.2'], ['8.1', 'PHP 8.1'], ['8.0', 'PHP 8.0'], ['7.4', 'PHP 7.4'],
+              ])}
+              {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
+              {check('Run Composer during deploy', 'composer_install')}
+              {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {select('Package Manager', 'package_manager', [['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM']])}
+              {input('Build Command', 'build_command', 'text', 'npm run build')}
+              {input('Start Command', 'start_command', 'text', 'npm start')}
+              {input('PM2 Name', 'pm2_name', 'text', '', 'Leave empty to auto-generate from project + app name.')}
+            </div>
+          )}
         </div>
 
         <div className="bg-secondary rounded-lg border border-gray-700 p-6">
@@ -170,6 +205,7 @@ export default function NewApp() {
               enabled={formData.enable_ssl}
               onStatus={(status) => setDnsStatus(status)}
             />
+            {formData.app_type !== 'php' && (
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
               <div className="flex gap-2">
@@ -196,6 +232,7 @@ export default function NewApp() {
                 {portHint || 'Ascend suggests the next free port and refuses ports already in use.'}
               </p>
             </div>
+            )}
             {input('Client Max Body', 'client_max_body', 'text', '6G')}
             {check('Enable SSL with Certbot', 'enable_ssl')}
           </div>

@@ -23,6 +23,10 @@ export default function AppSettings({ app, onUpdate }) {
     build_command: app?.build_command || '',
     start_command: app?.start_command || '',
     pm2_name: app?.pm2_name || '',
+    php_version: app?.php_version || '',
+    php_public_path: app?.php_public_path || 'public',
+    composer_install: app?.composer_install !== false,
+    composer_command: app?.composer_command || 'composer install --no-dev --optimize-autoloader',
     app_port: app?.app_port || '',
     domain: app?.domain || '',
     enable_ssl: app?.enable_ssl !== false,
@@ -32,7 +36,24 @@ export default function AppSettings({ app, onUpdate }) {
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target
-    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }))
+    setFormData((prev) => {
+      const next = { ...prev, [name]: type === 'checkbox' ? checked : value }
+      if (name === 'app_type' && value === 'php') {
+        next.package_manager = ''
+        next.build_command = ''
+        next.start_command = ''
+        next.pm2_name = ''
+        next.app_port = ''
+        next.php_public_path = next.php_public_path || 'public'
+        next.composer_command = next.composer_command || 'composer install --no-dev --optimize-autoloader'
+      }
+      if (name === 'app_type' && value !== 'php' && prev.app_type === 'php') {
+        next.package_manager = 'npm'
+        next.build_command = 'npm run build'
+        next.start_command = 'npm start'
+      }
+      return next
+    })
   }
 
   const handleSubmit = async (e) => {
@@ -43,7 +64,7 @@ export default function AppSettings({ app, onUpdate }) {
     try {
       const res = await apiClient.updateApp(app.id, {
         ...formData,
-        app_port: formData.app_port ? parseInt(formData.app_port, 10) : null,
+        app_port: formData.app_type === 'php' ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
       })
       setSaved(true)
       if (onUpdate) onUpdate(res.data)
@@ -137,7 +158,7 @@ export default function AppSettings({ app, onUpdate }) {
         <div className="space-y-4">
           {input('Name', 'name', 'text', 'CMS / API / Web')}
           {select('Type', 'app_type', [
-            ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['custom', 'Custom'],
+            ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
           ])}
           {input('Subdirectory (monorepo)', 'subdirectory', 'text', 'api/ or cms/', 'Leave empty if the project root is this app.')}
         </div>
@@ -145,14 +166,25 @@ export default function AppSettings({ app, onUpdate }) {
 
       <div className="bg-secondary rounded-lg border border-gray-700 p-6">
         <h3 className="text-lg font-bold text-white mb-4">Build & Run</h3>
-        <div className="space-y-4">
-          {select('Package Manager', 'package_manager', [
-            ['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM'],
-          ])}
-          {input('Build Command', 'build_command', 'text', 'npm run build')}
-          {input('Start Command', 'start_command', 'text', 'npm start')}
-          {input('PM2 App Name', 'pm2_name', 'text', 'myproject-api')}
-        </div>
+        {formData.app_type === 'php' ? (
+          <div className="space-y-4">
+            {select('PHP Version', 'php_version', [
+              ['', 'System default'], ['8.4', 'PHP 8.4'], ['8.3', 'PHP 8.3'], ['8.2', 'PHP 8.2'], ['8.1', 'PHP 8.1'], ['8.0', 'PHP 8.0'], ['7.4', 'PHP 7.4'],
+            ])}
+            {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
+            {check('Run Composer during deploy', 'composer_install')}
+            {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {select('Package Manager', 'package_manager', [
+              ['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM'],
+            ])}
+            {input('Build Command', 'build_command', 'text', 'npm run build')}
+            {input('Start Command', 'start_command', 'text', 'npm start')}
+            {input('PM2 App Name', 'pm2_name', 'text', 'myproject-api')}
+          </div>
+        )}
       </div>
 
       <div className="bg-secondary rounded-lg border border-gray-700 p-6">
@@ -164,32 +196,34 @@ export default function AppSettings({ app, onUpdate }) {
             enabled={formData.enable_ssl}
             onStatus={(status) => setDnsStatus(status)}
           />
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
-            <div className="flex gap-2">
-              <input
-                type="number"
-                name="app_port"
-                value={formData.app_port ?? ''}
-                onChange={handleChange}
-                placeholder="3000"
-                className="flex-1 px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent"
-              />
-              <button
-                type="button"
-                onClick={suggestPort}
-                disabled={portLoading}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-primary border border-gray-600 text-gray-300 hover:text-white hover:border-gray-500 transition disabled:opacity-50"
-                title="Suggest free port"
-              >
-                <RefreshCw className={`w-4 h-4 ${portLoading ? 'animate-spin' : ''}`} />
-                Suggest
-              </button>
+          {formData.app_type !== 'php' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  name="app_port"
+                  value={formData.app_port ?? ''}
+                  onChange={handleChange}
+                  placeholder="3000"
+                  className="flex-1 px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+                <button
+                  type="button"
+                  onClick={suggestPort}
+                  disabled={portLoading}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-primary border border-gray-600 text-gray-300 hover:text-white hover:border-gray-500 transition disabled:opacity-50"
+                  title="Suggest free port"
+                >
+                  <RefreshCw className={`w-4 h-4 ${portLoading ? 'animate-spin' : ''}`} />
+                  Suggest
+                </button>
+              </div>
+              <p className={`text-xs mt-1 ${portHint.startsWith('Could not') ? 'text-red-400' : 'text-gray-500'}`}>
+                {portHint || 'Ascend checks saved apps and live listeners before suggesting a port.'}
+              </p>
             </div>
-            <p className={`text-xs mt-1 ${portHint.startsWith('Could not') ? 'text-red-400' : 'text-gray-500'}`}>
-              {portHint || 'Ascend checks saved apps and live listeners before suggesting a port.'}
-            </p>
-          </div>
+          )}
           {input('Client Max Body Size', 'client_max_body', 'text', '6G')}
           {check('Enable SSL with Certbot', 'enable_ssl')}
         </div>

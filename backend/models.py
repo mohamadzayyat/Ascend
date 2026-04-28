@@ -140,6 +140,10 @@ class App(db.Model):
     start_command = db.Column(db.String(500))
     app_port = db.Column(db.Integer)
     pm2_name = db.Column(db.String(255))
+    php_version = db.Column(db.String(20))
+    php_public_path = db.Column(db.String(255), default='public')
+    composer_install = db.Column(db.Boolean, default=True)
+    composer_command = db.Column(db.String(500), default='composer install --no-dev --optimize-autoloader')
 
     env_content = db.Column(db.Text)
 
@@ -173,6 +177,10 @@ class App(db.Model):
             'start_command': self.start_command,
             'app_port': self.app_port,
             'pm2_name': self.pm2_name,
+            'php_version': self.php_version,
+            'php_public_path': self.php_public_path,
+            'composer_install': self.composer_install,
+            'composer_command': self.composer_command,
             'env_content': self.env_content,
             'domain': self.domain,
             'enable_ssl': self.enable_ssl,

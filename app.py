@@ -411,6 +411,10 @@ def migrate_schema():
         add_col('deployment', 'app_id INTEGER REFERENCES app(id)')
         add_col('app', 'disk_size_bytes BIGINT')
         add_col('app', 'disk_size_computed_at DATETIME')
+        add_col('app', 'php_version VARCHAR(20)')
+        add_col('app', "php_public_path VARCHAR(255) DEFAULT 'public'")
+        add_col('app', 'composer_install BOOLEAN DEFAULT 1')
+        add_col('app', "composer_command VARCHAR(500) DEFAULT 'composer install --no-dev --optimize-autoloader'")
         add_col('backup_schedule', 'at_hour INTEGER DEFAULT 2')
         add_col('backup_schedule', 'schedule_timezone VARCHAR(64)')
         add_col('backup_schedule', "target_database VARCHAR(255) DEFAULT ''")
@@ -439,6 +443,9 @@ def migrate_schema():
                 start_command=p.start_command,
                 app_port=p.app_port,
                 pm2_name=p.pm2_name,
+                php_public_path='public',
+                composer_install=True,
+                composer_command='composer install --no-dev --optimize-autoloader',
                 env_content=p.env_content,
                 domain=p.domain,
                 enable_ssl=p.enable_ssl if p.enable_ssl is not None else True,
@@ -1628,6 +1635,7 @@ def _app_fields_from_dict(data, allow_all=True):
     out = {}
     for field in ['name', 'app_type', 'subdirectory', 'package_manager',
                   'build_command', 'start_command', 'pm2_name',
+                  'php_version', 'php_public_path', 'composer_command',
                   'env_content', 'domain', 'client_max_body']:
         if field in data:
             val = data[field]
@@ -1635,8 +1643,17 @@ def _app_fields_from_dict(data, allow_all=True):
             out[field] = _normalize_domain(val) if field == 'domain' else val
     if 'enable_ssl' in data:
         out['enable_ssl'] = bool(data['enable_ssl'])
+    if 'composer_install' in data:
+        out['composer_install'] = bool(data['composer_install'])
     if 'app_port' in data and allow_all:
         out['app_port'] = _parse_port(data['app_port'])
+    if out.get('php_version') and not re.match(r'^\d+(?:\.\d+)?$', out['php_version']):
+        raise ValueError('PHP version must look like 8.3 or 8.2')
+    if out.get('php_public_path'):
+        public_path = str(out['php_public_path']).strip().strip('/\\')
+        if '..' in public_path.split('/') or public_path.startswith(('/', '\\')):
+            raise ValueError('PHP public path must be relative to the app directory')
+        out['php_public_path'] = public_path or 'public'
     return out
 
 
@@ -1665,7 +1682,10 @@ def api_create_app(project_id):
     if not name:
         return jsonify({'error': 'App name is required'}), 400
 
-    fields = _app_fields_from_dict(data)
+    try:
+        fields = _app_fields_from_dict(data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     port = fields.get('app_port')
     if port:
         conflict = _check_port_conflict(port)
@@ -1679,8 +1699,8 @@ def api_create_app(project_id):
     new_app = App(project_id=project.id, name=name)
     for k, v in fields.items():
         setattr(new_app, k, v)
-    # Auto-generate a pm2_name if not provided
-    if not new_app.pm2_name:
+    # Auto-generate a pm2_name for process-based apps if not provided.
+    if new_app.app_type != 'php' and not new_app.pm2_name:
         new_app.pm2_name = f"{project.folder_name}-{re.sub(r'[^a-zA-Z0-9_-]+', '-', name.lower())}"
     db.session.add(new_app)
     db.session.commit()
@@ -1709,7 +1729,10 @@ def api_update_app(app_id):
         return jsonify({'error': 'Unauthorized'}), 403
 
     data = request.get_json(silent=True) or {}
-    fields = _app_fields_from_dict(data)
+    try:
+        fields = _app_fields_from_dict(data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     if 'app_port' in fields and fields['app_port'] and fields['app_port'] != a.app_port:
         conflict = _check_port_conflict(fields['app_port'], exclude_app_id=a.id)
@@ -1832,7 +1855,7 @@ def api_retry_app_ssl(app_id):
         return jsonify({'error': 'Unauthorized'}), 403
     if not a.domain:
         return jsonify({'error': 'Set a domain before retrying SSL'}), 400
-    if not a.app_port:
+    if not _is_php_app(a) and not a.app_port:
         return jsonify({'error': 'Set an app port before retrying SSL'}), 400
     if not a.enable_ssl:
         return jsonify({'error': 'Enable SSL in app settings before retrying'}), 400
@@ -1868,7 +1891,7 @@ def api_restart_app(app_id):
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
-    if not a.pm2_name:
+    if not _is_php_app(a) and not a.pm2_name:
         return jsonify({'error': 'Set a PM2 name before restarting'}), 400
 
     active = Deployment.query.filter_by(app_id=a.id, triggered_by='restart').filter(
@@ -2355,6 +2378,22 @@ def _write_app_env(app_row, deploy_dir, log):
         log.write("  .env written\n")
 
 
+def _run_php_build(app_row, deploy_dir, log):
+    version = (app_row.php_version or '').strip() or 'system default'
+    public_dir = _php_public_dir(app_row)
+    log.write(f"\nStep 3: Preparing PHP app (PHP-FPM {version})...\n")
+    log.write(f"  Web root: {public_dir}\n")
+    log.write(f"  PHP-FPM socket: {_php_fpm_socket(app_row)}\n")
+    composer_enabled = app_row.composer_install is not False
+    if composer_enabled and (deploy_dir / 'composer.json').exists():
+        command = (app_row.composer_command or 'composer install --no-dev --optimize-autoloader').strip()
+        log.write(f"  Running Composer: {command}\n")
+        if not run_cmd(command, log, cwd=deploy_dir, shell=True):
+            raise RuntimeError("Composer install failed")
+    elif composer_enabled:
+        log.write("  composer.json not found; skipping Composer.\n")
+
+
 def _pm2_start_command(app_row):
     # Run arbitrary start commands through bash so commands like
     # "npm run start:prod" behave the same as they do in a terminal.
@@ -2439,7 +2478,9 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                     log.write("\nStep 2: Writing .env file...\n")
                     _write_app_env(app_row, deploy_dir, log)
 
-                if (deploy_dir / 'package.json').exists():
+                if _is_php_app(app_row):
+                    _run_php_build(app_row, deploy_dir, log)
+                elif (deploy_dir / 'package.json').exists():
                     pm = app_row.package_manager or 'npm'
                     log.write(f"\nStep 3: Installing dependencies ({pm} install)...\n")
                     if not run_cmd([pm, 'install'], log, cwd=deploy_dir):
@@ -2450,7 +2491,7 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                         if not run_cmd(app_row.build_command, log, cwd=deploy_dir, shell=True):
                             raise RuntimeError("Build failed")
 
-                if app_row.start_command and app_row.pm2_name:
+                if not _is_php_app(app_row) and app_row.start_command and app_row.pm2_name:
                     log.write(f"\nStep 5: Starting with PM2 as '{app_row.pm2_name}'...\n")
                     run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
                     if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
@@ -2598,7 +2639,7 @@ def retry_app_ssl_bg(deployment_id):
 
 
 def restart_app_bg(deployment_id):
-    """Background task: write saved .env and restart an existing PM2 app."""
+    """Background task: write saved .env and restart an existing app runtime."""
     with app.app_context():
         deployment = db.session.get(Deployment, deployment_id)
         if not deployment:
@@ -2626,9 +2667,6 @@ def restart_app_bg(deployment_id):
                 log.write(f"App: {app_row.name} ({app_row.app_type})\n")
                 log.write(f"PM2 name: {app_row.pm2_name or '-'}\n\n")
 
-                if not app_row.pm2_name:
-                    raise RuntimeError('App has no PM2 name configured')
-
                 deploy_dir = _app_deploy_dir(app_row)
                 if not deploy_dir.exists():
                     raise RuntimeError(
@@ -2641,20 +2679,31 @@ def restart_app_bg(deployment_id):
                 else:
                     log.write("Step 1: No .env content saved; leaving existing .env unchanged.\n")
 
-                log.write("\nStep 2: Restarting PM2 process...\n")
-                if app_row.start_command:
-                    log.write("  Recreating PM2 process so .env and PORT are loaded cleanly...\n")
-                    run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
-                    if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
-                        raise RuntimeError('PM2 restart/start failed')
+                if _is_php_app(app_row):
+                    version = (app_row.php_version or '').strip()
+                    service = f'php{version}-fpm' if version else 'php-fpm'
+                    log.write(f"\nStep 2: Reloading PHP-FPM service ({service})...\n")
+                    if not run_cmd(['systemctl', 'reload', service], log, check=False):
+                        log.write("  Reload failed; trying restart...\n")
+                        if not run_cmd(['systemctl', 'restart', service], log):
+                            raise RuntimeError(f'Could not reload/restart {service}')
                 else:
-                    if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
-                        raise RuntimeError('PM2 restart failed and no start command is configured')
+                    if not app_row.pm2_name:
+                        raise RuntimeError('App has no PM2 name configured')
+                    log.write("\nStep 2: Restarting PM2 process...\n")
+                    if app_row.start_command:
+                        log.write("  Recreating PM2 process so .env and PORT are loaded cleanly...\n")
+                        run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
+                        if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
+                            raise RuntimeError('PM2 restart/start failed')
+                    else:
+                        if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
+                            raise RuntimeError('PM2 restart failed and no start command is configured')
 
-                run_cmd(['pm2', 'save'], log, check=False)
-                if not _wait_for_app_port(app_row, log):
-                    run_cmd(['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'], log, check=False)
-                    raise RuntimeError(f"App did not start listening on port {app_row.app_port}")
+                    run_cmd(['pm2', 'save'], log, check=False)
+                    if not _wait_for_app_port(app_row, log):
+                        run_cmd(['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'], log, check=False)
+                        raise RuntimeError(f"App did not start listening on port {app_row.app_port}")
                 log.write("\n=== App Restart Completed Successfully ===\n")
                 deployment.status = 'success'
 
@@ -2819,6 +2868,64 @@ def _find_valid_certificate(domain, min_days=7):
     return None
 
 
+def _is_php_app(app_row):
+    return (app_row.app_type or '').lower() == 'php'
+
+
+def _php_public_dir(app_row):
+    deploy_dir = _app_deploy_dir(app_row)
+    public_path = (app_row.php_public_path or 'public').strip().strip('/\\')
+    public_dir = deploy_dir / public_path if public_path else deploy_dir
+    if public_path == 'public' and not public_dir.exists():
+        return deploy_dir
+    return public_dir
+
+
+def _php_fpm_socket(app_row):
+    version = (app_row.php_version or '').strip()
+    candidates = []
+    if version:
+        candidates.extend([
+            f'/run/php/php{version}-fpm.sock',
+            f'/var/run/php/php{version}-fpm.sock',
+        ])
+    candidates.extend([
+        '/run/php/php-fpm.sock',
+        '/var/run/php/php-fpm.sock',
+    ])
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    if version:
+        return f'/run/php/php{version}-fpm.sock'
+    try:
+        for path in sorted(Path('/run/php').glob('php*-fpm.sock'), reverse=True):
+            return str(path)
+    except Exception:
+        pass
+    return '/run/php/php-fpm.sock'
+
+
+def _build_php_locations(app_row):
+    root = str(_php_public_dir(app_row))
+    socket_path = _php_fpm_socket(app_row)
+    return (
+        f"    root {root};\n"
+        f"    index index.php index.html;\n"
+        f"\n"
+        f"    location / {{\n"
+        f"        try_files $uri $uri/ /index.php?$query_string;\n"
+        f"    }}\n"
+        f"\n"
+        f"    location ~ \\.php$ {{\n"
+        f"        include snippets/fastcgi-php.conf;\n"
+        f"        fastcgi_pass unix:{socket_path};\n"
+        f"    }}\n"
+        f"\n"
+        f"    location ~ /\\.ht {{ deny all; }}\n"
+    )
+
+
 def _build_nginx_config(app_row, cert_info=None):
     common_proxy = (
         f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
@@ -2832,6 +2939,11 @@ def _build_nginx_config(app_row, cert_info=None):
         f"        root {ACME_WEBROOT};\n"
         f"        default_type text/plain;\n"
         f"        try_files $uri =404;\n"
+        f"    }}\n"
+    )
+    app_locations = _build_php_locations(app_row) if _is_php_app(app_row) else (
+        f"    location / {{\n"
+        f"{common_proxy}"
         f"    }}\n"
     )
 
@@ -2858,9 +2970,7 @@ def _build_nginx_config(app_row, cert_info=None):
             f"\n"
             f"{challenge}"
             f"\n"
-            f"    location / {{\n"
-            f"{common_proxy}"
-            f"    }}\n"
+            f"{app_locations}"
             f"}}\n"
         )
 
@@ -2872,9 +2982,7 @@ def _build_nginx_config(app_row, cert_info=None):
         f"\n"
         f"{challenge}"
         f"\n"
-        f"    location / {{\n"
-        f"{common_proxy}"
-        f"    }}\n"
+        f"{app_locations}"
         f"}}\n"
     )
 
@@ -3542,9 +3650,13 @@ def api_app_runtime(app_id):
         webhook_path = f'/webhook/github/{project.webhook_secret}'
 
     return jsonify({
+        'app_type': a.app_type,
         'pm2': pm2_status,
         'port': a.app_port,
         'port_listening': _is_port_listening(a.app_port) if a.app_port else None,
+        'php_version': a.php_version,
+        'php_fpm_socket': _php_fpm_socket(a) if _is_php_app(a) else None,
+        'php_public_path': str(_php_public_dir(a)) if _is_php_app(a) else None,
         'webhook_path': webhook_path,
         'domain': a.domain,
         'status': a.status,
