@@ -16,6 +16,9 @@ export default function AppSettings({ app, onUpdate }) {
   const [portHint, setPortHint] = useState('')
   const [phpRuntimes, setPhpRuntimes] = useState(null)
   const [phpRuntimeError, setPhpRuntimeError] = useState('')
+  const [phpInstallStatus, setPhpInstallStatus] = useState(null)
+  const [phpInstallError, setPhpInstallError] = useState('')
+  const [phpInstalling, setPhpInstalling] = useState(false)
 
   const [formData, setFormData] = useState({
     name: app?.name || '',
@@ -73,6 +76,29 @@ export default function AppSettings({ app, onUpdate }) {
     }
   }, [formData.app_type])
 
+  const loadPhpInstallStatus = async () => {
+    const res = await apiClient.getPhpInstallStatus()
+    setPhpInstallStatus(res.data)
+    return res.data
+  }
+
+  useEffect(() => {
+    if (formData.app_type !== 'php') return
+    loadPhpInstallStatus().catch(() => {})
+  }, [formData.app_type])
+
+  useEffect(() => {
+    if (!phpInstallStatus?.running) return undefined
+    const timer = setInterval(async () => {
+      const status = await loadPhpInstallStatus()
+      if (!status.running) {
+        const res = await apiClient.getPhpRuntimes()
+        setPhpRuntimes(res.data)
+      }
+    }, 4000)
+    return () => clearInterval(timer)
+  }, [phpInstallStatus?.running])
+
   const phpVersionOptions = useMemo(() => {
     const common = ['8.4', '8.3', '8.2', '8.1', '8.0', '7.4']
     const installed = new Set(phpRuntimes?.installed_versions || [])
@@ -88,10 +114,31 @@ export default function AppSettings({ app, onUpdate }) {
       ...versions.map((version) => ({
         value: version,
         label: installed.has(version) ? `PHP ${version} (installed)` : `PHP ${version} (not installed)`,
-        disabled: phpRuntimes ? !installed.has(version) : false,
+        disabled: false,
       })),
     ]
   }, [phpRuntimes])
+
+  const selectedPhpMissing = Boolean(
+    formData.app_type === 'php'
+    && formData.php_version
+    && phpRuntimes
+    && !(phpRuntimes.installed_versions || []).includes(formData.php_version)
+  )
+
+  const installSelectedPhp = async () => {
+    setPhpInstalling(true)
+    setPhpInstallError('')
+    try {
+      await apiClient.startPhpInstall(formData.php_version)
+      const status = await loadPhpInstallStatus()
+      setPhpInstallStatus(status)
+    } catch (err) {
+      setPhpInstallError(err.response?.data?.error || err.message || 'Failed to start PHP installation')
+    } finally {
+      setPhpInstalling(false)
+    }
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -199,6 +246,32 @@ export default function AppSettings({ app, onUpdate }) {
       {phpRuntimeError && <p className="text-xs text-yellow-400 mt-1">{phpRuntimeError}</p>}
       {!phpRuntimeError && phpRuntimes && phpRuntimes.installed_versions?.length === 0 && (
         <p className="text-xs text-yellow-400 mt-1">No PHP-FPM versions were detected on this server.</p>
+      )}
+      {selectedPhpMissing && (
+        <div className="mt-3 rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-yellow-100">PHP {formData.php_version} is not installed on this server.</p>
+            <button
+              type="button"
+              onClick={installSelectedPhp}
+              disabled={phpInstalling || phpInstallStatus?.running}
+              className="px-3 py-1.5 bg-accent hover:bg-blue-600 rounded text-white text-sm font-semibold disabled:opacity-50"
+            >
+              {phpInstallStatus?.running ? 'Installing...' : phpInstalling ? 'Starting...' : `Install PHP ${formData.php_version}`}
+            </button>
+          </div>
+          {phpInstallError && <p className="text-xs text-red-300 mt-2">{phpInstallError}</p>}
+        </div>
+      )}
+      {(phpInstallStatus?.running || phpInstallStatus?.log_tail) && (
+        <div className="mt-3 rounded-lg border border-gray-700 bg-primary">
+          <div className="px-3 py-2 border-b border-gray-700 text-xs text-gray-300">
+            {phpInstallStatus?.running ? 'PHP install running' : 'Latest PHP install log'}
+          </div>
+          <pre className="max-h-56 overflow-auto p-3 text-xs text-gray-300 whitespace-pre-wrap">
+            {phpInstallStatus?.log_tail || 'Waiting for installer output...'}
+          </pre>
+        </div>
       )}
     </div>
   )

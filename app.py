@@ -147,6 +147,7 @@ BACKUP_UPLOAD_SETTING_KEY = 'backup_upload_v1'
 AUDIT_LOG_SETTING_KEY = 'audit_log_v1'
 UPDATE_STATE_SETTING_KEY = 'update_state_v1'
 SYSTEM_ALERT_NOTIFY_SETTING_KEY = 'system_alert_notifications_v1'
+PHP_INSTALL_STATE_SETTING_KEY = 'php_install_state_v1'
 
 _EMAIL_NOTIFY_EVENT_DEFAULTS = {
     'backup_success': False,
@@ -1017,6 +1018,10 @@ def _run_text(cmd, cwd=None, timeout=10):
 
 def _update_log_path():
     return LOG_DIR / 'ascend-update-latest.log'
+
+
+def _php_install_log_path():
+    return LOG_DIR / 'php-install-latest.log'
 
 
 def _update_state_load():
@@ -3193,6 +3198,37 @@ def _load_php_runtimes():
     }
 
 
+def _php_install_state_load():
+    return _json_setting_load(PHP_INSTALL_STATE_SETTING_KEY, {})
+
+
+def _php_install_state_save(data):
+    _json_setting_save(PHP_INSTALL_STATE_SETTING_KEY, data)
+
+
+def _php_install_running():
+    state = _php_install_state_load()
+    pid = state.get('pid')
+    if pid:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except Exception:
+            pass
+    unit = state.get('unit')
+    if unit and shutil.which('systemctl'):
+        active = _run_text(['systemctl', 'is-active', '--quiet', unit], timeout=5)
+        return bool(active.get('ok'))
+    return False
+
+
+def _validate_php_install_version(version):
+    version = (version or '').strip()
+    if not re.match(r'^\d+\.\d+$', version):
+        raise ValueError('Select a specific PHP version first.')
+    return version
+
+
 def _pm2_summary(proc):
     """Flatten a single `pm2 jlist` entry to the fields we care about."""
     env = proc.get('pm2_env') or {}
@@ -3691,6 +3727,108 @@ def api_system_suggest_port():
 @login_required
 def api_system_php_runtimes():
     return jsonify(_cached('php_runtimes', 30, _load_php_runtimes))
+
+
+@app.route('/api/system/php-install/status')
+@login_required
+def api_system_php_install_status():
+    log_path = _php_install_log_path()
+    tail = ''
+    if log_path.exists():
+        try:
+            tail = log_path.read_text(encoding='utf-8', errors='replace')[-12000:]
+        except Exception:
+            tail = ''
+    return jsonify({
+        'running': _php_install_running(),
+        'state': _php_install_state_load(),
+        'log_tail': tail,
+    })
+
+
+@app.route('/api/system/php-install/start', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_system_php_install_start():
+    err = _admin_required()
+    if err:
+        return err
+    if _php_install_running():
+        return jsonify({'error': 'A PHP installation is already running.'}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        version = _validate_php_install_version(data.get('version'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    runtimes = _load_php_runtimes()
+    if version in (runtimes.get('installed_versions') or []):
+        return jsonify({'ok': True, 'already_installed': True, 'runtimes': runtimes})
+
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = _php_install_log_path()
+    unit = f'ascend-php-install-{version.replace(".", "-")}-{int(time.time())}'
+    packages = [
+        f'php{version}-fpm',
+        f'php{version}-cli',
+        f'php{version}-mysql',
+        f'php{version}-curl',
+        f'php{version}-xml',
+        f'php{version}-mbstring',
+        f'php{version}-zip',
+        f'php{version}-gd',
+        f'php{version}-intl',
+        f'php{version}-bcmath',
+        f'php{version}-opcache',
+    ]
+    package_args = ' '.join(shlex.quote(p) for p in packages)
+    cmd = (
+        'set -e; '
+        'export TERM=${TERM:-dumb} DEBIAN_FRONTEND=noninteractive; '
+        f'echo "Installing PHP {shlex.quote(version)} for Ascend..."; '
+        'apt-get update; '
+        'apt-get install -y software-properties-common ca-certificates lsb-release apt-transport-https; '
+        'if ! apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then '
+        '  add-apt-repository -y ppa:ondrej/php; '
+        '  apt-get update; '
+        'fi; '
+        f'apt-get install -y {package_args} composer; '
+        f'systemctl enable --now php{shlex.quote(version)}-fpm; '
+        f'systemctl status php{shlex.quote(version)}-fpm --no-pager || true; '
+        f'echo "PHP {shlex.quote(version)} install finished."'
+    )
+    state = {
+        'version': version,
+        'started_at': datetime.now(timezone.utc).isoformat(),
+        'started_by': current_user.username,
+        'log_path': str(log_path),
+        'unit': unit,
+    }
+    try:
+        if shutil.which('systemd-run'):
+            proc = subprocess.run(
+                ['systemd-run', '--unit', unit, '--description', f'Ascend PHP {version} install', '/bin/bash', '-lc', f'{cmd} > {shlex.quote(str(log_path))} 2>&1'],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or 'systemd-run failed').strip())
+            state['launcher'] = 'systemd-run'
+        else:
+            with open(log_path, 'ab') as log_fh:
+                proc = subprocess.Popen(['setsid', '/bin/bash', '-lc', cmd], stdout=log_fh, stderr=log_fh, start_new_session=True)
+            state['launcher'] = 'setsid'
+            state['pid'] = proc.pid
+        _php_install_state_save(state)
+        _system_cache.pop('php_runtimes', None)
+        _audit_log('php_install.started', 'ok', f'PHP {version} install started', {'version': version, 'launcher': state.get('launcher')})
+        return jsonify({'ok': True, 'state': state})
+    except Exception as exc:
+        state['error'] = str(exc)
+        _php_install_state_save(state)
+        _audit_log('php_install.start_failed', 'failed', str(exc), {'version': version})
+        return jsonify({'error': f'Failed to start PHP install: {exc}'}), 500
 
 
 @app.route('/api/app/<int:app_id>/runtime')

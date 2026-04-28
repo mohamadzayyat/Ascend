@@ -90,6 +90,8 @@ export const apiClient = {
   suggestAppPort: (start = 3000, excludeAppId = null) =>
     api.get('/api/system/suggest-port', { params: { start, exclude_app_id: excludeAppId } }),
   getPhpRuntimes: () => api.get('/api/system/php-runtimes'),
+  getPhpInstallStatus: () => api.get('/api/system/php-install/status'),
+  startPhpInstall: (version) => api.post('/api/system/php-install/start', { version }),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
   getAppPm2Logs: (id, lines = 120) => api.get(`/api/app/${id}/pm2-logs`, { params: { lines } }),
   getServerFilesStatus: () => api.get('/api/server/files/status'),
