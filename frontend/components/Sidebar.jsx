@@ -1,6 +1,18 @@
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { Database, DownloadCloud, FileText, FolderTree, LogOut, Settings, Terminal, Users, Workflow } from 'lucide-react'
+import {
+  Box,
+  Database,
+  DownloadCloud,
+  FileText,
+  FolderTree,
+  LayoutDashboard,
+  LogOut,
+  Monitor,
+  Settings,
+  Terminal,
+  Workflow,
+} from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -43,19 +55,19 @@ export default function Sidebar() {
             <NavLink
               href="/dashboard"
               active={isActive('/dashboard')}
-              icon="📊"
+              icon={<LayoutDashboard className="w-5 h-5" />}
               label="Dashboard"
             />
             <NavLink
               href="/projects"
               active={isActive('/projects')}
-              icon="📦"
+              icon={<Box className="w-5 h-5" />}
               label="Projects"
             />
             <NavLink
               href="/system"
               active={isActive('/system')}
-              icon="🖥️"
+              icon={<Monitor className="w-5 h-5" />}
               label="System"
             />
             <NavLink
@@ -76,12 +88,6 @@ export default function Sidebar() {
               icon={<Database className="w-5 h-5" />}
               label="Databases"
             />
-            <NavLink
-              href="/settings/github"
-              active={isActive('/settings/github')}
-              icon="🔑"
-              label="GitHub Credentials"
-            />
           </nav>
 
           <div className="border-t border-gray-700 my-4"></div>
@@ -89,15 +95,9 @@ export default function Sidebar() {
           <div className="space-y-2">
             <NavLink
               href="/settings"
-              active={isActive('/settings')}
+              active={router.pathname.startsWith('/settings')}
               icon={<Settings className="w-5 h-5" />}
               label="Settings"
-            />
-            <NavLink
-              href="/settings/users"
-              active={isActive('/settings/users')}
-              icon={<Users className="w-5 h-5" />}
-              label="Users"
             />
             <NavLink
               href="/workflow"
@@ -148,11 +148,7 @@ function NavLink({ href, active, icon, label }) {
           : 'text-gray-300 hover:bg-primary hover:text-white'
       }`}
     >
-      {typeof icon === 'string' ? (
-        <span className="text-lg">{icon}</span>
-      ) : (
-        icon
-      )}
+      {icon}
       <span>{label}</span>
     </Link>
   )
