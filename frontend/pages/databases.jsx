@@ -1367,7 +1367,8 @@ function BackupUploadSettings() {
       {open && (
         <div className="border-t border-gray-700 p-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
           <div className="md:col-span-2 rounded border border-blue-500/25 bg-blue-500/10 p-2 text-xs text-blue-100/90">
-            Koofr is a simple free option: create an account, enable WebDAV/app password in Koofr, then use the default URL.
+            Koofr is a simple free option. Use your Koofr account email as the username, but do not use your normal Koofr login password here.
+            Generate an application-specific WebDAV password in Koofr, paste that as the password, then use the default URL.
           </div>
           <label className="md:col-span-2 flex items-center gap-2 text-gray-300">
             <input type="checkbox" checked={!!form.enabled} onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))} />
@@ -1382,8 +1383,9 @@ function BackupUploadSettings() {
             <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
           </label>
           <label className="text-gray-300">
-            Password {form.has_password && <span className="text-gray-500">(leave blank to keep)</span>}
+            WebDAV app password {form.has_password && <span className="text-gray-500">(leave blank to keep)</span>}
             <input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} placeholder={form.has_password ? '********' : ''} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+            <span className="text-[11px] text-gray-500 mt-1 block">For Koofr, create this in Koofr app passwords/WebDAV passwords. The normal website password will return unauthorized.</span>
           </label>
           <label className="md:col-span-2 text-gray-300">
             Extra remote folder (optional)

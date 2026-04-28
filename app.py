@@ -682,7 +682,7 @@ def api_settings_backup_upload_test():
     if not (full.get('webdav_url') or '').strip():
         return jsonify({'error': 'Set the WebDAV URL and save before testing.'}), 400
     if not (full.get('username') or '').strip() or not full.get('password'):
-        return jsonify({'error': 'Set the WebDAV username and password/app password first.'}), 400
+        return jsonify({'error': 'Set the WebDAV username and app password first. Koofr requires a generated WebDAV/app password, not your normal login password.'}), 400
     tmp = None
     try:
         tmp = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False, encoding='utf-8')
