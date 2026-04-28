@@ -195,6 +195,13 @@ init_backup_upload(
     decrypt_password=_decrypt_password,
 )
 
+
+def _admin_required():
+    if not getattr(current_user, 'is_admin', False):
+        return jsonify({'error': 'Admin only.'}), 403
+    return None
+
+
 # Login Management
 # ═══════════════════════════════════════════
 
