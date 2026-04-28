@@ -134,20 +134,40 @@ def _crowdsec_decisions():
         raw_items = parsed.get('decisions') or parsed.get('items') or parsed.get('data') or []
     else:
         raw_items = parsed
+
+    def pick(obj, *keys):
+        for key in keys:
+            if key in obj and obj.get(key) not in (None, ''):
+                return obj.get(key)
+        lowered = {str(k).lower().replace('-', '_').replace(' ', '_'): v for k, v in obj.items()}
+        for key in keys:
+            normalized = str(key).lower().replace('-', '_').replace(' ', '_')
+            if lowered.get(normalized) not in (None, ''):
+                return lowered.get(normalized)
+        return None
+
     items = []
     for item in raw_items if isinstance(raw_items, list) else []:
         if not isinstance(item, dict):
             continue
+        scope_value = pick(item, 'value', 'Value', 'scope_value', 'ScopeValue', 'scope_value_text', 'IP', 'ip')
+        scope = pick(item, 'scope', 'Scope')
+        scope_and_value = pick(item, 'scope:value', 'Scope:Value', 'scope_value_pair')
+        if not scope_value and isinstance(scope_and_value, str) and ':' in scope_and_value:
+            left, _, right = scope_and_value.partition(':')
+            scope = scope or left.strip()
+            scope_value = right.strip()
         items.append({
-            'id': item.get('id') or item.get('ID'),
-            'value': item.get('value') or item.get('Value') or item.get('scope_value'),
-            'scope': item.get('scope') or item.get('Scope'),
-            'type': item.get('type') or item.get('Type'),
-            'origin': item.get('origin') or item.get('Origin'),
-            'reason': item.get('reason') or item.get('Reason'),
-            'duration': item.get('duration') or item.get('Duration'),
-            'until': item.get('until') or item.get('Until'),
-            'scenario': item.get('scenario') or item.get('Scenario'),
+            'id': pick(item, 'id', 'ID'),
+            'value': scope_value,
+            'scope': scope,
+            'type': pick(item, 'type', 'Type'),
+            'origin': pick(item, 'origin', 'Origin', 'source', 'Source'),
+            'reason': pick(item, 'reason', 'Reason'),
+            'duration': pick(item, 'duration', 'Duration'),
+            'until': pick(item, 'until', 'Until', 'expiration', 'Expiration'),
+            'scenario': pick(item, 'scenario', 'Scenario'),
+            'raw': item,
         })
     return {'available': True, 'items': items, 'error': ''}
 

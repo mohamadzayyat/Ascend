@@ -261,7 +261,7 @@ export default function SecurityPage() {
   }
 
   const unblockDecision = async (item) => {
-    const label = item.value || item.id
+    const label = item.value || `decision #${item.id}`
     if (!window.confirm(`Remove CrowdSec block for ${label}?`)) return
     setBusy(`unblock-${label}`)
     try {
@@ -442,8 +442,8 @@ export default function SecurityPage() {
                 {crowdsecDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div> : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left min-w-[900px]">
-                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Value</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Origin</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
-                      <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${item.id || item.value}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value || item.id || '-'}</td><td className="px-4 py-3 text-gray-300">{item.type || item.scope || '-'}</td><td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td><td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td><td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${item.value || item.id}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
+                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked value</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Origin</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
+                      <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${item.id || item.value}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value || <span className="text-yellow-200">Decision #{item.id}</span>}</td><td className="px-4 py-3 text-gray-300">{item.scope || item.type || '-'}</td><td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td><td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td><td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${item.value || item.id}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
                     </table>
                   </div>
                 )}
