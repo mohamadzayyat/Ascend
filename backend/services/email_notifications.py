@@ -5,6 +5,7 @@ import smtplib
 import ssl
 import sys
 import threading
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
 
@@ -79,7 +80,48 @@ def _email_notify_settings_load():
 def _email_notify_settings_to_api_dict(full):
     out = {k: v for k, v in full.items() if k != 'smtp_password'}
     out['has_password'] = bool(full.get('smtp_password'))
+    out['delivery_status'] = _email_notify_delivery_status_load()
     return out
+
+
+def _email_notify_delivery_status_key():
+    return f'{_setting_key}_delivery_status'
+
+
+def _email_notify_delivery_status_load():
+    try:
+        rec = _db.session.get(_AppSetting, _email_notify_delivery_status_key())
+        if not rec or not rec.value:
+            return {}
+        parsed = json.loads(rec.value)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _email_notify_delivery_status_record(event_key, status, message='', subject='', recipients=None):
+    try:
+        data = _email_notify_delivery_status_load()
+        data[str(event_key)] = {
+            'status': str(status),
+            'message': str(message or '')[:1000],
+            'subject': str(subject or '')[:500],
+            'recipients': list(recipients or [])[:20],
+            'at': datetime.now(timezone.utc).isoformat(),
+        }
+        rec = _db.session.get(_AppSetting, _email_notify_delivery_status_key())
+        if rec is None:
+            rec = _AppSetting(key=_email_notify_delivery_status_key(), value=json.dumps(data))
+            _db.session.add(rec)
+        else:
+            rec.value = json.dumps(data)
+        _db.session.commit()
+    except Exception as exc:
+        try:
+            _db.session.rollback()
+        except Exception:
+            pass
+        print(f'[email-notify] status record failed ({event_key}): {exc}', file=sys.stderr)
 
 
 def _parse_notify_emails(s):
@@ -216,22 +258,29 @@ def _smtp_send_raw(settings_dict, recipients, subject, body_plain):
 def _notify_email_send_if_subscribed(event_key, subject, body_plain):
     try:
         full = _email_notify_settings_load()
-    except Exception:
+    except Exception as exc:
+        _email_notify_delivery_status_record(event_key, 'failed', f'Could not load email settings: {exc}', subject)
         return
     if not full.get('enabled'):
+        _email_notify_delivery_status_record(event_key, 'skipped', 'Email notifications are disabled.', subject)
         return
     ev = full.get('events') or {}
     if not ev.get(event_key):
+        _email_notify_delivery_status_record(event_key, 'skipped', 'This event is not enabled.', subject)
         return
     host = (full.get('host') or '').strip()
     if not host:
+        _email_notify_delivery_status_record(event_key, 'failed', 'SMTP host is not configured.', subject)
         return
     recipients = _parse_notify_emails(full.get('notify_to') or '')
     if not recipients:
+        _email_notify_delivery_status_record(event_key, 'failed', 'No valid alert recipients are configured.', subject)
         return
     try:
         _smtp_send_raw(full, recipients, subject, body_plain)
+        _email_notify_delivery_status_record(event_key, 'sent', 'Email sent successfully.', subject, recipients)
     except Exception as e:
+        _email_notify_delivery_status_record(event_key, 'failed', str(e), subject, recipients)
         print(f'[email-notify] send failed ({event_key}): {e}', file=sys.stderr)
 
 

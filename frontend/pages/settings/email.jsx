@@ -29,6 +29,8 @@ const emptyForm = {
   notify_to: '',
   smtp_password: '',
   has_password: false,
+  smtp_password_error: '',
+  delivery_status: {},
   events: {},
 }
 
@@ -168,9 +170,15 @@ export default function EmailSettingsPage() {
     } catch (e) {
       setMessage(e.response?.data?.error || 'Test send failed')
     } finally {
+      await load()
       setTesting(false)
     }
   }
+
+  const eventLabel = (key) => (key === 'test' ? 'Test email' : EVENT_OPTIONS.find((ev) => ev.key === key)?.label || key)
+  const deliveryEntries = Object.entries(form.delivery_status || {})
+    .sort((a, b) => String(b[1]?.at || '').localeCompare(String(a[1]?.at || '')))
+    .slice(0, 6)
 
   if (!authLoading && user && !user.is_admin) {
     return (
@@ -295,6 +303,11 @@ export default function EmailSettingsPage() {
                   </button>
                 </div>
               )}
+              {form.smtp_password_error && (
+                <div className="md:col-span-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  {form.smtp_password_error}
+                </div>
+              )}
               <label className="block text-sm text-gray-300 md:col-span-2">
                 Sender name
                 <input
@@ -341,6 +354,35 @@ export default function EmailSettingsPage() {
               ))}
             </div>
           </div>
+
+          {deliveryEntries.length > 0 && (
+            <div className="rounded-lg border border-gray-700 bg-secondary p-6">
+              <h2 className="text-white font-semibold mb-3">Recent delivery status</h2>
+              <div className="space-y-3 text-sm">
+                {deliveryEntries.map(([key, item]) => (
+                  <div key={key} className="border-b border-gray-700/70 pb-3 last:border-0 last:pb-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-gray-200 font-medium">{eventLabel(key)}</span>
+                      <span className={`text-[11px] uppercase tracking-wide px-2 py-0.5 rounded border ${
+                        item.status === 'sent'
+                          ? 'border-green-500/40 bg-green-500/10 text-green-200'
+                          : item.status === 'failed'
+                            ? 'border-red-500/40 bg-red-500/10 text-red-200'
+                            : 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+                      }`}>
+                        {item.status}
+                      </span>
+                      {item.at && <span className="text-xs text-gray-500">{new Date(item.at).toLocaleString()}</span>}
+                    </div>
+                    {item.message && <div className="text-gray-400 mt-1 break-words">{item.message}</div>}
+                    {Array.isArray(item.recipients) && item.recipients.length > 0 && (
+                      <div className="text-xs text-gray-500 mt-1 break-words">To: {item.recipients.join(', ')}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {message && (
             <div className={`text-sm rounded border px-3 py-2 ${message.startsWith('Test sent') || message === 'Saved.' || message.includes('cleared')

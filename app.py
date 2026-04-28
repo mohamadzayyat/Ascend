@@ -51,6 +51,7 @@ from backend.services.email_notifications import (
     init_email_notifications,
     _email_notify_settings_load,
     _email_notify_settings_to_api_dict,
+    _email_notify_delivery_status_record,
     _notify_email_async,
     _parse_notify_emails,
     _smtp_send_raw,
@@ -352,7 +353,7 @@ def api_login():
         ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
         _notify_email_async(
             'panel_login',
-            f'Ascend: login — {user.username}',
+            f'Ascend: login - {user.username}',
             f'User {user.username} signed in to the panel.\nIP: {ip}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
         )
         return jsonify({
@@ -445,7 +446,7 @@ def login():
             ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
             _notify_email_async(
                 'panel_login',
-                f'Ascend: login — {user.username}',
+                f'Ascend: login - {user.username}',
                 f'User {user.username} signed in (web form).\nIP: {ip}\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
             )
             return redirect(url_for('dashboard'))
@@ -609,7 +610,9 @@ def api_settings_email_notifications_test():
     try:
         _smtp_send_raw(full, recipients, subject, body)
     except Exception as e:
+        _email_notify_delivery_status_record('test', 'failed', str(e), subject, recipients)
         return jsonify({'error': str(e)}), 502
+    _email_notify_delivery_status_record('test', 'sent', 'Test email sent successfully.', subject, recipients)
     return jsonify({'ok': True, 'sent_to': recipients})
 
 
