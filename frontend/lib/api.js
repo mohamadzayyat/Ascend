@@ -89,6 +89,7 @@ export const apiClient = {
   checkDomainDns: (domain) => api.get('/api/system/dns-check', { params: { domain } }),
   suggestAppPort: (start = 3000, excludeAppId = null) =>
     api.get('/api/system/suggest-port', { params: { start, exclude_app_id: excludeAppId } }),
+  getPhpRuntimes: () => api.get('/api/system/php-runtimes'),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
   getAppPm2Logs: (id, lines = 120) => api.get(`/api/app/${id}/pm2-logs`, { params: { lines } }),
   getServerFilesStatus: () => api.get('/api/server/files/status'),

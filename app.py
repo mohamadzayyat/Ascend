@@ -3136,6 +3136,63 @@ def _cached(key, ttl, builder):
     return value
 
 
+def _load_php_runtimes():
+    versions = {}
+    sockets = []
+
+    for base in ('/run/php', '/var/run/php'):
+        try:
+            sockets.extend(Path(base).glob('php*-fpm.sock'))
+        except Exception:
+            pass
+    for path in sockets:
+        name = path.name
+        match = re.match(r'php(\d+(?:\.\d+)?)-fpm\.sock$', name)
+        if match:
+            version = match.group(1)
+            versions.setdefault(version, {'version': version, 'socket': str(path), 'service': f'php{version}-fpm'})
+        elif name == 'php-fpm.sock':
+            versions.setdefault('', {'version': '', 'socket': str(path), 'service': 'php-fpm'})
+
+    try:
+        result = subprocess.run(
+            ['systemctl', 'list-unit-files', '--type=service', '--no-legend', 'php*-fpm.service'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                unit = line.split()[0] if line.split() else ''
+                match = re.match(r'php(\d+(?:\.\d+)?)-fpm\.service$', unit)
+                if match:
+                    version = match.group(1)
+                    versions.setdefault(version, {'version': version, 'socket': None, 'service': f'php{version}-fpm'})
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    default_php = None
+    try:
+        result = subprocess.run(
+            ['php', '-r', 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            default_php = result.stdout.strip() or None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    installed = sorted(versions.values(), key=lambda item: item.get('version') or '0', reverse=True)
+    return {
+        'installed': installed,
+        'installed_versions': [item['version'] for item in installed if item.get('version')],
+        'default_version': default_php,
+        'default_available': any(item.get('version') == '' for item in installed) or bool(installed),
+    }
+
+
 def _pm2_summary(proc):
     """Flatten a single `pm2 jlist` entry to the fields we care about."""
     env = proc.get('pm2_env') or {}
@@ -3628,6 +3685,12 @@ def api_system_suggest_port():
     except (TypeError, ValueError):
         normalized_start = 3000
     return jsonify({'port': port, 'start': normalized_start})
+
+
+@app.route('/api/system/php-runtimes')
+@login_required
+def api_system_php_runtimes():
+    return jsonify(_cached('php_runtimes', 30, _load_php_runtimes))
 
 
 @app.route('/api/app/<int:app_id>/runtime')

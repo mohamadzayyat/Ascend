@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/router'
 import { RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
@@ -14,6 +14,8 @@ export default function AppSettings({ app, onUpdate }) {
   const [dnsStatus, setDnsStatus] = useState('idle')
   const [portLoading, setPortLoading] = useState(false)
   const [portHint, setPortHint] = useState('')
+  const [phpRuntimes, setPhpRuntimes] = useState(null)
+  const [phpRuntimeError, setPhpRuntimeError] = useState('')
 
   const [formData, setFormData] = useState({
     name: app?.name || '',
@@ -55,6 +57,41 @@ export default function AppSettings({ app, onUpdate }) {
       return next
     })
   }
+
+  useEffect(() => {
+    if (formData.app_type !== 'php') return
+    let cancelled = false
+    apiClient.getPhpRuntimes()
+      .then((res) => {
+        if (!cancelled) setPhpRuntimes(res.data)
+      })
+      .catch((err) => {
+        if (!cancelled) setPhpRuntimeError(err.response?.data?.error || 'Could not detect PHP-FPM versions')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [formData.app_type])
+
+  const phpVersionOptions = useMemo(() => {
+    const common = ['8.4', '8.3', '8.2', '8.1', '8.0', '7.4']
+    const installed = new Set(phpRuntimes?.installed_versions || [])
+    const versions = Array.from(new Set([...installed, ...common])).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+    return [
+      {
+        value: '',
+        label: phpRuntimes?.default_version
+          ? `System default (PHP ${phpRuntimes.default_version})`
+          : 'System default',
+        disabled: phpRuntimes ? !phpRuntimes.default_available : false,
+      },
+      ...versions.map((version) => ({
+        value: version,
+        label: installed.has(version) ? `PHP ${version} (installed)` : `PHP ${version} (not installed)`,
+        disabled: phpRuntimes ? !installed.has(version) : false,
+      })),
+    ]
+  }, [phpRuntimes])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -144,6 +181,28 @@ export default function AppSettings({ app, onUpdate }) {
     </div>
   )
 
+  const phpVersionSelect = () => (
+    <div>
+      <label className="block text-sm font-medium text-gray-300 mb-2">PHP Version</label>
+      <select
+        name="php_version"
+        value={formData.php_version}
+        onChange={handleChange}
+        className="w-full px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-accent"
+      >
+        {phpVersionOptions.map((option) => (
+          <option key={option.value || 'default'} value={option.value} disabled={option.disabled}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      {phpRuntimeError && <p className="text-xs text-yellow-400 mt-1">{phpRuntimeError}</p>}
+      {!phpRuntimeError && phpRuntimes && phpRuntimes.installed_versions?.length === 0 && (
+        <p className="text-xs text-yellow-400 mt-1">No PHP-FPM versions were detected on this server.</p>
+      )}
+    </div>
+  )
+
   return (
     <form onSubmit={handleSubmit} className="max-w-3xl space-y-6">
       {error && (
@@ -168,9 +227,7 @@ export default function AppSettings({ app, onUpdate }) {
         <h3 className="text-lg font-bold text-white mb-4">Build & Run</h3>
         {formData.app_type === 'php' ? (
           <div className="space-y-4">
-            {select('PHP Version', 'php_version', [
-              ['', 'System default'], ['8.4', 'PHP 8.4'], ['8.3', 'PHP 8.3'], ['8.2', 'PHP 8.2'], ['8.1', 'PHP 8.1'], ['8.0', 'PHP 8.0'], ['7.4', 'PHP 7.4'],
-            ])}
+            {phpVersionSelect()}
             {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
             {check('Run Composer during deploy', 'composer_install')}
             {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
