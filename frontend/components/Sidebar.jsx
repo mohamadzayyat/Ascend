@@ -10,6 +10,7 @@ import {
   LogOut,
   Monitor,
   Settings,
+  ShieldCheck,
   Terminal,
   Workflow,
 } from 'lucide-react'
@@ -87,6 +88,12 @@ export default function Sidebar() {
               active={router.pathname.startsWith('/databases')}
               icon={<Database className="w-5 h-5" />}
               label="Databases"
+            />
+            <NavLink
+              href="/security"
+              active={isActive('/security')}
+              icon={<ShieldCheck className="w-5 h-5" />}
+              label="Security"
             />
           </nav>
 

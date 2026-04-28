@@ -58,6 +58,7 @@ dist/
 deployments/
 backups/
 .pm2/
+/security/
 
 # Temp files
 tmp/

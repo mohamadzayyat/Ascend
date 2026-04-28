@@ -4793,6 +4793,20 @@ _reschedule_backup_jobs = register_database_feature(
     iso_utc_func=iso_utc,
 )
 
+# Security Center routes live in backend.security.routes.
+from backend.security.routes import register_security_feature
+
+register_security_feature(
+    flask_app=app,
+    csrf_protect=csrf,
+    base_dir=BASE_DIR,
+    deployments_dir=DEPLOYMENTS_DIR,
+    static_sites_dir=STATIC_SITES_DIR,
+    admin_required=_admin_required,
+    audit_log=_audit_log,
+    notify_email_async=_notify_email_async,
+)
+
 # Error Handlers
 # ═══════════════════════════════════════════
 
