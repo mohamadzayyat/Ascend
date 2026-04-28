@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Loader2, Mail, Send } from 'lucide-react'
+import { ArrowLeft, Loader2, Mail, RefreshCw, Send, Settings, Trash2 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -43,11 +43,15 @@ function normalizeSmtpTlsForPort(form) {
 
 export default function EmailSettingsPage() {
   const { user, loading: authLoading } = useAuth()
+  const [activeTab, setActiveTab] = useState('settings')
   const [form, setForm] = useState(emptyForm)
+  const [emailLog, setEmailLog] = useState([])
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
+  const [logLoading, setLogLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [clearingLog, setClearingLog] = useState(false)
   const [message, setMessage] = useState('')
   const [testTo, setTestTo] = useState('')
 
@@ -59,10 +63,25 @@ export default function EmailSettingsPage() {
     return o
   }, [])
 
+  const loadLog = useCallback(async () => {
+    setLogLoading(true)
+    try {
+      const { data } = await apiClient.getEmailNotificationLog(200)
+      setEmailLog(Array.isArray(data.items) ? data.items : [])
+    } catch (_) {
+      setEmailLog([])
+    } finally {
+      setLogLoading(false)
+    }
+  }, [])
+
   const load = useCallback(async () => {
     setLoadError('')
     try {
-      const { data } = await apiClient.getEmailNotifications()
+      const [{ data }] = await Promise.all([
+        apiClient.getEmailNotifications(),
+        loadLog(),
+      ])
       setForm(
         normalizeSmtpTlsForPort({
           ...emptyForm,
@@ -76,7 +95,7 @@ export default function EmailSettingsPage() {
     } finally {
       setLoaded(true)
     }
-  }, [mergeEvents])
+  }, [loadLog, mergeEvents])
 
   useEffect(() => {
     if (!authLoading && user?.is_admin) load()
@@ -176,6 +195,21 @@ export default function EmailSettingsPage() {
   }
 
   const eventLabel = (key) => (key === 'test' ? 'Test email' : EVENT_OPTIONS.find((ev) => ev.key === key)?.label || key)
+  const clearLog = async () => {
+    if (!window.confirm('Clear the email delivery log?')) return
+    setClearingLog(true)
+    setMessage('')
+    try {
+      await apiClient.clearEmailNotificationLog()
+      setEmailLog([])
+      setMessage('Email log cleared.')
+    } catch (e) {
+      setMessage(e.response?.data?.error || 'Failed to clear email log')
+    } finally {
+      setClearingLog(false)
+    }
+  }
+
   const deliveryEntries = Object.entries(form.delivery_status || {})
     .sort((a, b) => String(b[1]?.at || '').localeCompare(String(a[1]?.at || '')))
     .slice(0, 6)
@@ -219,6 +253,40 @@ export default function EmailSettingsPage() {
         <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm mb-4">{loadError}</div>
       )}
       {loaded && !loadError && (
+        <>
+          <div className="mb-6 inline-flex rounded-lg border border-gray-700 bg-secondary p-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab('settings')}
+              className={`px-3 py-2 rounded-md text-sm inline-flex items-center gap-2 ${activeTab === 'settings' ? 'bg-primary text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              <Settings className="w-4 h-4" />
+              Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('log')
+                loadLog()
+              }}
+              className={`px-3 py-2 rounded-md text-sm inline-flex items-center gap-2 ${activeTab === 'log' ? 'bg-primary text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              <Mail className="w-4 h-4" />
+              Email log
+              <span className="text-xs text-gray-500">{emailLog.length}</span>
+            </button>
+          </div>
+
+          {message && (
+            <div className={`text-sm rounded border px-3 py-2 mb-6 ${message.startsWith('Test sent') || message === 'Saved.' || message.includes('cleared')
+              ? 'border-green-500/40 bg-green-500/10 text-green-200'
+              : 'border-amber-500/40 bg-amber-500/10 text-amber-100'}`}
+            >
+              {message}
+            </div>
+          )}
+
+          {activeTab === 'settings' ? (
         <form onSubmit={save} className="space-y-6">
           <div className="rounded-lg border border-gray-700 bg-secondary p-6 space-y-4">
             <label className="flex items-center gap-2 text-white font-medium cursor-pointer">
@@ -384,15 +452,6 @@ export default function EmailSettingsPage() {
             </div>
           )}
 
-          {message && (
-            <div className={`text-sm rounded border px-3 py-2 ${message.startsWith('Test sent') || message === 'Saved.' || message.includes('cleared')
-              ? 'border-green-500/40 bg-green-500/10 text-green-200'
-              : 'border-amber-500/40 bg-amber-500/10 text-amber-100'}`}
-            >
-              {message}
-            </div>
-          )}
-
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="submit"
@@ -422,6 +481,86 @@ export default function EmailSettingsPage() {
             </div>
           </div>
         </form>
+          ) : (
+            <div className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+              <div className="p-4 border-b border-gray-700 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-white font-semibold">Email log</h2>
+                  <p className="text-xs text-gray-500 mt-1">Latest 200 notification attempts. History is capped at 500 entries.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={loadLog}
+                    disabled={logLoading || clearingLog}
+                    className="px-3 py-2 border border-gray-600 rounded text-white text-sm inline-flex items-center gap-2 hover:bg-primary/60 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${logLoading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearLog}
+                    disabled={clearingLog || emailLog.length === 0}
+                    className="px-3 py-2 border border-red-500/40 rounded text-red-200 text-sm inline-flex items-center gap-2 hover:bg-red-500/10 disabled:opacity-50"
+                  >
+                    {clearingLog ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    Clear log
+                  </button>
+                </div>
+              </div>
+              {emailLog.length === 0 ? (
+                <div className="p-8 text-center text-gray-500 text-sm">No email attempts recorded yet.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left min-w-[760px]">
+                    <thead className="bg-primary/60 text-gray-400">
+                      <tr>
+                        <th className="px-4 py-3 font-medium">Time</th>
+                        <th className="px-4 py-3 font-medium">Event</th>
+                        <th className="px-4 py-3 font-medium">Status</th>
+                        <th className="px-4 py-3 font-medium">Recipients</th>
+                        <th className="px-4 py-3 font-medium">Subject</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-700/70">
+                      {emailLog.map((item) => (
+                        <tr key={item.id || `${item.at}-${item.event}`} className="align-top">
+                          <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{item.at ? new Date(item.at).toLocaleString() : '-'}</td>
+                          <td className="px-4 py-3 text-gray-200">{eventLabel(item.event)}</td>
+                          <td className="px-4 py-3">
+                            <span className={`text-[11px] uppercase tracking-wide px-2 py-0.5 rounded border ${
+                              item.status === 'sent'
+                                ? 'border-green-500/40 bg-green-500/10 text-green-200'
+                                : item.status === 'failed'
+                                  ? 'border-red-500/40 bg-red-500/10 text-red-200'
+                                  : 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+                            }`}>
+                              {item.status}
+                            </span>
+                            {item.message && <div className="mt-2 text-xs text-gray-500 max-w-xs break-words">{item.message}</div>}
+                          </td>
+                          <td className="px-4 py-3 text-gray-300 max-w-[220px] break-words">
+                            {Array.isArray(item.recipients) && item.recipients.length > 0 ? item.recipients.join(', ') : '-'}
+                          </td>
+                          <td className="px-4 py-3 text-gray-300 max-w-sm">
+                            <div className="font-medium break-words">{item.subject || '-'}</div>
+                            {item.body && (
+                              <details className="mt-2">
+                                <summary className="cursor-pointer text-xs text-accent">View body</summary>
+                                <pre className="mt-2 whitespace-pre-wrap break-words rounded border border-gray-700 bg-primary p-3 text-xs text-gray-300 max-h-64 overflow-auto">{item.body}</pre>
+                              </details>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   )

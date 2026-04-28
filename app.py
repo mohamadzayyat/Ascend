@@ -52,6 +52,8 @@ from backend.services.email_notifications import (
     _email_notify_settings_load,
     _email_notify_settings_to_api_dict,
     _email_notify_delivery_status_record,
+    _email_notify_log_clear,
+    _email_notify_log_load,
     _notify_email_async,
     _parse_notify_emails,
     _smtp_send_raw,
@@ -610,10 +612,25 @@ def api_settings_email_notifications_test():
     try:
         _smtp_send_raw(full, recipients, subject, body)
     except Exception as e:
-        _email_notify_delivery_status_record('test', 'failed', str(e), subject, recipients)
+        _email_notify_delivery_status_record('test', 'failed', str(e), subject, recipients, body)
         return jsonify({'error': str(e)}), 502
-    _email_notify_delivery_status_record('test', 'sent', 'Test email sent successfully.', subject, recipients)
+    _email_notify_delivery_status_record('test', 'sent', 'Test email sent successfully.', subject, recipients, body)
     return jsonify({'ok': True, 'sent_to': recipients})
+
+
+@app.route('/api/settings/email-notifications/log', methods=['GET', 'DELETE'])
+@csrf.exempt
+@login_required
+def api_settings_email_notifications_log():
+    err = _admin_required()
+    if err:
+        return err
+    if request.method == 'DELETE':
+        if not _email_notify_log_clear():
+            return jsonify({'error': 'Failed to clear email log.'}), 500
+        return jsonify({'ok': True, 'items': []})
+    limit = request.args.get('limit', 200)
+    return jsonify({'items': _email_notify_log_load(limit)})
 
 
 @app.route('/api/settings/backup-upload', methods=['GET', 'PUT'])

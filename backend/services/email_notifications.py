@@ -88,27 +88,91 @@ def _email_notify_delivery_status_key():
     return f'{_setting_key}_delivery_status'
 
 
-def _email_notify_delivery_status_load():
+def _email_notify_log_key():
+    return f'{_setting_key}_delivery_log'
+
+
+def _email_notify_json_setting_load(key, default):
     try:
-        rec = _db.session.get(_AppSetting, _email_notify_delivery_status_key())
+        rec = _db.session.get(_AppSetting, key)
         if not rec or not rec.value:
-            return {}
+            return default
         parsed = json.loads(rec.value)
-        return parsed if isinstance(parsed, dict) else {}
+        if isinstance(default, list):
+            return parsed if isinstance(parsed, list) else default
+        if isinstance(default, dict):
+            return parsed if isinstance(parsed, dict) else default
+        return parsed
     except Exception:
-        return {}
+        return default
 
 
-def _email_notify_delivery_status_record(event_key, status, message='', subject='', recipients=None):
+def _email_notify_delivery_status_load():
+    return _email_notify_json_setting_load(_email_notify_delivery_status_key(), {})
+
+
+def _email_notify_log_load(limit=200):
+    rows = _email_notify_json_setting_load(_email_notify_log_key(), [])
+    try:
+        limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        limit = 200
+    return rows[:limit]
+
+
+def _email_notify_log_clear():
+    try:
+        rec = _db.session.get(_AppSetting, _email_notify_log_key())
+        if rec is None:
+            rec = _AppSetting(key=_email_notify_log_key(), value='[]')
+            _db.session.add(rec)
+        else:
+            rec.value = '[]'
+        _db.session.commit()
+        return True
+    except Exception as exc:
+        try:
+            _db.session.rollback()
+        except Exception:
+            pass
+        print(f'[email-notify] log clear failed: {exc}', file=sys.stderr)
+        return False
+
+
+def _email_notify_log_append(entry):
+    try:
+        rows = _email_notify_json_setting_load(_email_notify_log_key(), [])
+        rows.insert(0, entry)
+        rows = rows[:500]
+        rec = _db.session.get(_AppSetting, _email_notify_log_key())
+        if rec is None:
+            rec = _AppSetting(key=_email_notify_log_key(), value=json.dumps(rows))
+            _db.session.add(rec)
+        else:
+            rec.value = json.dumps(rows)
+        _db.session.commit()
+    except Exception as exc:
+        try:
+            _db.session.rollback()
+        except Exception:
+            pass
+        print(f'[email-notify] log append failed: {exc}', file=sys.stderr)
+
+
+def _email_notify_delivery_status_record(event_key, status, message='', subject='', recipients=None, body_plain=''):
+    entry = {
+        'id': f'{datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")}-{threading.get_ident()}',
+        'event': str(event_key),
+        'status': str(status),
+        'message': str(message or '')[:1000],
+        'subject': str(subject or '')[:500],
+        'recipients': list(recipients or [])[:20],
+        'body': str(body_plain or '')[:8000],
+        'at': datetime.now(timezone.utc).isoformat(),
+    }
     try:
         data = _email_notify_delivery_status_load()
-        data[str(event_key)] = {
-            'status': str(status),
-            'message': str(message or '')[:1000],
-            'subject': str(subject or '')[:500],
-            'recipients': list(recipients or [])[:20],
-            'at': datetime.now(timezone.utc).isoformat(),
-        }
+        data[str(event_key)] = {k: entry[k] for k in ('status', 'message', 'subject', 'recipients', 'at')}
         rec = _db.session.get(_AppSetting, _email_notify_delivery_status_key())
         if rec is None:
             rec = _AppSetting(key=_email_notify_delivery_status_key(), value=json.dumps(data))
@@ -122,6 +186,7 @@ def _email_notify_delivery_status_record(event_key, status, message='', subject=
         except Exception:
             pass
         print(f'[email-notify] status record failed ({event_key}): {exc}', file=sys.stderr)
+    _email_notify_log_append(entry)
 
 
 def _parse_notify_emails(s):
@@ -259,28 +324,28 @@ def _notify_email_send_if_subscribed(event_key, subject, body_plain):
     try:
         full = _email_notify_settings_load()
     except Exception as exc:
-        _email_notify_delivery_status_record(event_key, 'failed', f'Could not load email settings: {exc}', subject)
+        _email_notify_delivery_status_record(event_key, 'failed', f'Could not load email settings: {exc}', subject, body_plain=body_plain)
         return
     if not full.get('enabled'):
-        _email_notify_delivery_status_record(event_key, 'skipped', 'Email notifications are disabled.', subject)
+        _email_notify_delivery_status_record(event_key, 'skipped', 'Email notifications are disabled.', subject, body_plain=body_plain)
         return
     ev = full.get('events') or {}
     if not ev.get(event_key):
-        _email_notify_delivery_status_record(event_key, 'skipped', 'This event is not enabled.', subject)
+        _email_notify_delivery_status_record(event_key, 'skipped', 'This event is not enabled.', subject, body_plain=body_plain)
         return
     host = (full.get('host') or '').strip()
     if not host:
-        _email_notify_delivery_status_record(event_key, 'failed', 'SMTP host is not configured.', subject)
+        _email_notify_delivery_status_record(event_key, 'failed', 'SMTP host is not configured.', subject, body_plain=body_plain)
         return
     recipients = _parse_notify_emails(full.get('notify_to') or '')
     if not recipients:
-        _email_notify_delivery_status_record(event_key, 'failed', 'No valid alert recipients are configured.', subject)
+        _email_notify_delivery_status_record(event_key, 'failed', 'No valid alert recipients are configured.', subject, body_plain=body_plain)
         return
     try:
         _smtp_send_raw(full, recipients, subject, body_plain)
-        _email_notify_delivery_status_record(event_key, 'sent', 'Email sent successfully.', subject, recipients)
+        _email_notify_delivery_status_record(event_key, 'sent', 'Email sent successfully.', subject, recipients, body_plain)
     except Exception as e:
-        _email_notify_delivery_status_record(event_key, 'failed', str(e), subject, recipients)
+        _email_notify_delivery_status_record(event_key, 'failed', str(e), subject, recipients, body_plain)
         print(f'[email-notify] send failed ({event_key}): {e}', file=sys.stderr)
 
 

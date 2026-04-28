@@ -55,6 +55,8 @@ export const apiClient = {
   // SMTP can take up to ~30s before the server responds with an error; avoid client giving up first.
   testEmailNotifications: (data) =>
     api.post('/api/settings/email-notifications/test', data || {}, { timeout: 120000 }),
+  getEmailNotificationLog: (limit = 200) => api.get('/api/settings/email-notifications/log', { params: { limit } }),
+  clearEmailNotificationLog: () => api.delete('/api/settings/email-notifications/log'),
   getBackupUploadSettings: () => api.get('/api/settings/backup-upload'),
   updateBackupUploadSettings: (data) => api.put('/api/settings/backup-upload', data),
   testBackupUploadSettings: () => api.post('/api/settings/backup-upload/test', {}, { timeout: 120000 }),
