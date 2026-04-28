@@ -11,11 +11,19 @@ import { typedConfirm } from '@/lib/confirm'
 
 const TABS = [
   { id: 'browse',   label: 'Browse',   icon: TableIcon },
+  { id: 'manage',   label: 'Manage',   icon: Database },
   { id: 'sql',      label: 'SQL',      icon: Play },
   { id: 'backups',  label: 'Backups',  icon: Download },
   { id: 'restore',  label: 'Restore',  icon: RotateCcw },
   { id: 'schedule', label: 'Schedule', icon: Calendar },
 ]
+
+const DB_CHARSETS = ['utf8mb4', 'utf8', 'latin1']
+const DB_COLLATIONS = {
+  utf8mb4: ['utf8mb4_general_ci', 'utf8mb4_unicode_ci', 'utf8mb4_0900_ai_ci', 'utf8mb4_bin'],
+  utf8: ['utf8_general_ci', 'utf8_unicode_ci', 'utf8_bin'],
+  latin1: ['latin1_swedish_ci', 'latin1_general_ci', 'latin1_bin'],
+}
 
 const COMMON_TIMEZONES = [
   'Asia/Beirut',
@@ -681,6 +689,7 @@ function ConnectionPanel({
             onPendingSqlConsumed={onPendingSqlConsumed}
           />
         )}
+        {tab === 'manage' && <ManageDatabasesTab connection={connection} />}
         {tab === 'backups' && <BackupsTab connection={connection} />}
         {tab === 'restore' && <RestoreTab connection={connection} />}
         {tab === 'schedule' && <ScheduleTab connection={connection} />}
@@ -1303,6 +1312,243 @@ function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
 }
 
 // ── Backups list + run-now ──────────────────────────────────────
+
+function ManageDatabasesTab({ connection }) {
+  const [databases, setDatabases] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [createForm, setCreateForm] = useState({ name: '', charset: 'utf8mb4', collation: 'utf8mb4_general_ci' })
+  const [createBusy, setCreateBusy] = useState(false)
+  const [createResult, setCreateResult] = useState(null)
+  const [createError, setCreateError] = useState('')
+  const [importForm, setImportForm] = useState({
+    mode: 'existing',
+    database: '',
+    new_database: '',
+    charset: 'utf8mb4',
+    collation: 'utf8mb4_general_ci',
+  })
+  const [importFile, setImportFile] = useState(null)
+  const [importBusy, setImportBusy] = useState(false)
+  const [importResult, setImportResult] = useState(null)
+  const [importError, setImportError] = useState('')
+
+  const refreshDatabases = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await apiClient.listDatabases(connection.id)
+      const all = [...(res.data.databases || []), ...(res.data.system_databases || [])]
+      setDatabases(all)
+      setImportForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
+    } finally {
+      setLoading(false)
+    }
+  }, [connection.id, connection.default_database])
+
+  useEffect(() => { refreshDatabases() }, [refreshDatabases])
+
+  const createCollations = DB_COLLATIONS[createForm.charset] || DB_COLLATIONS.utf8mb4
+  const importCollations = DB_COLLATIONS[importForm.charset] || DB_COLLATIONS.utf8mb4
+  const createSqlPreview = useMemo(() => {
+    const name = createForm.name.trim() || 'database_name'
+    return `CREATE DATABASE \`${name}\` CHARACTER SET ${createForm.charset} COLLATE ${createForm.collation};`
+  }, [createForm])
+  const importCreateSqlPreview = useMemo(() => {
+    const name = importForm.new_database.trim() || 'database_name'
+    return `CREATE DATABASE \`${name}\` CHARACTER SET ${importForm.charset} COLLATE ${importForm.collation};\nUSE \`${name}\`;\n-- then Ascend imports the selected .sql file with mysql`
+  }, [importForm])
+
+  const patchCreate = (updates) => {
+    setCreateForm((f) => {
+      const next = { ...f, ...updates }
+      if (updates.charset) next.collation = (DB_COLLATIONS[updates.charset] || [])[0] || next.collation
+      return next
+    })
+  }
+
+  const patchImport = (updates) => {
+    setImportForm((f) => {
+      const next = { ...f, ...updates }
+      if (updates.charset) next.collation = (DB_COLLATIONS[updates.charset] || [])[0] || next.collation
+      return next
+    })
+  }
+
+  const createDatabase = async () => {
+    const name = createForm.name.trim()
+    if (!name) {
+      setCreateError('Database name is required.')
+      return
+    }
+    setCreateBusy(true)
+    setCreateError('')
+    setCreateResult(null)
+    try {
+      const res = await apiClient.createDatabase(connection.id, { ...createForm, name })
+      setCreateResult(res.data)
+      setCreateForm((f) => ({ ...f, name: '' }))
+      await refreshDatabases()
+    } catch (err) {
+      setCreateError(err.response?.data?.error || 'Database creation failed')
+    } finally {
+      setCreateBusy(false)
+    }
+  }
+
+  const importSql = async () => {
+    if (!importFile) {
+      setImportError('Choose a .sql file first.')
+      return
+    }
+    const target = importForm.mode === 'new' ? importForm.new_database.trim() : importForm.database.trim()
+    if (!target) {
+      setImportError('Choose or enter a target database.')
+      return
+    }
+    if (importForm.mode === 'existing' && !window.confirm(`Import ${importFile.name} into existing database "${target}"?`)) return
+    setImportBusy(true)
+    setImportError('')
+    setImportResult(null)
+    try {
+      const res = await apiClient.importSqlFile(connection.id, {
+        ...importForm,
+        database: target,
+        new_database: importForm.mode === 'new' ? target : '',
+        file: importFile,
+      })
+      setImportResult(res.data)
+      await refreshDatabases()
+    } catch (err) {
+      setImportError(err.response?.data?.error || 'SQL import failed')
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  return (
+    <div className="p-4 flex flex-col gap-4 h-full">
+      <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-5xl">
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div>
+            <h2 className="text-white font-semibold">Create database</h2>
+            <p className="text-xs text-gray-500 mt-1">Defaults to utf8mb4 and general_ci for broad MySQL/MariaDB compatibility.</p>
+          </div>
+          <button type="button" onClick={refreshDatabases} className="text-gray-400 hover:text-white" title="Refresh database list">
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="sm:col-span-2 text-sm text-gray-300">
+              Database name
+              <input value={createForm.name} onChange={(e) => patchCreate({ name: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" placeholder="my_database" />
+            </label>
+            <label className="text-sm text-gray-300">
+              Character set
+              <select value={createForm.charset} onChange={(e) => patchCreate({ charset: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                {DB_CHARSETS.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+            <label className="text-sm text-gray-300">
+              Collation
+              <select value={createForm.collation} onChange={(e) => patchCreate({ collation: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                {createCollations.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+            <div className="sm:col-span-2">
+              <button type="button" onClick={createDatabase} disabled={createBusy || !createForm.name.trim()} className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+                {createBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                Create database
+              </button>
+            </div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">SQL Preview</div>
+            <pre className="min-h-[8.5rem] rounded border border-gray-700 bg-primary p-3 text-xs text-gray-200 whitespace-pre-wrap overflow-auto">{createSqlPreview}</pre>
+          </div>
+        </div>
+        {createError && <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{createError}</div>}
+        {createResult?.ok && <div className="mt-3 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-300 text-sm">Created {createResult.database} in {createResult.duration_ms} ms.</div>}
+      </div>
+
+      <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-5xl">
+        <div className="mb-3">
+          <h2 className="text-white font-semibold">Import SQL file</h2>
+          <p className="text-xs text-gray-500 mt-1">Upload a `.sql` dump and import it with the server mysql client.</p>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label className="text-sm text-gray-300">
+              Target
+              <select value={importForm.mode} onChange={(e) => patchImport({ mode: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                <option value="existing">Existing database</option>
+                <option value="new">Create new database</option>
+              </select>
+            </label>
+            {importForm.mode === 'existing' ? (
+              <label className="text-sm text-gray-300">
+                Database
+                <select value={importForm.database} onChange={(e) => patchImport({ database: e.target.value })} disabled={loading} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white disabled:opacity-50">
+                  {databases.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </label>
+            ) : (
+              <label className="text-sm text-gray-300">
+                New database name
+                <input value={importForm.new_database} onChange={(e) => patchImport({ new_database: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" placeholder="import_target" />
+              </label>
+            )}
+            {importForm.mode === 'new' && (
+              <>
+                <label className="text-sm text-gray-300">
+                  Character set
+                  <select value={importForm.charset} onChange={(e) => patchImport({ charset: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                    {DB_CHARSETS.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </label>
+                <label className="text-sm text-gray-300">
+                  Collation
+                  <select value={importForm.collation} onChange={(e) => patchImport({ collation: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                    {importCollations.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </label>
+              </>
+            )}
+            <label className="sm:col-span-2 text-sm text-gray-300">
+              SQL file
+              <input type="file" accept=".sql,application/sql,text/sql,text/plain" onChange={(e) => setImportFile(e.target.files?.[0] || null)} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white file:mr-3 file:border-0 file:rounded file:bg-accent file:px-3 file:py-1.5 file:text-white" />
+            </label>
+            <div className="sm:col-span-2">
+              <button type="button" onClick={importSql} disabled={importBusy || !importFile} className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+                {importBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                {importBusy ? 'Importing...' : 'Import SQL'}
+              </button>
+            </div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">SQL Preview</div>
+            <pre className="min-h-[8.5rem] rounded border border-gray-700 bg-primary p-3 text-xs text-gray-200 whitespace-pre-wrap overflow-auto">
+              {importForm.mode === 'new'
+                ? importCreateSqlPreview
+                : `USE \`${importForm.database || 'database_name'}\`;\n-- then Ascend imports the selected .sql file with mysql`}
+            </pre>
+            {importFile && <div className="mt-2 text-xs text-gray-400">{importFile.name} · {formatBytes(importFile.size)}</div>}
+          </div>
+        </div>
+        {importBusy && (
+          <div className="mt-3 rounded border border-accent/30 bg-accent/10 p-3 text-accent text-sm flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin" /> Uploading and importing SQL. Large dumps can take a few minutes.
+          </div>
+        )}
+        {importError && <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{importError}</div>}
+        {importResult?.ok && (
+          <div className="mt-3 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-300 text-sm">
+            Imported {importResult.filename} into {importResult.database} in {importResult.duration_ms} ms.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function BackupsTab({ connection }) {
   const [backups, setBackups] = useState([])

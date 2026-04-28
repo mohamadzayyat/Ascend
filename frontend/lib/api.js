@@ -162,6 +162,17 @@ export const apiClient = {
   deleteDbConnection: (id) => api.delete(`/api/databases/connections/${id}`),
   testDbConnection: (id) => api.post(`/api/databases/connections/${id}/test`),
   listDatabases: (id) => api.get(`/api/databases/connections/${id}/databases`),
+  createDatabase: (id, data) => api.post(`/api/databases/connections/${id}/databases`, data),
+  importSqlFile: (id, data) => {
+    const form = new FormData()
+    Object.entries(data || {}).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) form.append(key, value)
+    })
+    return api.post(`/api/databases/connections/${id}/import-sql`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 1900000,
+    })
+  },
   listTables: (id, database) =>
     api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
   getDatabaseSchema: (id, database) =>

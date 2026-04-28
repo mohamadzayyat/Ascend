@@ -11,6 +11,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
 from flask_login import current_user, login_required
+from werkzeug.utils import secure_filename
 
 from backend.services.backup_upload import _upload_backup_to_remote
 from backend.services.database_restore import get_restore_job, init_database_restore, start_restore_job
@@ -154,6 +155,19 @@ def _mysqldump_env(conn):
         '--user', conn.username,
     ]
     return env, base_args
+
+
+def _valid_mysql_token(value):
+    return bool(re.fullmatch(r'[A-Za-z0-9_]+', value or ''))
+
+
+def _database_create_sql(name, charset='utf8mb4', collation='utf8mb4_general_ci', if_not_exists=False):
+    charset = (charset or 'utf8mb4').strip()
+    collation = (collation or 'utf8mb4_general_ci').strip()
+    if not _valid_mysql_token(charset) or not _valid_mysql_token(collation):
+        raise ValueError('Invalid character set or collation.')
+    ine = ' IF NOT EXISTS' if if_not_exists else ''
+    return f'CREATE DATABASE{ine} {_qi(name)} CHARACTER SET {charset} COLLATE {collation}'
 
 
 # ── Connection CRUD ─────────────────────────────────────────────
@@ -312,6 +326,148 @@ def api_db_databases_list(conn_id):
         'databases': [n for n in names if n not in hidden],
         'system_databases': [n for n in names if n in hidden],
     })
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/databases', methods=['POST'])
+@login_required
+def api_db_database_create(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    charset = (data.get('charset') or 'utf8mb4').strip()
+    collation = (data.get('collation') or 'utf8mb4_general_ci').strip()
+    if not name:
+        return jsonify({'error': 'Database name is required.'}), 400
+    if len(name) > 64 or not _valid_identifier(name):
+        return jsonify({'error': 'Database name may only contain letters, numbers, _, and $, up to 64 characters.'}), 400
+    try:
+        sql = _database_create_sql(name, charset, collation)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    started = time.time()
+    try:
+        with client.cursor() as cur:
+            cur.execute(sql)
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e), 'sql': sql, 'duration_ms': int((time.time() - started) * 1000)}), 400
+    client.close()
+    return jsonify({
+        'ok': True,
+        'database': name,
+        'sql': sql,
+        'duration_ms': int((time.time() - started) * 1000),
+    }), 201
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/import-sql', methods=['POST'])
+@login_required
+def api_db_import_sql(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    upload = request.files.get('file')
+    if not upload or not upload.filename:
+        return jsonify({'error': 'Choose a .sql file to import.'}), 400
+    original_name = secure_filename(upload.filename) or 'import.sql'
+    if not original_name.lower().endswith('.sql'):
+        return jsonify({'error': 'Only .sql files are supported.'}), 400
+
+    mode = (request.form.get('mode') or 'existing').strip().lower()
+    target = (request.form.get('database') or '').strip()
+    charset = (request.form.get('charset') or 'utf8mb4').strip()
+    collation = (request.form.get('collation') or 'utf8mb4_general_ci').strip()
+    create_first = mode == 'new'
+    if create_first:
+        target = (request.form.get('new_database') or target).strip()
+    if not target:
+        return jsonify({'error': 'Target database is required.'}), 400
+    if len(target) > 64 or not _valid_identifier(target):
+        return jsonify({'error': 'Database name may only contain letters, numbers, _, and $, up to 64 characters.'}), 400
+
+    create_sql = None
+    if create_first:
+        try:
+            create_sql = _database_create_sql(target, charset, collation)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+    import_dir = DB_BACKUPS_ROOT / 'imports'
+    import_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    import_path = import_dir / f'{conn.id}-{ts}-{original_name}'
+    upload.save(import_path)
+
+    started = time.time()
+    try:
+        if create_first:
+            client = _open_mysql(conn, database='')
+            try:
+                with client.cursor() as cur:
+                    cur.execute(create_sql)
+                client.commit()
+            finally:
+                client.close()
+
+        env, base_args = _mysqldump_env(conn)
+        argv = [
+            'mysql', '--no-defaults', *base_args,
+            '--default-character-set=utf8mb4',
+            target,
+        ]
+        with open(import_path, 'rb') as sql_in:
+            proc = subprocess.run(
+                argv,
+                stdin=sql_in,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                timeout=1800,
+            )
+        stdout = (proc.stdout or b'').decode('utf-8', errors='replace').strip()
+        stderr = (proc.stderr or b'').decode('utf-8', errors='replace').strip()
+        if proc.returncode != 0:
+            return jsonify({
+                'error': stderr or f'mysql exited {proc.returncode}',
+                'database': target,
+                'created_database': bool(create_first),
+                'sql': create_sql,
+                'duration_ms': int((time.time() - started) * 1000),
+            }), 400
+        return jsonify({
+            'ok': True,
+            'database': target,
+            'created_database': bool(create_first),
+            'filename': original_name,
+            'stdout': stdout,
+            'stderr': stderr,
+            'sql': create_sql,
+            'duration_ms': int((time.time() - started) * 1000),
+        })
+    except FileNotFoundError:
+        return jsonify({'error': 'mysql client is not installed on this server.'}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Import timed out after 30 minutes.', 'database': target}), 504
+    except Exception as e:
+        return jsonify({'error': str(e), 'database': target}), 500
+    finally:
+        try:
+            import_path.unlink()
+        except OSError:
+            pass
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/tables')
