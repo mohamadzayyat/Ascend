@@ -29,8 +29,8 @@ export function useAuth() {
     dedupingInterval: 60000,
   })
 
-  const login = async (username, password) => {
-    const res = await apiClient.login(username, password)
+  const login = async (username, password, otp = '') => {
+    const res = await apiClient.login(username, password, otp)
     await mutate(res.data, false)
     return res.data
   }

@@ -18,11 +18,18 @@ api.interceptors.response.use(
 
 export const apiClient = {
   // Auth — all JSON endpoints, no CSRF token needed
-  login: (username, password) => api.post('/api/auth/login', { username, password }),
+  login: (username, password, otp = '') => api.post('/api/auth/login', { username, password, otp }),
   logout: () => api.post('/api/auth/logout'),
   setup: (username, password, email) => api.post('/api/auth/setup', { username, password, email }),
   getSetupStatus: () => api.get('/api/setup-status'),
   checkAuth: () => api.get('/api/current-user'),
+  getSecuritySettings: () => api.get('/api/settings/security'),
+  setupTwoFactor: () => api.post('/api/settings/security/2fa/setup'),
+  enableTwoFactor: (code) => api.post('/api/settings/security/2fa/enable', { code }),
+  disableTwoFactor: (password, code) => api.post('/api/settings/security/2fa/disable', { password, code }),
+  getAuditLog: (limit = 250) => api.get('/api/audit-log', { params: { limit } }),
+  clearAuditLog: () => api.delete('/api/audit-log'),
+  getBackupHealth: () => api.get('/api/backups/health'),
 
   // Projects (repo-level)
   getProjects: () => api.get('/api/projects'),

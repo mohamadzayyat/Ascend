@@ -9,6 +9,8 @@ export default function Login() {
   const { initialized } = useSetupStatus()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [otp, setOtp] = useState('')
+  const [needsOtp, setNeedsOtp] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -22,9 +24,14 @@ export default function Login() {
     setLoading(true)
 
     try {
-      await login(username, password)
+      await login(username, password, otp)
       router.push('/dashboard')
     } catch (err) {
+      if (err.response?.data?.two_factor_required) {
+        setNeedsOtp(true)
+        setError(err.response?.data?.error || 'Enter your two-factor code')
+        return
+      }
       setError(err.response?.data?.error || 'Invalid username or password')
     } finally {
       setLoading(false)
@@ -76,6 +83,25 @@ export default function Login() {
                 className="w-full px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
+
+            {needsOtp && (
+              <div>
+                <label htmlFor="otp" className="block text-sm font-medium text-gray-300 mb-2">
+                  Two-factor code
+                </label>
+                <input
+                  id="otp"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="123456"
+                  autoComplete="one-time-code"
+                  className="w-full px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+            )}
 
             {error && (
               <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/50 text-red-400 text-sm">

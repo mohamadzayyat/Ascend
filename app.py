@@ -143,6 +143,7 @@ from backend.models import (
 SHELL_PASSPHRASE_SETTING_KEY = 'shell_passphrase_hash'
 EMAIL_NOTIFY_SETTING_KEY = 'email_notifications_v1'
 BACKUP_UPLOAD_SETTING_KEY = 'backup_upload_v1'
+AUDIT_LOG_SETTING_KEY = 'audit_log_v1'
 
 _EMAIL_NOTIFY_EVENT_DEFAULTS = {
     'backup_success': False,
@@ -203,6 +204,95 @@ def _admin_required():
     if not getattr(current_user, 'is_admin', False):
         return jsonify({'error': 'Admin only.'}), 403
     return None
+
+
+def _json_setting_load(key, default):
+    try:
+        rec = db.session.get(AppSetting, key)
+        if not rec or not rec.value:
+            return default
+        parsed = json.loads(rec.value)
+        if isinstance(default, list):
+            return parsed if isinstance(parsed, list) else default
+        if isinstance(default, dict):
+            return parsed if isinstance(parsed, dict) else default
+        return parsed
+    except Exception:
+        return default
+
+
+def _json_setting_save(key, value):
+    rec = db.session.get(AppSetting, key)
+    if rec is None:
+        rec = AppSetting(key=key, value=json.dumps(value))
+        db.session.add(rec)
+    else:
+        rec.value = json.dumps(value)
+    db.session.commit()
+
+
+def _audit_log(event, status='ok', message='', metadata=None, user=None):
+    try:
+        actor = user if user is not None else (current_user if current_user and not current_user.is_anonymous else None)
+        entry = {
+            'id': f'{datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")}-{secrets.token_hex(3)}',
+            'event': str(event),
+            'status': str(status),
+            'message': str(message or '')[:1000],
+            'metadata': metadata if isinstance(metadata, dict) else {},
+            'user_id': getattr(actor, 'id', None),
+            'username': getattr(actor, 'username', None),
+            'ip': ((request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip() if request else ''),
+            'at': datetime.now(timezone.utc).isoformat(),
+        }
+        rows = _json_setting_load(AUDIT_LOG_SETTING_KEY, [])
+        rows.insert(0, entry)
+        _json_setting_save(AUDIT_LOG_SETTING_KEY, rows[:1000])
+    except Exception as exc:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        print(f'[audit] log failed: {exc}', file=sys.stderr)
+
+
+def _totp_secret_generate():
+    return base64.b32encode(secrets.token_bytes(20)).decode('ascii').rstrip('=')
+
+
+def _totp_secret_normalize(secret):
+    return re.sub(r'[^A-Z2-7]', '', str(secret or '').upper())
+
+
+def _totp_code(secret, for_time=None, interval=30):
+    secret = _totp_secret_normalize(secret)
+    if not secret:
+        return ''
+    padded = secret + ('=' * ((8 - len(secret) % 8) % 8))
+    key = base64.b32decode(padded, casefold=True)
+    counter = int((for_time if for_time is not None else time.time()) // interval)
+    digest = hmac.new(key, struct.pack('>Q', counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return f'{code_int % 1000000:06d}'
+
+
+def _totp_verify(secret, code, window=1):
+    code = re.sub(r'\D', '', str(code or ''))
+    if len(code) != 6:
+        return False
+    now = time.time()
+    return any(hmac.compare_digest(_totp_code(secret, now + (i * 30)), code) for i in range(-window, window + 1))
+
+
+def _user_otp_secret(user):
+    if not user or not user.otp_secret_encrypted:
+        return ''
+    try:
+        return _decrypt_password(user.otp_secret_encrypted)
+    except Exception as exc:
+        print(f'[2fa] could not decrypt OTP secret for user {getattr(user, "id", "?")}: {exc}', file=sys.stderr)
+        return ''
 
 
 # Login Management
@@ -281,6 +371,8 @@ def migrate_schema():
         add_col('backup_schedule', 'at_hour INTEGER DEFAULT 2')
         add_col('backup_schedule', 'schedule_timezone VARCHAR(64)')
         add_col('backup_schedule', "target_database VARCHAR(255) DEFAULT ''")
+        add_col('user', 'otp_secret_encrypted TEXT')
+        add_col('user', 'otp_enabled BOOLEAN DEFAULT 0')
         db.session.commit()
         _migrate_backup_schedule_targets()
 
@@ -351,8 +443,17 @@ def api_login():
 
     user = User.query.filter_by(username=username).first()
     if user and user.check_password(password):
+        if bool(getattr(user, 'otp_enabled', False)):
+            otp = data.get('otp') or data.get('two_factor_code') or ''
+            if not otp:
+                _audit_log('auth.login_2fa_required', 'blocked', f'2FA required for {user.username}', user=user)
+                return jsonify({'error': 'Two-factor code required.', 'two_factor_required': True}), 428
+            if not _totp_verify(_user_otp_secret(user), otp):
+                _audit_log('auth.login_2fa_failed', 'failed', f'Invalid 2FA code for {user.username}', user=user)
+                return jsonify({'error': 'Invalid two-factor code.', 'two_factor_required': True}), 401
         login_user(user, remember=data.get('remember', False))
         ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+        _audit_log('auth.login', 'ok', f'{user.username} signed in', user=user)
         _notify_email_async(
             'panel_login',
             f'Ascend: login - {user.username}',
@@ -363,7 +464,9 @@ def api_login():
             'username': user.username,
             'email': user.email,
             'is_admin': user.is_admin,
+            'two_factor_enabled': bool(getattr(user, 'otp_enabled', False)),
         })
+    _audit_log('auth.login_failed', 'failed', f'Invalid login for {username or "unknown"}', user=user)
     return jsonify({'error': 'Invalid username or password'}), 401
 
 
@@ -371,6 +474,7 @@ def api_login():
 @csrf.exempt
 @login_required
 def api_logout():
+    _audit_log('auth.logout', 'ok', f'{current_user.username} signed out')
     logout_user()
     return jsonify({'status': 'logged out'})
 
@@ -442,10 +546,16 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
+        otp = request.form.get('otp') or ''
         user = User.query.filter_by(username=username).first()
         if user and user.check_password(password):
+            if bool(getattr(user, 'otp_enabled', False)) and not _totp_verify(_user_otp_secret(user), otp):
+                _audit_log('auth.login_2fa_failed', 'failed', f'Invalid/missing 2FA code for {user.username}', user=user)
+                flash('Two-factor code required.', 'error')
+                return render_template('login.html')
             login_user(user, remember=request.form.get('remember'))
             ip = (request.headers.get('X-Forwarded-For') or request.remote_addr or '').split(',')[0].strip()
+            _audit_log('auth.login', 'ok', f'{user.username} signed in', user=user)
             _notify_email_async(
                 'panel_login',
                 f'Ascend: login - {user.username}',
@@ -517,6 +627,7 @@ def api_current_user():
         'username': current_user.username,
         'email': current_user.email,
         'is_admin': current_user.is_admin,
+        'two_factor_enabled': bool(getattr(current_user, 'otp_enabled', False)),
     })
 
 
@@ -585,6 +696,7 @@ def api_settings_email_notifications():
     else:
         rec.value = json.dumps(persist)
     db.session.commit()
+    _audit_log('settings.email_notifications_updated', 'ok', 'Email notification settings updated')
     fresh = _email_notify_settings_load()
     return jsonify(_email_notify_settings_to_api_dict(fresh))
 
@@ -633,6 +745,131 @@ def api_settings_email_notifications_log():
     return jsonify({'items': _email_notify_log_load(limit)})
 
 
+@app.route('/api/settings/security', methods=['GET'])
+@login_required
+def api_settings_security():
+    return jsonify({
+        'two_factor_enabled': bool(getattr(current_user, 'otp_enabled', False)),
+        'username': current_user.username,
+    })
+
+
+@app.route('/api/settings/security/2fa/setup', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_settings_security_2fa_setup():
+    secret = _totp_secret_generate()
+    current_user.otp_secret_encrypted = _encrypt_password(secret)
+    current_user.otp_enabled = False
+    db.session.commit()
+    issuer = 'Ascend'
+    label = f'{issuer}:{current_user.username}'
+    otpauth = (
+        f'otpauth://totp/{label}?'
+        f'secret={secret}&issuer={issuer}&algorithm=SHA1&digits=6&period=30'
+    )
+    _audit_log('security.2fa_setup_started', 'ok', '2FA setup secret generated')
+    return jsonify({'secret': secret, 'otpauth_uri': otpauth})
+
+
+@app.route('/api/settings/security/2fa/enable', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_settings_security_2fa_enable():
+    data = request.get_json(silent=True) or {}
+    secret = _user_otp_secret(current_user)
+    if not secret:
+        return jsonify({'error': 'Start 2FA setup first.'}), 400
+    if not _totp_verify(secret, data.get('code') or ''):
+        _audit_log('security.2fa_enable_failed', 'failed', 'Invalid 2FA setup code')
+        return jsonify({'error': 'Invalid authenticator code.'}), 400
+    current_user.otp_enabled = True
+    db.session.commit()
+    _audit_log('security.2fa_enabled', 'ok', '2FA enabled')
+    return jsonify({'ok': True, 'two_factor_enabled': True})
+
+
+@app.route('/api/settings/security/2fa/disable', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_settings_security_2fa_disable():
+    data = request.get_json(silent=True) or {}
+    if not current_user.check_password(data.get('password') or ''):
+        _audit_log('security.2fa_disable_failed', 'failed', 'Invalid password while disabling 2FA')
+        return jsonify({'error': 'Password is incorrect.'}), 400
+    secret = _user_otp_secret(current_user)
+    if current_user.otp_enabled and secret and not _totp_verify(secret, data.get('code') or ''):
+        _audit_log('security.2fa_disable_failed', 'failed', 'Invalid 2FA code while disabling 2FA')
+        return jsonify({'error': 'Invalid authenticator code.'}), 400
+    current_user.otp_enabled = False
+    current_user.otp_secret_encrypted = None
+    db.session.commit()
+    _audit_log('security.2fa_disabled', 'ok', '2FA disabled')
+    return jsonify({'ok': True, 'two_factor_enabled': False})
+
+
+@app.route('/api/audit-log', methods=['GET', 'DELETE'])
+@csrf.exempt
+@login_required
+def api_audit_log():
+    err = _admin_required()
+    if err:
+        return err
+    if request.method == 'DELETE':
+        _json_setting_save(AUDIT_LOG_SETTING_KEY, [])
+        return jsonify({'ok': True, 'items': []})
+    try:
+        limit = max(1, min(int(request.args.get('limit', 250)), 1000))
+    except (TypeError, ValueError):
+        limit = 250
+    return jsonify({'items': _json_setting_load(AUDIT_LOG_SETTING_KEY, [])[:limit]})
+
+
+def _backup_health_status(last_backup, enabled_schedules):
+    if not last_backup:
+        return 'warning' if enabled_schedules else 'idle'
+    if last_backup.status == 'failed':
+        return 'failed'
+    if last_backup.status == 'pending':
+        return 'running'
+    if last_backup.completed_at:
+        age_hours = (datetime.now(timezone.utc) - (last_backup.completed_at.replace(tzinfo=timezone.utc) if last_backup.completed_at.tzinfo is None else last_backup.completed_at)).total_seconds() / 3600
+        if enabled_schedules and age_hours > 30:
+            return 'stale'
+    return 'healthy'
+
+
+@app.route('/api/backups/health')
+@login_required
+def api_backup_health():
+    rows = []
+    conns = DatabaseConnection.query.filter_by(user_id=current_user.id).order_by(DatabaseConnection.name.asc()).all()
+    for conn in conns:
+        backups = BackupArchive.query.filter_by(connection_id=conn.id).order_by(BackupArchive.started_at.desc()).limit(20).all()
+        last = backups[0] if backups else None
+        schedules = BackupSchedule.query.filter_by(connection_id=conn.id).all()
+        enabled = [s for s in schedules if s.enabled]
+        failed_count = sum(1 for b in backups if b.status == 'failed')
+        success_count = sum(1 for b in backups if b.status == 'success')
+        latest_schedule = None
+        if schedules:
+            latest_schedule = max(schedules, key=lambda s: s.updated_at or s.created_at or datetime.min)
+        rows.append({
+            'connection': conn.to_dict(),
+            'status': _backup_health_status(last, enabled),
+            'last_backup': last.to_dict() if last else None,
+            'recent_success_count': success_count,
+            'recent_failed_count': failed_count,
+            'schedule_count': len(schedules),
+            'enabled_schedule_count': len(enabled),
+            'last_schedule_status': latest_schedule.last_run_status if latest_schedule else None,
+            'last_schedule_error': latest_schedule.last_run_error if latest_schedule else None,
+            'last_schedule_run_at': iso_utc(latest_schedule.last_run_at) if latest_schedule else None,
+            'total_success_size_bytes': sum((b.size_bytes or 0) for b in backups if b.status == 'success'),
+        })
+    return jsonify({'items': rows})
+
+
 @app.route('/api/settings/backup-upload', methods=['GET', 'PUT'])
 @csrf.exempt
 @login_required
@@ -668,6 +905,7 @@ def api_settings_backup_upload():
     else:
         rec.value = json.dumps(persist)
     db.session.commit()
+    _audit_log('settings.backup_upload_updated', 'ok', 'Remote backup upload settings updated')
     return jsonify(_backup_upload_settings_to_api_dict(_backup_upload_settings_load()))
 
 
@@ -690,6 +928,7 @@ def api_settings_backup_upload_test():
         tmp.close()
         target = _upload_backup_to_remote(tmp.name, f'ascend-upload-test-{int(time.time())}.txt')
     except Exception as e:
+        _audit_log('backup_upload.test', 'failed', str(e))
         return jsonify({'error': str(e)}), 502
     finally:
         if tmp is not None:
@@ -697,6 +936,7 @@ def api_settings_backup_upload_test():
                 os.unlink(tmp.name)
             except OSError:
                 pass
+    _audit_log('backup_upload.test', 'ok', 'Remote backup upload test succeeded', {'uploaded_to': target})
     return jsonify({'ok': True, 'uploaded_to': target})
 
 
@@ -736,6 +976,7 @@ def api_create_project():
     )
     db.session.add(project)
     db.session.commit()
+    _audit_log('project.created', 'ok', f'Project created: {project.name}', {'project_id': project.id})
 
     _notify_email_async(
         'project_created',
@@ -786,6 +1027,7 @@ def api_update_project(project_id):
 
     project.updated_at = datetime.now(timezone.utc)
     db.session.commit()
+    _audit_log('project.updated', 'ok', f'Project updated: {project.name}', {'project_id': project.id})
 
     webhook_result = None
     if project.auto_deploy or prev_auto_deploy or 'enable_webhook' in data:
@@ -814,6 +1056,7 @@ def api_delete_project(project_id):
 
     db.session.delete(project)
     db.session.commit()
+    _audit_log('project.deleted', 'ok', f'Project deleted: {pname}', {'folder': pfolder})
     _notify_email_async(
         'project_deleted',
         f'Ascend: project deleted — {pname}',
@@ -1080,6 +1323,7 @@ def api_create_app(project_id):
         new_app.pm2_name = f"{project.folder_name}-{re.sub(r'[^a-zA-Z0-9_-]+', '-', name.lower())}"
     db.session.add(new_app)
     db.session.commit()
+    _audit_log('app.created', 'ok', f'App created: {project.name} / {new_app.name}', {'project_id': project.id, 'app_id': new_app.id})
     return jsonify(new_app.to_dict()), 201
 
 
@@ -1118,6 +1362,7 @@ def api_update_app(app_id):
         setattr(a, k, v)
     a.updated_at = datetime.now(timezone.utc)
     db.session.commit()
+    _audit_log('app.updated', 'ok', f'App updated: {a.project.name} / {a.name}', {'project_id': a.project_id, 'app_id': a.id})
     return jsonify(a.to_dict())
 
 
@@ -1141,6 +1386,7 @@ def api_delete_app(app_id):
 
     db.session.delete(a)
     db.session.commit()
+    _audit_log('app.deleted', 'ok', f'App deleted: {proj_name} / {app_name}')
     _notify_email_async(
         'app_deleted',
         f'Ascend: app deleted — {proj_name} / {app_name}',
@@ -1174,6 +1420,7 @@ def api_deploy_app(app_id):
     db.session.add(deployment)
     a.status = 'deploying'
     db.session.commit()
+    _audit_log('deployment.started', 'ok', f'Deployment started: {a.project.name} / {a.name}', {'deployment_id': deployment.id, 'app_id': a.id})
 
     threading.Thread(
         target=deploy_app_bg,
@@ -1224,6 +1471,7 @@ def api_retry_app_ssl(app_id):
     )
     db.session.add(dep)
     db.session.commit()
+    _audit_log('ssl_retry.started', 'ok', f'SSL retry started: {a.project.name} / {a.name}', {'deployment_id': dep.id, 'app_id': a.id})
 
     threading.Thread(target=retry_app_ssl_bg, args=(dep.id,), daemon=True).start()
     return jsonify({'id': dep.id, 'status': 'pending'})
@@ -1254,6 +1502,7 @@ def api_restart_app(app_id):
     )
     db.session.add(dep)
     db.session.commit()
+    _audit_log('app.restart_started', 'ok', f'Restart started: {a.project.name} / {a.name}', {'deployment_id': dep.id, 'app_id': a.id})
 
     threading.Thread(target=restart_app_bg, args=(dep.id,), daemon=True).start()
     return jsonify({'id': dep.id, 'status': 'pending'})
@@ -1295,6 +1544,7 @@ def api_deploy(project_id):
         ).start()
         deployment_ids.append(dep.id)
 
+    _audit_log('project.deploy_started', 'ok', f'Deploy all started: {project.name}', {'project_id': project.id, 'deployment_ids': deployment_ids})
     return jsonify({'deployment_ids': deployment_ids, 'status': 'pending'})
 
 
