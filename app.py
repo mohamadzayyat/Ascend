@@ -974,7 +974,11 @@ def api_update_start():
     log_path = _update_log_path()
     LOG_DIR.mkdir(exist_ok=True)
     unit = f'ascend-update-{int(time.time())}'
-    cmd = f'cd {shlex.quote(str(BASE_DIR))} && ASCEND_PANEL_UPDATE=1 bash {shlex.quote(str(script))} > {shlex.quote(str(log_path))} 2>&1'
+    cmd = (
+        f'cd {shlex.quote(str(BASE_DIR))} && '
+        f'TERM=${{TERM:-dumb}} DEBIAN_FRONTEND=noninteractive ASCEND_PANEL_UPDATE=1 '
+        f'bash {shlex.quote(str(script))} > {shlex.quote(str(log_path))} 2>&1'
+    )
     state = {
         'started_at': datetime.now(timezone.utc).isoformat(),
         'started_by': current_user.username,

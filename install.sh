@@ -912,7 +912,9 @@ print_summary() {
 # ── Main ─────────────────────────────────────────────────────────
 
 main() {
-    clear
+    if [[ -t 1 && -n "${TERM:-}" && "${TERM:-}" != "dumb" ]]; then
+        clear
+    fi
     banner
 
     check_root
