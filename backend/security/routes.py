@@ -1,6 +1,8 @@
 import json
 import os
+import ipaddress
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -172,6 +174,165 @@ def _crowdsec_decisions():
     return {'available': True, 'items': items, 'error': ''}
 
 
+def _valid_public_ip(value):
+    try:
+        ip = ipaddress.ip_address(str(value))
+        return not (ip.is_private or ip.is_loopback or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+    except ValueError:
+        return False
+
+
+def _parse_ssh_failure_line(line):
+    patterns = [
+        r'Failed password for invalid user (?P<user>\S+) from (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+) ssh2',
+        r'Failed password for (?P<user>\S+) from (?P<ip>[0-9a-fA-F:.]+) port (?P<port>\d+) ssh2',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, line)
+        if m:
+            item = m.groupdict()
+            item['raw'] = line
+            item['at'] = line[:15].strip() if len(line) >= 15 else ''
+            return item
+    return None
+
+
+def _ssh_failed_logins(limit=500):
+    limit = max(50, min(int(limit or 500), 2000))
+    commands = [
+        ['journalctl', '-u', 'ssh', '-u', 'sshd', '--since', '24 hours ago', '--no-pager', '-n', str(limit * 3)],
+    ]
+    lines = []
+    errors = []
+    for cmd in commands:
+        if shutil.which(cmd[0]) is None:
+            continue
+        rc, out, err = _run(cmd, timeout=10)
+        if rc == 0 and out:
+            lines.extend(out.splitlines())
+            break
+        if err:
+            errors.append(err)
+    if not lines:
+        for path in (Path('/var/log/auth.log'), Path('/var/log/secure')):
+            if path.exists():
+                try:
+                    lines = path.read_text(encoding='utf-8', errors='replace').splitlines()[-limit * 3:]
+                    break
+                except Exception as exc:
+                    errors.append(str(exc))
+
+    events = []
+    summary = {}
+    for line in lines:
+        if 'Failed password' not in line:
+            continue
+        item = _parse_ssh_failure_line(line)
+        if not item:
+            continue
+        ip = item['ip']
+        if not _valid_public_ip(ip):
+            continue
+        events.append(item)
+        row = summary.setdefault(ip, {
+            'ip': ip,
+            'count': 0,
+            'users': {},
+            'first_seen': item.get('at') or '',
+            'last_seen': item.get('at') or '',
+            'latest_raw': item.get('raw') or '',
+        })
+        row['count'] += 1
+        row['users'][item.get('user') or 'unknown'] = row['users'].get(item.get('user') or 'unknown', 0) + 1
+        row['last_seen'] = item.get('at') or row['last_seen']
+        row['latest_raw'] = item.get('raw') or row['latest_raw']
+    top = sorted(summary.values(), key=lambda r: r['count'], reverse=True)
+    for row in top:
+        row['users'] = [{'user': k, 'count': v} for k, v in sorted(row['users'].items(), key=lambda kv: kv[1], reverse=True)]
+    return {
+        'events': events[-limit:][::-1],
+        'summary': top[:100],
+        'total': len(events),
+        'errors': errors[:3],
+        'window': '24 hours',
+    }
+
+
+def _crowdsec_add_block(ip, duration='24h', reason='manual ssh brute-force block from Ascend'):
+    cscli = shutil.which('cscli')
+    if not cscli:
+        return False, 'cscli is not installed.'
+    if not _valid_public_ip(ip):
+        return False, 'Only public IP addresses can be blocked.'
+    duration = re.sub(r'[^0-9smhdw]', '', str(duration or '24h')) or '24h'
+    reason = str(reason or 'manual block from Ascend')[:160]
+    cmd = [cscli, 'decisions', 'add', '--ip', ip, '--duration', duration, '--reason', reason]
+    rc, out, err = _run(cmd, timeout=12)
+    if rc != 0:
+        return False, err or out or 'Could not add CrowdSec decision.'
+    return True, out or 'Decision added.'
+
+
+def _auto_block_ssh_repeat_attackers():
+    state = _load_json(STATE_PATH, {})
+    config = state.get('auto_ssh_block') if isinstance(state.get('auto_ssh_block'), dict) else {}
+    enabled = config.get('enabled', True)
+    threshold = max(2, min(int(config.get('threshold') or 5), 100))
+    duration = str(config.get('duration') or '24h')
+    result = {
+        'enabled': bool(enabled),
+        'threshold': threshold,
+        'duration': duration,
+        'blocked': [],
+        'failed': [],
+        'skipped': '',
+        'checked_at': _now(),
+    }
+    if not enabled:
+        result['skipped'] = 'Automatic SSH blocking is disabled.'
+        state['auto_ssh_block_last'] = result
+        _write_json(STATE_PATH, state)
+        return result
+    if shutil.which('cscli') is None:
+        result['skipped'] = 'CrowdSec is not installed.'
+        state['auto_ssh_block_last'] = result
+        _write_json(STATE_PATH, state)
+        return result
+
+    failures = _ssh_failed_logins(2000)
+    decisions = _crowdsec_decisions().get('items') or []
+    already = {str(d.get('value')) for d in decisions if d.get('value')}
+    recently_blocked = state.get('auto_ssh_block_recent') if isinstance(state.get('auto_ssh_block_recent'), dict) else {}
+    current_keys = set()
+    for row in failures.get('summary') or []:
+        ip = row.get('ip')
+        count = int(row.get('count') or 0)
+        if not ip or count < threshold:
+            continue
+        current_keys.add(ip)
+        if ip in already:
+            continue
+        if recently_blocked.get(ip) == row.get('latest_raw'):
+            continue
+        ok, message = _crowdsec_add_block(ip, duration, f'automatic ssh brute-force block: {count} failed logins in 24h')
+        if ok:
+            result['blocked'].append({'ip': ip, 'count': count, 'message': message})
+            recently_blocked[ip] = row.get('latest_raw') or _now()
+        else:
+            result['failed'].append({'ip': ip, 'count': count, 'error': message})
+    state['auto_ssh_block_recent'] = {ip: marker for ip, marker in recently_blocked.items() if ip in current_keys}
+    state['auto_ssh_block_last'] = result
+    _write_json(STATE_PATH, state)
+    if result['blocked'] or result['failed']:
+        _audit_log(
+            'security.ssh_auto_block',
+            'ok' if not result['failed'] else 'failed',
+            f'Automatic SSH blocker blocked {len(result["blocked"])} IP(s)',
+            result,
+        )
+    return result
+
+
 def _scan_paths():
     candidates = [
         {'key': 'web_roots', 'label': 'Web roots', 'path': '/var/www'},
@@ -184,6 +345,8 @@ def _scan_paths():
 
 
 def _current_status():
+    state = _load_json(STATE_PATH, {})
+    auto_ssh_block = _auto_block_ssh_repeat_attackers()
     state = _load_json(STATE_PATH, {})
     clamscan = _tool_version('clamscan', ['--version'])
     freshclam = _tool_version('freshclam', ['--version'])
@@ -207,6 +370,7 @@ def _current_status():
             'definitions': _freshclam_status(),
         },
         'state': state,
+        'auto_ssh_block': auto_ssh_block,
         'scan_paths': _scan_paths(),
         'logs': {
             'scan': str(SCAN_LOG_PATH),
@@ -378,6 +542,64 @@ def api_security_crowdsec_decision_delete():
         return jsonify({'error': err or out or 'Could not delete CrowdSec decision.'}), 500
     _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed: {value or decision_id}', {'id': decision_id, 'value': value})
     return jsonify({'message': 'CrowdSec decision removed.', 'output': out})
+
+
+@bp.route('/api/security/ssh-failures')
+@login_required
+def api_security_ssh_failures():
+    limit = request.args.get('limit', 500)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 500
+    return jsonify(_ssh_failed_logins(limit))
+
+
+@bp.route('/api/security/crowdsec/block', methods=['POST'])
+@login_required
+def api_security_crowdsec_block():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    ip = str(data.get('ip') or '').strip()
+    duration = str(data.get('duration') or '24h').strip()
+    reason = str(data.get('reason') or 'manual ssh brute-force block from Ascend').strip()
+    ok, message = _crowdsec_add_block(ip, duration, reason)
+    if not ok:
+        return jsonify({'error': message}), 400
+    _audit_log('security.crowdsec_ip_blocked', 'ok', f'CrowdSec block added: {ip}', {'ip': ip, 'duration': duration, 'reason': reason})
+    return jsonify({'message': f'{ip} blocked for {duration}.', 'output': message})
+
+
+@bp.route('/api/security/ssh-failures/block-repeat', methods=['POST'])
+@login_required
+def api_security_ssh_failures_block_repeat():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    try:
+        threshold = max(2, min(int(data.get('threshold') or 5), 100))
+    except (TypeError, ValueError):
+        threshold = 5
+    duration = str(data.get('duration') or '24h').strip()
+    failures = _ssh_failed_logins(2000)
+    decisions = _crowdsec_decisions().get('items') or []
+    already = {str(d.get('value')) for d in decisions if d.get('value')}
+    blocked = []
+    failed = []
+    for row in failures.get('summary') or []:
+        ip = row.get('ip')
+        if not ip or ip in already or int(row.get('count') or 0) < threshold:
+            continue
+        ok, message = _crowdsec_add_block(ip, duration, f'ssh brute-force: {row.get("count")} failed logins in 24h')
+        if ok:
+            blocked.append({'ip': ip, 'count': row.get('count'), 'message': message})
+        else:
+            failed.append({'ip': ip, 'count': row.get('count'), 'error': message})
+    _audit_log('security.ssh_repeat_blocked', 'ok' if not failed else 'failed', f'Blocked {len(blocked)} repeat SSH attacker(s)', {'blocked': blocked, 'failed': failed, 'threshold': threshold, 'duration': duration})
+    return jsonify({'message': f'Blocked {len(blocked)} repeat SSH attacker(s).', 'blocked': blocked, 'failed': failed, 'threshold': threshold})
 
 
 @bp.route('/api/security/repair', methods=['POST'])

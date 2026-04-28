@@ -144,6 +144,7 @@ export default function SecurityPage() {
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [sshFailures, setSshFailures] = useState({ summary: [], events: [], total: 0, errors: [] })
 
   const state = status?.state || {}
   const tools = status?.tools || {}
@@ -153,6 +154,7 @@ export default function SecurityPage() {
   const findings = state.findings || scan.findings || []
   const quarantineItems = state.quarantine || []
   const crowdsecDecisions = tools.crowdsec_decisions?.items || []
+  const autoSshBlock = status?.auto_ssh_block || state.auto_ssh_block_last || {}
   const scanRunning = ['starting', 'running'].includes(scan.status)
   const installRunning = ['starting', 'running'].includes(install.status)
   const crowdsecInstallRunning = ['starting', 'running'].includes(crowdsecInstall.status)
@@ -186,7 +188,17 @@ export default function SecurityPage() {
     }
   }
 
+  const loadSshFailures = async () => {
+    try {
+      const { data } = await apiClient.getSshFailures(500)
+      setSshFailures(data || { summary: [], events: [], total: 0, errors: [] })
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load SSH failures')
+    }
+  }
+
   useEffect(() => { load() }, [logKind])
+  useEffect(() => { if (activeTab === 'ip') loadSshFailures() }, [activeTab])
   useEffect(() => {
     if (!scanRunning && !installRunning && !crowdsecInstallRunning) return undefined
     const timer = setInterval(() => load({ quiet: true }), 2500)
@@ -269,6 +281,38 @@ export default function SecurityPage() {
       await load({ quiet: true })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to remove CrowdSec decision')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const blockIp = async (ip, count = 0) => {
+    if (!window.confirm(`Block ${ip} with CrowdSec for 24 hours?`)) return
+    setBusy(`block-${ip}`)
+    setError('')
+    setMessage('')
+    try {
+      const { data } = await apiClient.blockCrowdSecIp(ip, '24h', `manual ssh brute-force block: ${count} failed logins`)
+      setMessage(data.message || `${ip} blocked.`)
+      await Promise.all([load({ quiet: true }), loadSshFailures()])
+    } catch (e) {
+      setError(e.response?.data?.error || `Failed to block ${ip}`)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const blockRepeatAttackers = async () => {
+    if (!window.confirm('Block all public IPs with 5 or more failed SSH logins in the last 24 hours?')) return
+    setBusy('block-repeat-ssh')
+    setError('')
+    setMessage('')
+    try {
+      const { data } = await apiClient.blockRepeatSshAttackers(5, '24h')
+      setMessage(data.message || 'Repeat SSH attackers blocked.')
+      await Promise.all([load({ quiet: true }), loadSshFailures()])
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to block repeat SSH attackers')
     } finally {
       setBusy('')
     }
@@ -433,6 +477,22 @@ export default function SecurityPage() {
                 <StatusRow title="Firewall bouncer" ok={bouncerOk} detail={`Service: ${tools.crowdsec_firewall_bouncer_service?.active || 'unknown'}`} action="Repair" busy={busy === 'crowdsec_bouncer_restart'} onAction={() => runFix('crowdsec_bouncer_restart')} />
                 <StatusRow title="Nginx/SSH collections" ok={crowdsecInstalled} detail="Installs core Linux, SSH, and Nginx detection collections." action="Apply" busy={busy === 'crowdsec_collections'} onAction={() => runFix('crowdsec_collections')} />
               </div>
+              <section className="rounded-lg border border-gray-700 bg-secondary p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-white font-semibold">Automatic SSH brute-force blocking</h2>
+                    <p className="text-gray-400 text-sm mt-1">
+                      Public IPs with {autoSshBlock.threshold || 5}+ failed SSH logins in 24 hours are blocked for {autoSshBlock.duration || '24h'}.
+                    </p>
+                    {autoSshBlock.skipped && <p className="text-yellow-200 text-sm mt-2">{autoSshBlock.skipped}</p>}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge value={autoSshBlock.enabled === false ? 'disabled' : 'enabled'} tone={autoSshBlock.enabled === false ? 'yellow' : 'green'} />
+                    <Badge value={`${autoSshBlock.blocked?.length || 0} blocked last check`} tone={(autoSshBlock.blocked?.length || 0) ? 'red' : 'gray'} />
+                    {autoSshBlock.checked_at && <Badge value={new Date(autoSshBlock.checked_at).toLocaleTimeString()} tone="blue" />}
+                  </div>
+                </div>
+              </section>
               <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
                 <div className="px-5 py-4 border-b border-gray-700">
                   <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Ban className="w-5 h-5 text-accent" /> Active IP Blocks</h2>
@@ -444,6 +504,51 @@ export default function SecurityPage() {
                     <table className="w-full text-sm text-left min-w-[900px]">
                       <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked value</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Origin</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
                       <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${item.id || item.value}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value || <span className="text-yellow-200">Decision #{item.id}</span>}</td><td className="px-4 py-3 text-gray-300">{item.scope || item.type || '-'}</td><td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td><td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td><td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${item.value || item.id}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+              <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-700 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-white font-semibold text-lg">Recent SSH Failures</h2>
+                    <p className="text-gray-500 text-sm mt-1">Last 24 hours from journald/auth logs. Repeat public IPs can be blocked immediately with CrowdSec.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={loadSshFailures} className="px-3 py-2 border border-gray-600 rounded text-white text-sm inline-flex items-center gap-2 hover:bg-primary">
+                      <RefreshCw className="w-4 h-4" /> Reload
+                    </button>
+                    <button onClick={blockRepeatAttackers} disabled={busy === 'block-repeat-ssh' || !crowdsecInstalled} className="px-3 py-2 bg-accent rounded text-white text-sm inline-flex items-center gap-2 hover:bg-blue-600 disabled:opacity-50">
+                      {busy === 'block-repeat-ssh' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />}
+                      Block repeat attackers
+                    </button>
+                  </div>
+                </div>
+                {sshFailures.errors?.length > 0 && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{sshFailures.errors.join(' | ')}</div>}
+                <div className="px-5 py-3 text-sm text-gray-400 border-b border-gray-700">{sshFailures.total || 0} failed SSH login event(s), {sshFailures.summary?.length || 0} public source IP(s)</div>
+                {!sshFailures.summary?.length ? <div className="p-8 text-center text-gray-500 text-sm">No failed SSH logins found in the current window.</div> : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left min-w-[900px]">
+                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Source IP</th><th className="px-4 py-3">Failures</th><th className="px-4 py-3">Top users</th><th className="px-4 py-3">Last seen</th><th className="px-4 py-3">Latest log</th><th className="px-4 py-3"></th></tr></thead>
+                      <tbody className="divide-y divide-gray-700/70">{sshFailures.summary.map((row) => {
+                        const alreadyBlocked = crowdsecDecisions.some((d) => d.value === row.ip)
+                        return (
+                          <tr key={row.ip}>
+                            <td className="px-4 py-3 text-white font-mono">{row.ip}</td>
+                            <td className="px-4 py-3"><Badge value={row.count} tone={row.count >= 5 ? 'red' : 'yellow'} /></td>
+                            <td className="px-4 py-3 text-gray-300">{(row.users || []).slice(0, 3).map((u) => `${u.user} (${u.count})`).join(', ') || '-'}</td>
+                            <td className="px-4 py-3 text-gray-400">{row.last_seen || '-'}</td>
+                            <td className="px-4 py-3 text-gray-500 font-mono text-xs max-w-md truncate">{row.latest_raw || '-'}</td>
+                            <td className="px-4 py-3 text-right">
+                              {alreadyBlocked ? <Badge value="blocked" tone="green" /> : (
+                                <button onClick={() => blockIp(row.ip, row.count)} disabled={busy === `block-${row.ip}` || !crowdsecInstalled} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">
+                                  {busy === `block-${row.ip}` ? 'Blocking...' : 'Block'}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}</tbody>
                     </table>
                   </div>
                 )}
