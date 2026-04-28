@@ -40,6 +40,7 @@ export default function NewApp() {
   const [phpInstallStatus, setPhpInstallStatus] = useState(null)
   const [phpInstallError, setPhpInstallError] = useState('')
   const [phpInstalling, setPhpInstalling] = useState(false)
+  const [subdirCheck, setSubdirCheck] = useState({ status: 'idle', message: '' })
 
   const onChange = (e) => {
     const { name, value, type, checked } = e.target
@@ -89,6 +90,28 @@ export default function NewApp() {
   useEffect(() => {
     if (projectId && formData.app_type !== 'php') suggestPort()
   }, [projectId, formData.app_type]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const path = formData.subdirectory.trim()
+    if (!projectId || !path) {
+      setSubdirCheck({ status: 'idle', message: '' })
+      return undefined
+    }
+    let cancelled = false
+    setSubdirCheck({ status: 'checking', message: 'Checking repository path...' })
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiClient.checkProjectSubdirectory(projectId, path, project?.github_branch)
+        if (!cancelled) setSubdirCheck({ status: 'ok', message: `Found ${res.data.path} on ${res.data.source}.` })
+      } catch (err) {
+        if (!cancelled) setSubdirCheck({ status: 'error', message: err.response?.data?.error || 'Subdirectory was not found.' })
+      }
+    }, 500)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [projectId, project?.github_branch, formData.subdirectory])
 
   useEffect(() => {
     if (formData.app_type !== 'php') return
@@ -304,6 +327,11 @@ export default function NewApp() {
               ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
             ])}
             {input('Subdirectory', 'subdirectory', 'text', 'apps/api', 'Relative path inside the repo. Leave empty for root.')}
+            {subdirCheck.status !== 'idle' && (
+              <p className={`text-xs ${subdirCheck.status === 'ok' ? 'text-green-400' : subdirCheck.status === 'checking' ? 'text-yellow-400' : 'text-red-400'}`}>
+                {subdirCheck.message}
+              </p>
+            )}
           </div>
         </div>
 
@@ -383,7 +411,7 @@ export default function NewApp() {
         <div className="flex gap-3">
           <button
             type="submit"
-            disabled={loading || !formData.name || dnsStatus === 'checking' || dnsStatus === 'error'}
+            disabled={loading || !formData.name || dnsStatus === 'checking' || dnsStatus === 'error' || subdirCheck.status === 'checking' || subdirCheck.status === 'error'}
             className="px-6 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Creating…' : 'Create App'}

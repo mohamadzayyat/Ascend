@@ -42,6 +42,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import dotenv
 from urllib import request as _urlreq, error as _urlerr
+from urllib.parse import quote as _urlquote
 from backend.extensions import db
 from backend.services.backup_upload import (
     init_backup_upload,
@@ -1945,7 +1946,42 @@ def _app_fields_from_dict(data, allow_all=True):
         if '..' in public_path.split('/') or public_path.startswith(('/', '\\')):
             raise ValueError('PHP public path must be relative to the app directory')
         out['php_public_path'] = public_path or 'public'
+    if out.get('subdirectory'):
+        subdir = str(out['subdirectory']).strip().strip('/\\')
+        parts = [p for p in re.split(r'[/\\]+', subdir) if p]
+        if any(p in ('.', '..') for p in parts) or not all(re.fullmatch(r'[A-Za-z0-9._-]+', p) for p in parts):
+            raise ValueError('Subdirectory must be a safe relative path inside the repo.')
+        out['subdirectory'] = '/'.join(parts)
     return out
+
+
+def _check_project_subdirectory(project, subdirectory, branch=None):
+    subdirectory = (subdirectory or '').strip().strip('/\\')
+    if not subdirectory:
+        return {'ok': True, 'path': '', 'source': 'root'}
+    try:
+        normalized = _app_fields_from_dict({'subdirectory': subdirectory}).get('subdirectory') or ''
+    except ValueError as exc:
+        return {'ok': False, 'path': subdirectory, 'error': str(exc)}
+
+    local = DEPLOYMENTS_DIR / project.folder_name / normalized
+    if local.exists() and local.is_dir():
+        return {'ok': True, 'path': normalized, 'source': 'local'}
+
+    cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
+    if not cred:
+        return {'ok': False, 'path': normalized, 'error': 'No GitHub credentials configured to verify this subdirectory.'}
+    owner, repo = _parse_github_repo(project.github_url)
+    if not owner or not repo:
+        return {'ok': False, 'path': normalized, 'error': 'Could not parse the project GitHub URL.'}
+    ref = _normalize_deploy_branch(project, branch)
+    encoded_path = '/'.join(_urlquote(part, safe='') for part in normalized.split('/'))
+    status, resp = _github_api('GET', f'/repos/{owner}/{repo}/contents/{encoded_path}?ref={_urlquote(ref, safe="")}', cred.token, timeout=15)
+    if status == 200 and isinstance(resp, dict) and resp.get('type') == 'dir':
+        return {'ok': True, 'path': normalized, 'source': 'github', 'branch': ref}
+    if status == 404:
+        return {'ok': False, 'path': normalized, 'branch': ref, 'error': f'Subdirectory "{normalized}" was not found on branch {ref}.'}
+    return {'ok': False, 'path': normalized, 'branch': ref, 'error': (resp or {}).get('message') or f'GitHub check failed ({status}).'}
 
 
 @app.route('/api/project/<int:project_id>/apps', methods=['GET'])
@@ -1986,6 +2022,10 @@ def api_create_app(project_id):
         dns_error = _domain_validation_response(fields['domain'])
         if dns_error:
             return dns_error
+    if fields.get('subdirectory'):
+        subdir_check = _check_project_subdirectory(project, fields.get('subdirectory'))
+        if not subdir_check.get('ok'):
+            return jsonify({'error': subdir_check.get('error') or 'Subdirectory does not exist.', 'subdirectory_check': subdir_check}), 400
 
     new_app = App(project_id=project.id, name=name)
     for k, v in fields.items():
@@ -2035,6 +2075,10 @@ def api_update_app(app_id):
         dns_error = _domain_validation_response(next_domain)
         if dns_error:
             return dns_error
+    if 'subdirectory' in fields and fields.get('subdirectory'):
+        subdir_check = _check_project_subdirectory(a.project, fields.get('subdirectory'))
+        if not subdir_check.get('ok'):
+            return jsonify({'error': subdir_check.get('error') or 'Subdirectory does not exist.', 'subdirectory_check': subdir_check}), 400
 
     for k, v in fields.items():
         setattr(a, k, v)
@@ -2390,6 +2434,18 @@ def api_project_branches(project_id):
     if default_branch and default_branch not in branches:
         branches.insert(0, default_branch)
     return jsonify({'branches': branches, 'default_branch': default_branch})
+
+
+@app.route('/api/project/<int:project_id>/subdirectory-check', methods=['GET'])
+@login_required
+def api_project_subdirectory_check(project_id):
+    project = Project.query.get_or_404(project_id)
+    if project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    subdirectory = (request.args.get('path') or '').strip()
+    branch = (request.args.get('branch') or project.github_branch or 'main').strip()
+    result = _check_project_subdirectory(project, subdirectory, branch)
+    return jsonify(result), (200 if result.get('ok') else 404)
 
 
 def _sync_github_webhook(project):

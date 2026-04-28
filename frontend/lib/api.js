@@ -46,6 +46,8 @@ export const apiClient = {
   deleteProject: (id, confirmText) => api.delete(`/api/project/${id}`, { data: { confirm_text: confirmText } }),
   syncProjectWebhook: (id) => api.post(`/api/project/${id}/github-webhook/sync`),
   listProjectBranches: (id) => api.get(`/api/project/${id}/branches`),
+  checkProjectSubdirectory: (id, path, branch) =>
+    api.get(`/api/project/${id}/subdirectory-check`, { params: { path, ...(branch ? { branch } : {}) } }),
 
   // Apps (deployment units inside a project)
   listApps: (projectId) => api.get(`/api/project/${projectId}/apps`),

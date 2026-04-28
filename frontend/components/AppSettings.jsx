@@ -19,6 +19,7 @@ export default function AppSettings({ app, onUpdate }) {
   const [phpInstallStatus, setPhpInstallStatus] = useState(null)
   const [phpInstallError, setPhpInstallError] = useState('')
   const [phpInstalling, setPhpInstalling] = useState(false)
+  const [subdirCheck, setSubdirCheck] = useState({ status: 'idle', message: '' })
 
   const [formData, setFormData] = useState({
     name: app?.name || '',
@@ -60,6 +61,32 @@ export default function AppSettings({ app, onUpdate }) {
       return next
     })
   }
+
+  useEffect(() => {
+    const path = formData.subdirectory.trim()
+    if (!app?.project_id || !path) {
+      setSubdirCheck({ status: 'idle', message: '' })
+      return undefined
+    }
+    if (path === (app?.subdirectory || '')) {
+      setSubdirCheck({ status: 'idle', message: '' })
+      return undefined
+    }
+    let cancelled = false
+    setSubdirCheck({ status: 'checking', message: 'Checking repository path...' })
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiClient.checkProjectSubdirectory(app.project_id, path)
+        if (!cancelled) setSubdirCheck({ status: 'ok', message: `Found ${res.data.path} on ${res.data.source}.` })
+      } catch (err) {
+        if (!cancelled) setSubdirCheck({ status: 'error', message: err.response?.data?.error || 'Subdirectory was not found.' })
+      }
+    }, 500)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [app?.project_id, app?.subdirectory, formData.subdirectory])
 
   useEffect(() => {
     if (formData.app_type !== 'php') return
@@ -293,6 +320,11 @@ export default function AppSettings({ app, onUpdate }) {
             ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
           ])}
           {input('Subdirectory (monorepo)', 'subdirectory', 'text', 'api/ or cms/', 'Leave empty if the project root is this app.')}
+          {subdirCheck.status !== 'idle' && (
+            <p className={`text-xs ${subdirCheck.status === 'ok' ? 'text-green-400' : subdirCheck.status === 'checking' ? 'text-yellow-400' : 'text-red-400'}`}>
+              {subdirCheck.message}
+            </p>
+          )}
         </div>
       </div>
 
@@ -377,7 +409,7 @@ export default function AppSettings({ app, onUpdate }) {
       <div className="flex items-center justify-between">
         <button
           type="submit"
-          disabled={loading || dnsStatus === 'checking' || dnsStatus === 'error'}
+          disabled={loading || dnsStatus === 'checking' || dnsStatus === 'error' || subdirCheck.status === 'checking' || subdirCheck.status === 'error'}
           className="px-6 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {loading ? 'Saving…' : 'Save Changes'}
