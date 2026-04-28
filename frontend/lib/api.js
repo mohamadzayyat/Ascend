@@ -33,13 +33,17 @@ export const apiClient = {
   getUpdateStatus: () => api.get('/api/update/status', { timeout: 120000 }),
   startUpdate: () => api.post('/api/update/start', {}, { timeout: 30000 }),
   getSystemAlerts: () => api.get('/api/system/alerts'),
+  listUsers: () => api.get('/api/users'),
+  createUser: (data) => api.post('/api/users', data),
+  updateUser: (id, data) => api.put(`/api/users/${id}`, data),
+  deleteUser: (id, confirmText) => api.delete(`/api/users/${id}`, { data: { confirm_text: confirmText } }),
 
   // Projects (repo-level)
   getProjects: () => api.get('/api/projects'),
   getProject: (id) => api.get(`/api/project/${id}`),
   createProject: (data) => api.post('/api/projects', data),
   updateProject: (id, data) => api.put(`/api/project/${id}`, data),
-  deleteProject: (id) => api.delete(`/api/project/${id}`),
+  deleteProject: (id, confirmText) => api.delete(`/api/project/${id}`, { data: { confirm_text: confirmText } }),
   syncProjectWebhook: (id) => api.post(`/api/project/${id}/github-webhook/sync`),
 
   // Apps (deployment units inside a project)
@@ -47,7 +51,7 @@ export const apiClient = {
   createApp: (projectId, data) => api.post(`/api/project/${projectId}/apps`, data),
   getApp: (id) => api.get(`/api/app/${id}`),
   updateApp: (id, data) => api.put(`/api/app/${id}`, data),
-  deleteApp: (id) => api.delete(`/api/app/${id}`),
+  deleteApp: (id, confirmText) => api.delete(`/api/app/${id}`, { data: { confirm_text: confirmText } }),
   deployApp: (id) => api.post(`/api/app/${id}/deploy`),
   restartApp: (id) => api.post(`/api/app/${id}/restart`),
   retryAppSsl: (id) => api.post(`/api/app/${id}/ssl/retry`),
@@ -162,7 +166,7 @@ export const apiClient = {
   getDbRestoreJob: (jobId) => api.get(`/api/databases/restore-jobs/${jobId}`),
   downloadDbBackupUrl: (backupId) =>
     `${API_URL}/api/databases/backups/${backupId}/download`,
-  deleteDbBackup: (backupId) => api.delete(`/api/databases/backups/${backupId}`),
+  deleteDbBackup: (backupId, confirmText) => api.delete(`/api/databases/backups/${backupId}`, { data: { confirm_text: confirmText } }),
   getDbSchedule: (id) => api.get(`/api/databases/connections/${id}/schedule`),
   upsertDbSchedule: (id, data) =>
     api.put(`/api/databases/connections/${id}/schedule`, data),

@@ -7,6 +7,7 @@ import {
   UploadCloud, RotateCcw,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
+import { typedConfirm } from '@/lib/confirm'
 
 const TABS = [
   { id: 'browse',   label: 'Browse',   icon: TableIcon },
@@ -1204,9 +1205,9 @@ function BackupsTab({ connection }) {
   }
 
   const onDelete = async (b) => {
-    if (!window.confirm(`Delete backup ${b.filename}?`)) return
+    if (!typedConfirm(`Delete backup ${b.filename}?`, b.filename)) return
     try {
-      await apiClient.deleteDbBackup(b.id)
+      await apiClient.deleteDbBackup(b.id, b.filename)
       refresh()
     } catch (err) {
       alert(err.response?.data?.error || 'Delete failed')
@@ -1460,6 +1461,7 @@ function RestoreTab({ connection }) {
       ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.`
       : `Create database "${target}" and restore this backup into it?`
     if (!window.confirm(msg)) return
+    if (form.replace_existing && !typedConfirm(`Restore will replace "${target}" after taking a safety backup.`, target)) return
     setStarting(true)
     setError('')
     try {
@@ -1468,6 +1470,7 @@ function RestoreTab({ connection }) {
         target_database: target,
         collation: form.collation.trim() || 'utf8mb4_general_ci',
         replace_existing: !!form.replace_existing,
+        confirm_text: form.replace_existing ? target : '',
       })
       setJob(res.data.job)
     } catch (err) {

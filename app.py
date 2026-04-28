@@ -146,6 +146,7 @@ EMAIL_NOTIFY_SETTING_KEY = 'email_notifications_v1'
 BACKUP_UPLOAD_SETTING_KEY = 'backup_upload_v1'
 AUDIT_LOG_SETTING_KEY = 'audit_log_v1'
 UPDATE_STATE_SETTING_KEY = 'update_state_v1'
+SYSTEM_ALERT_NOTIFY_SETTING_KEY = 'system_alert_notifications_v1'
 
 _EMAIL_NOTIFY_EVENT_DEFAULTS = {
     'backup_success': False,
@@ -158,6 +159,7 @@ _EMAIL_NOTIFY_EVENT_DEFAULTS = {
     'deployment_failed': True,
     'terminal_unlock': True,
     'server_files_unlock': True,
+    'system_alert': True,
 }
 
 
@@ -205,6 +207,45 @@ init_backup_upload(
 def _admin_required():
     if not getattr(current_user, 'is_admin', False):
         return jsonify({'error': 'Admin only.'}), 403
+    return None
+
+
+def _role_required(*roles):
+    role = _user_role(current_user)
+    if role not in set(roles):
+        return jsonify({'error': 'Insufficient role permissions.'}), 403
+    return None
+
+
+def _normalize_role(role):
+    role = (role or '').strip().lower()
+    return role if role in {'admin', 'deployer', 'database', 'viewer'} else 'viewer'
+
+
+def _user_role(user):
+    role = _normalize_role(getattr(user, 'role', '') or ('admin' if getattr(user, 'is_admin', False) else 'viewer'))
+    if getattr(user, 'is_admin', False) and role != 'admin':
+        return 'admin'
+    return role
+
+
+def _user_to_api(user):
+    return {
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'is_admin': bool(user.is_admin),
+        'role': _user_role(user),
+        'two_factor_enabled': bool(getattr(user, 'otp_enabled', False)),
+        'created_at': iso_utc(user.created_at),
+    }
+
+
+def _confirm_text_required(expected, label='confirmation'):
+    data = request.get_json(silent=True) or {}
+    got = str(data.get('confirm_text') or '').strip()
+    if got != str(expected):
+        return jsonify({'error': f'Type {label} exactly to confirm.', 'confirm_required': True, 'confirm_text': str(expected)}), 400
     return None
 
 
@@ -375,6 +416,11 @@ def migrate_schema():
         add_col('backup_schedule', "target_database VARCHAR(255) DEFAULT ''")
         add_col('user', 'otp_secret_encrypted TEXT')
         add_col('user', 'otp_enabled BOOLEAN DEFAULT 0')
+        add_col('user', "role VARCHAR(32) DEFAULT 'admin'")
+        db.session.commit()
+        for u in User.query.all():
+            if not getattr(u, 'role', None):
+                u.role = 'admin' if u.is_admin else 'viewer'
         db.session.commit()
         _migrate_backup_schedule_targets()
 
@@ -466,6 +512,7 @@ def api_login():
             'username': user.username,
             'email': user.email,
             'is_admin': user.is_admin,
+            'role': _user_role(user),
             'two_factor_enabled': bool(getattr(user, 'otp_enabled', False)),
         })
     _audit_log('auth.login_failed', 'failed', f'Invalid login for {username or "unknown"}', user=user)
@@ -516,6 +563,7 @@ def api_setup():
                 return jsonify({'error': 'Username already exists'}), 400
 
             user = User(username=username, email=email or None, is_admin=True)
+            user.role = 'admin'
             user.set_password(password)
             db.session.add(user)
             db.session.commit()
@@ -624,13 +672,88 @@ def dashboard():
 @app.route('/api/current-user')
 @login_required
 def api_current_user():
-    return jsonify({
-        'id': current_user.id,
-        'username': current_user.username,
-        'email': current_user.email,
-        'is_admin': current_user.is_admin,
-        'two_factor_enabled': bool(getattr(current_user, 'otp_enabled', False)),
-    })
+    return jsonify(_user_to_api(current_user))
+
+
+@app.route('/api/users', methods=['GET', 'POST'])
+@csrf.exempt
+@login_required
+def api_users():
+    err = _admin_required()
+    if err:
+        return err
+    if request.method == 'GET':
+        users = User.query.order_by(User.created_at.asc()).all()
+        return jsonify({'users': [_user_to_api(u) for u in users]})
+
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    email = (data.get('email') or '').strip() or None
+    role = _normalize_role(data.get('role') or 'viewer')
+    if not username or len(username) < 3:
+        return jsonify({'error': 'Username must be at least 3 characters.'}), 400
+    if not password or len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters.'}), 400
+    if User.query.filter_by(username=username).first():
+        return jsonify({'error': 'Username already exists.'}), 400
+    if email and User.query.filter_by(email=email).first():
+        return jsonify({'error': 'Email already exists.'}), 400
+    user = User(username=username, email=email, is_admin=(role == 'admin'), role=role)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    _audit_log('user.created', 'ok', f'User created: {username}', {'user_id': user.id, 'role': role})
+    return jsonify(_user_to_api(user)), 201
+
+
+@app.route('/api/users/<int:user_id>', methods=['PUT', 'DELETE'])
+@csrf.exempt
+@login_required
+def api_user_detail(user_id):
+    err = _admin_required()
+    if err:
+        return err
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({'error': 'User not found.'}), 404
+    if request.method == 'DELETE':
+        if user.id == current_user.id:
+            return jsonify({'error': 'You cannot delete your own account.'}), 400
+        if Project.query.filter_by(user_id=user.id).first() or DatabaseConnection.query.filter_by(user_id=user.id).first():
+            return jsonify({'error': 'This user owns projects or database connections. Reassign or delete those resources first.'}), 400
+        confirm = _confirm_text_required(user.username, 'the username')
+        if confirm:
+            return confirm
+        username = user.username
+        GitHubCredential.query.filter_by(user_id=user.id).delete()
+        db.session.delete(user)
+        db.session.commit()
+        _audit_log('user.deleted', 'ok', f'User deleted: {username}', {'user_id': user_id})
+        return jsonify({'ok': True})
+
+    data = request.get_json(silent=True) or {}
+    if 'email' in data:
+        email = (data.get('email') or '').strip() or None
+        if email:
+            existing = User.query.filter_by(email=email).first()
+            if existing and existing.id != user.id:
+                return jsonify({'error': 'Email already exists.'}), 400
+        user.email = email
+    if 'role' in data:
+        role = _normalize_role(data.get('role'))
+        if user.id == current_user.id and role != 'admin':
+            return jsonify({'error': 'You cannot remove your own admin role.'}), 400
+        user.role = role
+        user.is_admin = role == 'admin'
+    if data.get('password'):
+        password = data.get('password') or ''
+        if len(password) < 8:
+            return jsonify({'error': 'Password must be at least 8 characters.'}), 400
+        user.set_password(password)
+    db.session.commit()
+    _audit_log('user.updated', 'ok', f'User updated: {user.username}', {'user_id': user.id, 'role': _user_role(user)})
+    return jsonify(_user_to_api(user))
 
 
 @app.route('/api/settings/email-notifications', methods=['GET', 'PUT'])
@@ -1011,6 +1134,42 @@ def api_update_start():
         return jsonify({'error': f'Failed to start detached update: {exc}'}), 500
 
 
+def _system_alert_signature(alert):
+    return hashlib.sha256(
+        f"{alert.get('severity')}|{alert.get('title')}|{alert.get('message')}".encode('utf-8', errors='replace')
+    ).hexdigest()[:24]
+
+
+def _maybe_notify_system_alerts(alerts):
+    critical = [a for a in alerts if a.get('severity') == 'critical']
+    if not critical:
+        return
+    now = time.time()
+    state = _json_setting_load(SYSTEM_ALERT_NOTIFY_SETTING_KEY, {})
+    sent = state.get('sent') if isinstance(state.get('sent'), dict) else {}
+    due = []
+    for alert in critical:
+        sig = _system_alert_signature(alert)
+        last = float(sent.get(sig) or 0)
+        if now - last >= 6 * 3600:
+            due.append((sig, alert))
+    if not due:
+        return
+    lines = []
+    for _, alert in due[:8]:
+        lines.append(f"{alert.get('title')}: {alert.get('message')}")
+    _notify_email_async(
+        'system_alert',
+        f'Ascend: {len(due)} critical system alert{"s" if len(due) != 1 else ""}',
+        'Critical system alerts were detected.\n\n' + '\n'.join(lines) + f'\n\nTime (UTC): {datetime.now(timezone.utc).isoformat()}',
+    )
+    for sig, _ in due:
+        sent[sig] = now
+    state['sent'] = sent
+    state['updated_at'] = datetime.now(timezone.utc).isoformat()
+    _json_setting_save(SYSTEM_ALERT_NOTIFY_SETTING_KEY, state)
+
+
 @app.route('/api/system/alerts')
 @login_required
 def api_system_alerts():
@@ -1046,7 +1205,12 @@ def api_system_alerts():
             alerts.append({'severity': 'warning', 'title': 'Recent backup failed', 'message': f'{backup.filename}: {(backup.error_message or "backup failed")[:180]}'})
     except Exception:
         pass
-    return jsonify({'alerts': alerts[:20]})
+    alerts = alerts[:20]
+    try:
+        _maybe_notify_system_alerts(alerts)
+    except Exception as exc:
+        print(f'[system-alerts] notification failed: {exc}', file=sys.stderr)
+    return jsonify({'alerts': alerts})
 
 
 @app.route('/api/settings/backup-upload', methods=['GET', 'PUT'])
@@ -1131,6 +1295,9 @@ def api_projects():
 @login_required
 def api_create_project():
     """Create a repo-level Project. Apps are added separately via /api/project/<id>/apps."""
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     data = request.get_json(silent=True) or {}
     name = data.get('name', '').strip()
     folder_name = data.get('folder_name', '').strip()
@@ -1188,6 +1355,9 @@ def api_get_project(project_id):
 @csrf.exempt
 @login_required
 def api_update_project(project_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     project = Project.query.get_or_404(project_id)
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1222,9 +1392,15 @@ def api_update_project(project_id):
 @csrf.exempt
 @login_required
 def api_delete_project(project_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     project = Project.query.get_or_404(project_id)
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
+    confirm = _confirm_text_required(project.name, 'the project name')
+    if confirm:
+        return confirm
 
     pname = project.name
     pfolder = project.folder_name
@@ -1249,6 +1425,9 @@ def api_delete_project(project_id):
 @csrf.exempt
 @login_required
 def api_sync_project_github_webhook(project_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     project = Project.query.get_or_404(project_id)
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1474,6 +1653,9 @@ def api_list_apps(project_id):
 @csrf.exempt
 @login_required
 def api_create_app(project_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     project = Project.query.get_or_404(project_id)
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1519,6 +1701,9 @@ def api_get_app(app_id):
 @csrf.exempt
 @login_required
 def api_update_app(app_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1549,9 +1734,15 @@ def api_update_app(app_id):
 @csrf.exempt
 @login_required
 def api_delete_app(app_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
+    confirm = _confirm_text_required(a.name, 'the app name')
+    if confirm:
+        return confirm
 
     proj_name = a.project.name
     app_name = a.name
@@ -1579,6 +1770,9 @@ def api_delete_app(app_id):
 @csrf.exempt
 @login_required
 def api_deploy_app(app_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1625,6 +1819,9 @@ def api_app_deployments(app_id):
 @csrf.exempt
 @login_required
 def api_retry_app_ssl(app_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1660,6 +1857,9 @@ def api_retry_app_ssl(app_id):
 @csrf.exempt
 @login_required
 def api_restart_app(app_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -1695,6 +1895,9 @@ def api_restart_app(app_id):
 @csrf.exempt
 @login_required
 def api_deploy(project_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
     project = Project.query.get_or_404(project_id)
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
@@ -3364,6 +3567,9 @@ def api_terminal_status():
 @csrf.exempt
 @login_required
 def api_terminal_unlock():
+    err = _admin_required()
+    if err:
+        return err
     if not _TERMINAL_SUPPORTED:
         return jsonify({'error': 'Terminal is only available on Linux servers.'}), 501
     if not _TERMINAL_WS_SUPPORTED:

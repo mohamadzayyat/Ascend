@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { Activity, Database, DownloadCloud, FileText, FolderTree, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
+import { Database, DownloadCloud, FileText, FolderTree, LogOut, Settings, Terminal, Users, Workflow } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -77,12 +77,6 @@ export default function Sidebar() {
               label="Databases"
             />
             <NavLink
-              href="/backup-health"
-              active={isActive('/backup-health')}
-              icon={<Activity className="w-5 h-5" />}
-              label="Backup Health"
-            />
-            <NavLink
               href="/settings/github"
               active={isActive('/settings/github')}
               icon="🔑"
@@ -98,6 +92,12 @@ export default function Sidebar() {
               active={isActive('/settings')}
               icon={<Settings className="w-5 h-5" />}
               label="Settings"
+            />
+            <NavLink
+              href="/settings/users"
+              active={isActive('/settings/users')}
+              icon={<Users className="w-5 h-5" />}
+              label="Users"
             />
             <NavLink
               href="/workflow"

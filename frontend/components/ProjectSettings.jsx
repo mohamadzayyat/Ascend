@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/router'
 import { apiClient } from '@/lib/api'
 import { useProjects } from '@/lib/hooks/useAuth'
+import { typedConfirm } from '@/lib/confirm'
 
 export default function ProjectSettings({ project, onUpdate }) {
   const router = useRouter()
@@ -49,10 +50,10 @@ export default function ProjectSettings({ project, onUpdate }) {
   }
 
   const handleDelete = async () => {
-    if (!confirm(`Delete "${project.name}" and all its apps? This cannot be undone.`)) return
+    if (!typedConfirm(`Delete "${project.name}" and all its apps? This cannot be undone.`, project.name)) return
     setDeleting(true)
     try {
-      await apiClient.deleteProject(project.id)
+      await apiClient.deleteProject(project.id, project.name)
       mutateProjects()
       router.push('/projects')
     } catch (err) {

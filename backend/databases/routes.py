@@ -76,8 +76,9 @@ def _safe_dir_name(name):
 
 
 def _admin_required():
-    if not getattr(current_user, 'is_admin', False):
-        return jsonify({'error': 'Admin only.'}), 403
+    role = (getattr(current_user, 'role', '') or ('admin' if getattr(current_user, 'is_admin', False) else '')).strip().lower()
+    if not getattr(current_user, 'is_admin', False) and role != 'database':
+        return jsonify({'error': 'Database role required.'}), 403
     return None
 
 
@@ -765,6 +766,9 @@ def api_db_backup_delete(backup_id):
     conn = db.session.get(DatabaseConnection, a.connection_id)
     if conn is None or conn.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    if str(data.get('confirm_text') or '').strip() != a.filename:
+        return jsonify({'error': 'Type the backup filename exactly to confirm.', 'confirm_required': True, 'confirm_text': a.filename}), 400
     try:
         p = Path(a.filepath)
         if p.exists():
@@ -788,6 +792,8 @@ def api_db_restore_start(conn_id):
     if err:
         return err
     data = request.get_json(silent=True) or {}
+    if bool(data.get('replace_existing')) and str(data.get('confirm_text') or '').strip() != str(data.get('target_database') or '').strip():
+        return jsonify({'error': 'Type the target database name exactly to confirm restore replacement.', 'confirm_required': True, 'confirm_text': str(data.get('target_database') or '').strip()}), 400
     try:
         job = start_restore_job(
             conn,

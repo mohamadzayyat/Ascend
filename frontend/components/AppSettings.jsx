@@ -3,6 +3,7 @@ import { useRouter } from 'next/router'
 import { RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import DomainDnsCheck from '@/components/DomainDnsCheck'
+import { typedConfirm } from '@/lib/confirm'
 
 export default function AppSettings({ app, onUpdate }) {
   const router = useRouter()
@@ -55,10 +56,10 @@ export default function AppSettings({ app, onUpdate }) {
   }
 
   const handleDelete = async () => {
-    if (!confirm(`Delete app "${app.name}"? This stops the PM2 process but keeps the repo.`)) return
+    if (!typedConfirm(`Delete app "${app.name}"? This stops the PM2 process but keeps the repo.`, app.name)) return
     setDeleting(true)
     try {
-      await apiClient.deleteApp(app.id)
+      await apiClient.deleteApp(app.id, app.name)
       router.push(`/projects/${app.project_id}`)
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to delete app')

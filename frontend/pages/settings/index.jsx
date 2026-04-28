@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { Github, Mail, Shield, ShieldCheck } from 'lucide-react'
+import { Github, Mail, Shield, ShieldCheck, Users } from 'lucide-react'
 import { useAuth } from '@/lib/hooks/useAuth'
 
 export default function Settings() {
@@ -75,6 +75,22 @@ export default function Settings() {
             Enable two-factor authentication for safer admin login.
           </p>
         </Link>
+        {user?.is_admin && (
+          <Link
+            href="/settings/users"
+            className="bg-secondary rounded-lg border border-gray-700 hover:border-accent p-6 transition group"
+          >
+            <div className="flex items-center gap-3 mb-2">
+              <Users className="w-6 h-6 text-accent" />
+              <h3 className="text-white font-bold group-hover:text-accent transition">
+                Users &amp; roles
+              </h3>
+            </div>
+            <p className="text-gray-400 text-sm">
+              Create panel users, assign roles, and reset passwords.
+            </p>
+          </Link>
+        )}
         <Link
           href="/settings/github"
           className="bg-secondary rounded-lg border border-gray-700 hover:border-accent p-6 transition group"

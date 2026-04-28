@@ -807,6 +807,8 @@ def api_server_files_status():
 @bp.route('/api/server/files/unlock', methods=['POST'])
 @login_required
 def api_server_files_unlock():
+    if not getattr(current_user, 'is_admin', False):
+        return jsonify({'error': 'Admin only.'}), 403
     data = request.get_json(silent=True) or {}
     given = data.get('passphrase', '')
     now = time.time()
@@ -914,5 +916,4 @@ def api_server_files_archive():
 def api_server_files_delete():
     scope, err = _fm_owned_server()
     return err or _fm_handle_delete(scope)
-
 

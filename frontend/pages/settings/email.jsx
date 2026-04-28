@@ -15,6 +15,7 @@ const EVENT_OPTIONS = [
   { key: 'deployment_failed', label: 'Deployment / restart / SSL job failed' },
   { key: 'terminal_unlock', label: 'Web terminal unlocked (shell passphrase)' },
   { key: 'server_files_unlock', label: 'Server file manager unlocked' },
+  { key: 'system_alert', label: 'Critical system alert' },
 ]
 
 const emptyForm = {

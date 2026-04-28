@@ -5,7 +5,7 @@ import { apiClient } from '@/lib/api'
 import StatCard from '@/components/StatCard'
 import ProjectCard from '@/components/ProjectCard'
 import ServerStats from '@/components/ServerStats'
-import { Activity, AlertCircle, CheckCircle, Boxes, ShieldCheck } from 'lucide-react'
+import { Activity, AlertCircle, CheckCircle, Boxes, Database, ShieldCheck } from 'lucide-react'
 import { absoluteLocalTime, localDate, parseApiTime } from '@/lib/time'
 
 function certStatusClass(status) {
@@ -20,11 +20,11 @@ export default function Dashboard() {
   const { projects, isLoading } = useProjects()
   const { certificates, scheduler } = useCertificates()
   const [systemAlerts, setSystemAlerts] = useState([])
+  const [backupHealth, setBackupHealth] = useState([])
 
   useEffect(() => {
-    apiClient.getSystemAlerts()
-      .then((res) => setSystemAlerts(res.data.alerts || []))
-      .catch(() => setSystemAlerts([]))
+    apiClient.getSystemAlerts().then((res) => setSystemAlerts(res.data.alerts || [])).catch(() => setSystemAlerts([]))
+    apiClient.getBackupHealth().then((res) => setBackupHealth(res.data.items || [])).catch(() => setBackupHealth([]))
   }, [])
 
   const allApps = projects.flatMap((p) => p.apps || [])
@@ -37,6 +37,11 @@ export default function Dashboard() {
     deployed: allApps.filter((a) => a.status === 'deployed').length,
     errors: allApps.filter((a) => a.status === 'error').length,
     riskyCerts: certificates.filter((c) => c.status === 'expired' || c.status === 'critical' || c.status === 'warning').length,
+  }
+  const backupCounts = {
+    total: backupHealth.length,
+    healthy: backupHealth.filter((b) => b.status === 'healthy').length,
+    attention: backupHealth.filter((b) => ['failed', 'stale', 'warning'].includes(b.status)).length,
   }
 
   const recentApps = allApps
@@ -88,6 +93,71 @@ export default function Dashboard() {
           color="bg-green-500/10 text-green-400" />
         <StatCard title="Errors" value={stats.errors} icon={<AlertCircle className="w-6 h-6" />}
           color="bg-red-500/10 text-red-400" />
+      </div>
+
+      <div className="mb-8 bg-secondary rounded-lg border border-gray-700 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-700 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+              <Database className="w-5 h-5 text-accent" />
+              Backup Health
+            </h2>
+            <p className="text-sm text-gray-400 mt-1">
+              {backupCounts.total} connection{backupCounts.total === 1 ? '' : 's'} tracked.
+              {' '}{backupCounts.healthy} healthy, {backupCounts.attention} need attention.
+            </p>
+          </div>
+          <Link href="/databases" className="text-accent hover:underline text-sm font-semibold">
+            Manage backups
+          </Link>
+        </div>
+        {backupHealth.length === 0 ? (
+          <div className="px-6 py-5 text-gray-400 text-sm">No database connections yet.</div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 p-4">
+            {backupHealth.slice(0, 6).map((row) => {
+              const statusClass =
+                row.status === 'healthy' ? 'border-green-500/40 bg-green-500/10 text-green-200'
+                : row.status === 'running' ? 'border-blue-500/40 bg-blue-500/10 text-blue-200'
+                : row.status === 'failed' ? 'border-red-500/40 bg-red-500/10 text-red-200'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+              return (
+                <div key={row.connection.id} className="rounded border border-gray-700 bg-primary/50 p-4">
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div className="min-w-0">
+                      <div className="text-white font-semibold truncate">{row.connection.name}</div>
+                      <div className="text-xs text-gray-500 truncate">{row.connection.host}:{row.connection.port}</div>
+                    </div>
+                    <span className={`text-[11px] uppercase tracking-wide px-2 py-0.5 rounded border ${statusClass}`}>{row.status}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <div className="text-gray-500">Last backup</div>
+                      <div className="text-gray-200 mt-1">{row.last_backup?.completed_at ? localDate(row.last_backup.completed_at) : 'Never'}</div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">Schedules</div>
+                      <div className="text-gray-200 mt-1">{row.enabled_schedule_count}/{row.schedule_count} enabled</div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">Recent failures</div>
+                      <div className={row.recent_failed_count ? 'text-red-300 mt-1' : 'text-gray-200 mt-1'}>{row.recent_failed_count}</div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">Last status</div>
+                      <div className="text-gray-200 mt-1">{row.last_backup?.status || '-'}</div>
+                    </div>
+                  </div>
+                  {(row.last_backup?.error_message || row.last_schedule_error) && (
+                    <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200 break-words">
+                      {row.last_backup?.error_message || row.last_schedule_error}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       <div className="mb-8 bg-secondary rounded-lg border border-gray-700 overflow-hidden">
