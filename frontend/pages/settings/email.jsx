@@ -31,6 +31,13 @@ const emptyForm = {
   events: {},
 }
 
+/** Port 465 is implicit TLS only; STARTTLS is for plain SMTP (usually 587). */
+function normalizeSmtpTlsForPort(form) {
+  const port = Number(form.port)
+  if (port !== 465) return form
+  return { ...form, use_tls: true, use_starttls: false }
+}
+
 export default function EmailSettingsPage() {
   const { user, loading: authLoading } = useAuth()
   const [form, setForm] = useState(emptyForm)
@@ -53,12 +60,14 @@ export default function EmailSettingsPage() {
     setLoadError('')
     try {
       const { data } = await apiClient.getEmailNotifications()
-      setForm({
-        ...emptyForm,
-        ...data,
-        smtp_password: '',
-        events: mergeEvents(data.events),
-      })
+      setForm(
+        normalizeSmtpTlsForPort({
+          ...emptyForm,
+          ...data,
+          smtp_password: '',
+          events: mergeEvents(data.events),
+        }),
+      )
     } catch (e) {
       setLoadError(e.response?.data?.error || 'Failed to load settings')
     } finally {
@@ -96,12 +105,14 @@ export default function EmailSettingsPage() {
         payload.smtp_password = form.smtp_password.trim()
       }
       const { data } = await apiClient.updateEmailNotifications(payload)
-      setForm((f) => ({
-        ...f,
-        ...data,
-        smtp_password: '',
-        events: mergeEvents(data.events),
-      }))
+      setForm((f) =>
+        normalizeSmtpTlsForPort({
+          ...f,
+          ...data,
+          smtp_password: '',
+          events: mergeEvents(data.events),
+        }),
+      )
       setMessage('Saved.')
     } catch (e) {
       setMessage(e.response?.data?.error || 'Save failed')
@@ -127,12 +138,14 @@ export default function EmailSettingsPage() {
         events: form.events,
         clear_smtp_password: true,
       })
-      setForm((f) => ({
-        ...f,
-        ...data,
-        smtp_password: '',
-        events: mergeEvents(data.events),
-      }))
+      setForm((f) =>
+        normalizeSmtpTlsForPort({
+          ...f,
+          ...data,
+          smtp_password: '',
+          events: mergeEvents(data.events),
+        }),
+      )
       setMessage('Password cleared.')
     } catch (e) {
       setMessage(e.response?.data?.error || 'Request failed')
@@ -179,6 +192,12 @@ export default function EmailSettingsPage() {
             SMTP is used only for outbound alerts (backups, logins, projects, deployments, privileged unlocks).
             Save settings before sending a test message.
           </p>
+          <p className="text-amber-200/80 text-xs mt-2 leading-relaxed max-w-2xl">
+            <strong className="text-amber-100">Timeouts</strong> usually mean the Ascend server cannot reach your SMTP host
+            (wrong name — e.g. <span className="font-mono">mail.enmail.co</span> vs a typo — firewall, or outbound port blocked).
+            Port <span className="font-mono">465</span> uses <strong>implicit TLS only</strong>; do not combine it with STARTTLS
+            (that path is for port <span className="font-mono">587</span>).
+          </p>
         </div>
       </div>
 
@@ -208,35 +227,38 @@ export default function EmailSettingsPage() {
                   value={form.host}
                   onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
                   className="mt-1 w-full bg-primary border border-gray-700 rounded px-3 py-2 text-white"
-                  placeholder="smtp.example.com"
+                  placeholder="mail.enmail.co"
                   autoComplete="off"
                 />
+                <span className="text-[11px] text-gray-500 mt-1 block">Must match your provider’s outgoing server exactly.</span>
               </label>
               <label className="block text-sm text-gray-300">
                 Port
                 <input
                   type="number"
                   value={form.port}
-                  onChange={(e) => setForm((f) => ({ ...f, port: e.target.value }))}
+                  onChange={(e) => setForm((f) => normalizeSmtpTlsForPort({ ...f, port: e.target.value }))}
                   className="mt-1 w-full bg-primary border border-gray-700 rounded px-3 py-2 text-white"
                 />
               </label>
               <div className="flex flex-col gap-2 text-sm text-gray-300 justify-end pb-1">
-                <label className="flex items-center gap-2 cursor-pointer">
+                <label className={`flex items-center gap-2 ${Number(form.port) === 465 ? 'cursor-default' : 'cursor-pointer'}`}>
                   <input
                     type="checkbox"
-                    checked={!!form.use_tls}
+                    checked={Number(form.port) === 465 ? true : !!form.use_tls}
+                    disabled={Number(form.port) === 465}
                     onChange={(e) => setForm((f) => ({ ...f, use_tls: e.target.checked }))}
                   />
-                  Implicit TLS (SSL), e.g. port 465
+                  Implicit TLS (SSL){Number(form.port) === 465 && <span className="text-gray-500"> — required for 465</span>}
                 </label>
-                <label className="flex items-center gap-2 cursor-pointer">
+                <label className={`flex items-center gap-2 ${Number(form.port) === 465 ? 'cursor-default opacity-50' : 'cursor-pointer'}`}>
                   <input
                     type="checkbox"
-                    checked={!!form.use_starttls}
+                    checked={Number(form.port) === 465 ? false : !!form.use_starttls}
+                    disabled={Number(form.port) === 465}
                     onChange={(e) => setForm((f) => ({ ...f, use_starttls: e.target.checked }))}
                   />
-                  STARTTLS (typical for port 587)
+                  STARTTLS (use with port 587)
                 </label>
               </div>
               <label className="block text-sm text-gray-300">

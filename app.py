@@ -789,6 +789,16 @@ def api_settings_email_notifications():
     elif isinstance(data.get('smtp_password'), str) and data['smtp_password'].strip():
         cur['smtp_password'] = data['smtp_password'].strip()
 
+    try:
+        pnum = int(cur.get('port') or 587)
+    except (TypeError, ValueError):
+        pnum = 587
+    cur['port'] = pnum
+    # Port 465 is always implicit TLS; STARTTLS does not apply (and confuses some clients).
+    if pnum == 465:
+        cur['use_tls'] = True
+        cur['use_starttls'] = False
+
     persist = {
         'enabled': bool(cur['enabled']),
         'host': (cur.get('host') or '').strip(),
@@ -4267,6 +4277,7 @@ def _parse_notify_emails(s):
 
 def _smtp_send_raw(settings_dict, recipients, subject, body_plain):
     import smtplib
+    import ssl as _ssl
     from email.message import EmailMessage
 
     host = (settings_dict.get('host') or '').strip()
@@ -4280,6 +4291,10 @@ def _smtp_send_raw(settings_dict, recipients, subject, body_plain):
         port = 587
     use_tls = bool(settings_dict.get('use_tls'))
     use_starttls = bool(settings_dict.get('use_starttls'))
+    # Port 465 is implicit TLS only (SMTP_SSL). STARTTLS is for plain SMTP (usually 587).
+    implicit_ssl = use_tls or (port == 465)
+    if implicit_ssl:
+        use_starttls = False
     username = (settings_dict.get('username') or '').strip()
     password = settings_dict.get('smtp_password') or ''
     from_addr = (settings_dict.get('from_addr') or '').strip() or username or 'noreply@localhost'
@@ -4290,23 +4305,40 @@ def _smtp_send_raw(settings_dict, recipients, subject, body_plain):
     msg['To'] = ', '.join(recipients)
     msg.set_content(str(body_plain)[:500000])
 
-    implicit_ssl = use_tls or (port == 465)
+    _ctx = _ssl.create_default_context()
+    _smtp_timeout = 30
+
+    def _conn_err(exc):
+        hint = (
+            'Check the SMTP host spelling (must match your provider, e.g. mail.enmail.co), '
+            'that port 465 uses only “Implicit TLS” (not STARTTLS), and that this server '
+            'allows outbound SMTP. Wrong host or blocked port often hangs until timeout.'
+        )
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+            return ValueError(f'SMTP connection failed or timed out: {exc}. {hint}')
+        return exc
+
     if implicit_ssl:
-        with smtplib.SMTP_SSL(host, port, timeout=45) as smtp:
+        try:
+            with smtplib.SMTP_SSL(host, port, timeout=_smtp_timeout, context=_ctx) as smtp:
+                if username:
+                    smtp.login(username, password)
+                smtp.send_message(msg)
+        except (TimeoutError, ConnectionError, OSError) as e:
+            raise _conn_err(e) from e
+        return
+
+    try:
+        with smtplib.SMTP(host, port, timeout=_smtp_timeout) as smtp:
+            smtp.ehlo()
+            if use_starttls:
+                smtp.starttls(context=_ctx)
+                smtp.ehlo()
             if username:
                 smtp.login(username, password)
             smtp.send_message(msg)
-        return
-
-    import ssl as _ssl
-    with smtplib.SMTP(host, port, timeout=45) as smtp:
-        smtp.ehlo()
-        if use_starttls:
-            smtp.starttls(context=_ssl.create_default_context())
-            smtp.ehlo()
-        if username:
-            smtp.login(username, password)
-        smtp.send_message(msg)
+    except (TimeoutError, ConnectionError, OSError) as e:
+        raise _conn_err(e) from e
 
 
 def _notify_email_send_if_subscribed(event_key, subject, body_plain):

@@ -52,7 +52,9 @@ export const apiClient = {
   // GitHub Credentials
   getEmailNotifications: () => api.get('/api/settings/email-notifications'),
   updateEmailNotifications: (data) => api.put('/api/settings/email-notifications', data),
-  testEmailNotifications: (data) => api.post('/api/settings/email-notifications/test', data || {}),
+  // SMTP can take up to ~30s before the server responds with an error; avoid client giving up first.
+  testEmailNotifications: (data) =>
+    api.post('/api/settings/email-notifications/test', data || {}, { timeout: 120000 }),
 
   getGitHubCredentials: () => api.get('/api/github-credentials'),
   addGitHubCredential: (username, token) => api.post('/api/github-credentials', { username, token }),
