@@ -66,7 +66,13 @@ def _email_notify_settings_load():
                 merged[ek] = bool(evl)
         d['events'] = merged
     pwd_enc = parsed.get('smtp_password_encrypted') or ''
-    d['smtp_password'] = _decrypt_password(pwd_enc) if pwd_enc else ''
+    d['smtp_password_error'] = ''
+    try:
+        d['smtp_password'] = _decrypt_password(pwd_enc) if pwd_enc else ''
+    except Exception as exc:
+        d['smtp_password'] = ''
+        d['smtp_password_error'] = 'Stored SMTP password could not be decrypted. Re-enter it and save.'
+        print(f'[email-notify] stored SMTP password decrypt failed: {exc}', file=sys.stderr)
     return d
 
 

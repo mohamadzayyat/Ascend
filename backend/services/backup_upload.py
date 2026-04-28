@@ -1,5 +1,6 @@
 import base64
 import json
+import sys
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import quote
@@ -46,7 +47,13 @@ def _backup_upload_settings_load():
         if k in parsed:
             d[k] = parsed[k]
     pwd_enc = parsed.get('password_encrypted') or ''
-    d['password'] = _decrypt_password(pwd_enc) if pwd_enc else ''
+    d['password_error'] = ''
+    try:
+        d['password'] = _decrypt_password(pwd_enc) if pwd_enc else ''
+    except Exception as exc:
+        d['password'] = ''
+        d['password_error'] = 'Stored backup upload password could not be decrypted. Re-enter it and save.'
+        print(f'[backup-upload] stored password decrypt failed: {exc}', file=sys.stderr)
     return d
 
 
