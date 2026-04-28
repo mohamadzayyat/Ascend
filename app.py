@@ -3778,6 +3778,63 @@ def _load_pm2_logs(pm2_name, lines=120):
     }
 
 
+def _tail_file(path, lines=200, max_bytes=200000):
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return {'path': str(p), 'exists': False, 'content': ''}
+    try:
+        n = max(20, min(int(lines or 200), 1000))
+    except (TypeError, ValueError):
+        n = 200
+    try:
+        size = p.stat().st_size
+        with open(p, 'rb') as fh:
+            if size > max_bytes:
+                fh.seek(-max_bytes, os.SEEK_END)
+            raw = fh.read()
+        text = raw.decode('utf-8', errors='replace')
+        return {
+            'path': str(p),
+            'exists': True,
+            'content': '\n'.join(text.splitlines()[-n:]),
+            'truncated': size > max_bytes,
+            'size_bytes': size,
+        }
+    except Exception as exc:
+        return {'path': str(p), 'exists': True, 'content': '', 'error': str(exc)}
+
+
+def _nginx_log_candidates(app_row):
+    names = []
+    if app_row.domain:
+        names.extend([
+            app_row.domain,
+            app_row.domain.replace('.', '_'),
+            app_row.domain.replace('.', '-'),
+        ])
+    names.extend(['access.log', 'error.log'])
+    paths = []
+    for base in (Path('/var/log/nginx'), Path('/usr/local/nginx/logs')):
+        for name in names:
+            if name in ('access.log', 'error.log'):
+                paths.append(base / name)
+            else:
+                paths.extend([
+                    base / f'{name}.access.log',
+                    base / f'{name}.error.log',
+                    base / f'access.{name}.log',
+                    base / f'error.{name}.log',
+                ])
+    seen = set()
+    out = []
+    for p in paths:
+        sp = str(p)
+        if sp not in seen:
+            seen.add(sp)
+            out.append(p)
+    return out
+
+
 def _load_listening_ports():
     try:
         result = subprocess.run(['ss', '-tlnp'], capture_output=True, timeout=5)
@@ -4363,6 +4420,45 @@ def api_app_pm2_logs(app_id):
 
 
 # ═══════════════════════════════════════════
+@app.route('/api/app/<int:app_id>/logs')
+@login_required
+def api_app_logs(app_id):
+    a = db.session.get(App, app_id)
+    if not a or a.project.user_id != current_user.id:
+        return jsonify({'error': 'Not found'}), 404
+    lines = request.args.get('lines', 200)
+    deployments = Deployment.query.filter_by(app_id=a.id).order_by(Deployment.started_at.desc()).limit(8).all()
+    deployment_logs = []
+    for dep in deployments:
+        item = dep.to_dict()
+        item['log'] = _tail_file(dep.log_file, lines=lines) if dep.log_file else {'exists': False, 'content': ''}
+        deployment_logs.append(item)
+
+    nginx_logs = []
+    for path in _nginx_log_candidates(a):
+        tail = _tail_file(path, lines=lines)
+        if tail.get('exists'):
+            nginx_logs.append(tail)
+    if not nginx_logs:
+        nginx_logs = [
+            _tail_file('/var/log/nginx/error.log', lines=lines),
+            _tail_file('/var/log/nginx/access.log', lines=lines),
+        ]
+
+    return jsonify({
+        'app': {
+            'id': a.id,
+            'name': a.name,
+            'app_type': a.app_type,
+            'domain': a.domain,
+            'pm2_name': a.pm2_name,
+        },
+        'deployment_logs': deployment_logs,
+        'pm2_logs': _load_pm2_logs(a.pm2_name, lines=lines) if a.pm2_name else {'stdout': '', 'stderr': '', 'combined': ''},
+        'nginx_logs': nginx_logs,
+    })
+
+
 # File manager/server-files routes and shell passphrase helpers live in backend.file_manager.routes.
 from backend.file_manager.routes import (
     register_file_manager_feature,

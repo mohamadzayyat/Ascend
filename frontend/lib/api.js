@@ -110,6 +110,7 @@ export const apiClient = {
   startPhpInstall: (version) => api.post('/api/system/php-install/start', { version }),
   getAppRuntime: (id) => api.get(`/api/app/${id}/runtime`),
   getAppPm2Logs: (id, lines = 120) => api.get(`/api/app/${id}/pm2-logs`, { params: { lines } }),
+  getAppLogs: (id, lines = 200) => api.get(`/api/app/${id}/logs`, { params: { lines } }),
   getServerFilesStatus: () => api.get('/api/server/files/status'),
   unlockServerFiles: (passphrase) => api.post('/api/server/files/unlock', { passphrase }),
   lockServerFiles: () => api.post('/api/server/files/lock'),

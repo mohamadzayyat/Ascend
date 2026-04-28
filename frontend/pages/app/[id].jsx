@@ -9,6 +9,7 @@ import AppSettings from '@/components/AppSettings'
 import AppFileManager from '@/components/AppFileManager'
 import DeploymentLogs from '@/components/DeploymentLogs'
 import DiskUsage from '@/components/DiskUsage'
+import AppLogs from '@/components/AppLogs'
 
 const STATUS_CLASS = {
   deployed: 'bg-green-500/20 text-green-400',
@@ -34,7 +35,7 @@ export default function AppDetail() {
   const fileApi = useMemo(() => (app ? appFileApi(app.id) : null), [app?.id])
 
   useEffect(() => {
-    if (tab && ['overview', 'deployments', 'files', 'settings'].includes(tab)) {
+    if (tab && ['overview', 'deployments', 'logs', 'files', 'settings'].includes(tab)) {
       setActiveTab(tab)
     }
   }, [tab])
@@ -167,7 +168,7 @@ export default function AppDetail() {
       </div>
 
       <div className="flex gap-4 mb-8 border-b border-gray-700">
-        {['overview', 'deployments', 'files', 'settings'].map((t) => (
+        {['overview', 'deployments', 'logs', 'files', 'settings'].map((t) => (
           <button
             key={t}
             onClick={() => setActiveTab(t)}
@@ -216,6 +217,10 @@ export default function AppDetail() {
 
       {activeTab === 'deployments' && (
         <DeploymentLogs appId={app.id} focusDeploymentId={focusDeploymentId} />
+      )}
+
+      {activeTab === 'logs' && (
+        <AppLogs appId={app.id} />
       )}
 
       {fileApi && (
