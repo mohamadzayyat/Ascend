@@ -25,6 +25,8 @@ const DB_COLLATIONS = {
   latin1: ['latin1_swedish_ci', 'latin1_general_ci', 'latin1_bin'],
 }
 
+const MYSQL_PRIVILEGE_OPTIONS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'INDEX', 'ALTER', 'CREATE VIEW', 'SHOW VIEW', 'TRIGGER']
+
 const COMMON_TIMEZONES = [
   'Asia/Beirut',
   'Asia/Jerusalem',
@@ -1331,6 +1333,19 @@ function ManageDatabasesTab({ connection }) {
   const [importBusy, setImportBusy] = useState(false)
   const [importResult, setImportResult] = useState(null)
   const [importError, setImportError] = useState('')
+  const [mysqlUsers, setMysqlUsers] = useState([])
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [usersError, setUsersError] = useState('')
+  const [userBusy, setUserBusy] = useState(false)
+  const [userResult, setUserResult] = useState(null)
+  const [userForm, setUserForm] = useState({
+    username: '',
+    host: 'localhost',
+    password: '',
+    database: '',
+    privileges: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  })
+  const [grantForm, setGrantForm] = useState({ username: '', host: 'localhost', database: '', privileges: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] })
 
   const refreshDatabases = useCallback(async () => {
     setLoading(true)
@@ -1339,12 +1354,29 @@ function ManageDatabasesTab({ connection }) {
       const all = [...(res.data.databases || []), ...(res.data.system_databases || [])]
       setDatabases(all)
       setImportForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
+      setUserForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
+      setGrantForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
     } finally {
       setLoading(false)
     }
   }, [connection.id, connection.default_database])
 
   useEffect(() => { refreshDatabases() }, [refreshDatabases])
+
+  const refreshUsers = useCallback(async (database = '') => {
+    setUsersLoading(true)
+    setUsersError('')
+    try {
+      const res = await apiClient.listMysqlUsers(connection.id, database)
+      setMysqlUsers(res.data.users || [])
+    } catch (err) {
+      setUsersError(err.response?.data?.error || 'Could not load MySQL users')
+    } finally {
+      setUsersLoading(false)
+    }
+  }, [connection.id])
+
+  useEffect(() => { refreshUsers(userForm.database) }, [refreshUsers, userForm.database])
 
   const createCollations = DB_COLLATIONS[createForm.charset] || DB_COLLATIONS.utf8mb4
   const importCollations = DB_COLLATIONS[importForm.charset] || DB_COLLATIONS.utf8mb4
@@ -1370,6 +1402,16 @@ function ManageDatabasesTab({ connection }) {
       const next = { ...f, ...updates }
       if (updates.charset) next.collation = (DB_COLLATIONS[updates.charset] || [])[0] || next.collation
       return next
+    })
+  }
+
+  const togglePrivilege = (target, priv) => {
+    const setter = target === 'grant' ? setGrantForm : setUserForm
+    setter((f) => {
+      const set = new Set(f.privileges || [])
+      if (set.has(priv)) set.delete(priv)
+      else set.add(priv)
+      return { ...f, privileges: [...set] }
     })
   }
 
@@ -1421,6 +1463,68 @@ function ManageDatabasesTab({ connection }) {
       setImportError(err.response?.data?.error || 'SQL import failed')
     } finally {
       setImportBusy(false)
+    }
+  }
+
+  const createMysqlUser = async () => {
+    if (!userForm.username.trim() || !userForm.password) {
+      setUsersError('Username and password are required.')
+      return
+    }
+    setUserBusy(true)
+    setUsersError('')
+    setUserResult(null)
+    try {
+      const res = await apiClient.createMysqlUser(connection.id, {
+        ...userForm,
+        username: userForm.username.trim(),
+        host: userForm.host.trim() || 'localhost',
+      })
+      setUserResult(res.data)
+      setUserForm((f) => ({ ...f, username: '', password: '' }))
+      await refreshUsers(userForm.database)
+    } catch (err) {
+      setUsersError(err.response?.data?.error || 'Could not create MySQL user')
+    } finally {
+      setUserBusy(false)
+    }
+  }
+
+  const grantMysqlUser = async () => {
+    if (!grantForm.username.trim() || !grantForm.database) {
+      setUsersError('Choose a user and database to grant.')
+      return
+    }
+    setUserBusy(true)
+    setUsersError('')
+    setUserResult(null)
+    try {
+      const res = await apiClient.grantMysqlUser(connection.id, {
+        ...grantForm,
+        username: grantForm.username.trim(),
+        host: grantForm.host.trim() || 'localhost',
+      })
+      setUserResult(res.data)
+      await refreshUsers(grantForm.database)
+    } catch (err) {
+      setUsersError(err.response?.data?.error || 'Could not grant privileges')
+    } finally {
+      setUserBusy(false)
+    }
+  }
+
+  const deleteMysqlUser = async (row) => {
+    const label = `${row.username}@${row.host}`
+    if (!typedConfirm(`Delete MySQL user ${label}?`, label)) return
+    setUserBusy(true)
+    setUsersError('')
+    try {
+      await apiClient.deleteMysqlUser(connection.id, row.username, row.host, label)
+      await refreshUsers(userForm.database)
+    } catch (err) {
+      setUsersError(err.response?.data?.error || 'Could not delete MySQL user')
+    } finally {
+      setUserBusy(false)
     }
   }
 
@@ -1545,6 +1649,126 @@ function ManageDatabasesTab({ connection }) {
             Imported {importResult.filename} into {importResult.database} in {importResult.duration_ms} ms.
           </div>
         )}
+      </div>
+
+      <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-5xl">
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div>
+            <h2 className="text-white font-semibold">MySQL users & permissions</h2>
+            <p className="text-xs text-gray-500 mt-1">Create database users and grant privileges to one database.</p>
+          </div>
+          <button type="button" onClick={() => refreshUsers(userForm.database)} disabled={usersLoading} className="text-gray-400 hover:text-white disabled:opacity-50" title="Refresh users">
+            <RefreshCw className={`w-4 h-4 ${usersLoading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-sm text-gray-300">
+                Username
+                <input value={userForm.username} onChange={(e) => setUserForm((f) => ({ ...f, username: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" placeholder="app_user" />
+              </label>
+              <label className="text-sm text-gray-300">
+                Host
+                <input value={userForm.host} onChange={(e) => setUserForm((f) => ({ ...f, host: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" placeholder="localhost or %" />
+              </label>
+              <label className="text-sm text-gray-300">
+                Password
+                <input type="password" value={userForm.password} onChange={(e) => setUserForm((f) => ({ ...f, password: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" placeholder="Strong password" />
+              </label>
+              <label className="text-sm text-gray-300">
+                Grant on database
+                <select value={userForm.database} onChange={(e) => setUserForm((f) => ({ ...f, database: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                  <option value="">Create user only</option>
+                  {databases.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </label>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Privileges</div>
+              <div className="flex flex-wrap gap-2">
+                {MYSQL_PRIVILEGE_OPTIONS.map((p) => (
+                  <label key={p} className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-gray-700 bg-primary text-xs text-gray-300">
+                    <input type="checkbox" checked={(userForm.privileges || []).includes(p)} onChange={() => togglePrivilege('user', p)} />
+                    {p}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <button type="button" onClick={createMysqlUser} disabled={userBusy || !userForm.username.trim() || !userForm.password} className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+              {userBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+              Create user
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-sm text-gray-300">
+                Existing user
+                <select value={`${grantForm.username}@${grantForm.host}`} onChange={(e) => {
+                  const [username, ...hostParts] = e.target.value.split('@')
+                  setGrantForm((f) => ({ ...f, username, host: hostParts.join('@') || 'localhost' }))
+                }} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                  <option value="@localhost">Choose user</option>
+                  {mysqlUsers.map((u) => <option key={`${u.username}@${u.host}`} value={`${u.username}@${u.host}`}>{u.username}@{u.host}</option>)}
+                </select>
+              </label>
+              <label className="text-sm text-gray-300">
+                Database
+                <select value={grantForm.database} onChange={(e) => setGrantForm((f) => ({ ...f, database: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                  {databases.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </label>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-gray-500 mb-2">Grant privileges</div>
+              <div className="flex flex-wrap gap-2">
+                {MYSQL_PRIVILEGE_OPTIONS.map((p) => (
+                  <label key={p} className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-gray-700 bg-primary text-xs text-gray-300">
+                    <input type="checkbox" checked={(grantForm.privileges || []).includes(p)} onChange={() => togglePrivilege('grant', p)} />
+                    {p}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <button type="button" onClick={grantMysqlUser} disabled={userBusy || !grantForm.username || !grantForm.database} className="px-3 py-2 bg-primary hover:bg-gray-700 border border-gray-700 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+              {userBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              Grant access
+            </button>
+          </div>
+        </div>
+
+        {usersError && <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{usersError}</div>}
+        {userResult?.ok && <div className="mt-3 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-300 text-sm">Updated {userResult.user?.username}@{userResult.user?.host}{userResult.database ? ` for ${userResult.database}` : ''}.</div>}
+
+        <div className="mt-4 rounded border border-gray-700 overflow-hidden">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-primary text-gray-300">
+              <tr>
+                <th className="px-3 py-2">User</th>
+                <th className="px-3 py-2">Host</th>
+                <th className="px-3 py-2">Matching grants</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {mysqlUsers.map((u) => (
+                <tr key={`${u.username}@${u.host}`} className="border-t border-gray-700">
+                  <td className="px-3 py-2 text-white font-mono">{u.username}</td>
+                  <td className="px-3 py-2 text-gray-300 font-mono">{u.host}</td>
+                  <td className="px-3 py-2 text-gray-400 text-xs max-w-md truncate" title={(u.grants || []).join('\n')}>{(u.grants || []).length ? `${u.grants.length} grant(s)` : '-'}</td>
+                  <td className="px-3 py-2 text-right">
+                    <button type="button" onClick={() => deleteMysqlUser(u)} disabled={userBusy} className="text-red-400 hover:text-red-300 text-xs font-semibold disabled:opacity-50">Delete</button>
+                  </td>
+                </tr>
+              ))}
+              {!mysqlUsers.length && (
+                <tr><td colSpan={4} className="px-3 py-4 text-gray-500 text-center">{usersLoading ? 'Loading users...' : 'No users returned.'}</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )

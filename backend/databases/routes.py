@@ -161,6 +161,42 @@ def _valid_mysql_token(value):
     return bool(re.fullmatch(r'[A-Za-z0-9_]+', value or ''))
 
 
+def _valid_mysql_user(value):
+    return bool(re.fullmatch(r'[A-Za-z0-9_.$-]{1,80}', value or ''))
+
+
+def _valid_mysql_host(value):
+    return bool(re.fullmatch(r'[A-Za-z0-9_.:%-]{1,255}', value or ''))
+
+
+_MYSQL_PRIVILEGES = {
+    'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP',
+    'INDEX', 'ALTER', 'CREATE TEMPORARY TABLES', 'LOCK TABLES',
+    'EXECUTE', 'CREATE VIEW', 'SHOW VIEW', 'TRIGGER', 'EVENT',
+    'REFERENCES',
+}
+
+
+def _mysql_user_ref(username, host):
+    if not _valid_mysql_user(username) or not _valid_mysql_host(host):
+        raise ValueError('Invalid MySQL username or host.')
+    return f"'{username.replace(chr(39), chr(39) + chr(39))}'@'{host.replace(chr(39), chr(39) + chr(39))}'"
+
+
+def _normalize_privileges(raw):
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.split(',')]
+    privs = [str(p or '').strip().upper() for p in (raw or []) if str(p or '').strip()]
+    if not privs:
+        privs = ['SELECT', 'INSERT', 'UPDATE', 'DELETE']
+    if 'ALL PRIVILEGES' in privs or 'ALL' in privs:
+        return ['ALL PRIVILEGES']
+    invalid = [p for p in privs if p not in _MYSQL_PRIVILEGES]
+    if invalid:
+        raise ValueError(f'Invalid privilege: {invalid[0]}')
+    return sorted(set(privs))
+
+
 def _database_create_sql(name, charset='utf8mb4', collation='utf8mb4_general_ci', if_not_exists=False):
     charset = (charset or 'utf8mb4').strip()
     collation = (collation or 'utf8mb4_general_ci').strip()
@@ -468,6 +504,184 @@ def api_db_import_sql(conn_id):
             import_path.unlink()
         except OSError:
             pass
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/mysql-users')
+@login_required
+def api_db_mysql_users_list(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    database = (request.args.get('database') or '').strip()
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute("""
+                SELECT User, Host
+                FROM mysql.user
+                WHERE User NOT IN ('mysql.sys', 'mysql.session', 'mysql.infoschema')
+                ORDER BY User, Host
+            """)
+            users = [{'username': r[0], 'host': r[1], 'grants': []} for r in cur.fetchall()]
+            if database and _valid_identifier(database):
+                for row in users:
+                    try:
+                        cur.execute(f"SHOW GRANTS FOR {_mysql_user_ref(row['username'], row['host'])}")
+                        grants = [g[0] for g in cur.fetchall()]
+                        needle = f'`{database}`.'
+                        row['grants'] = [g for g in grants if needle in g or ' ON *.* ' in g]
+                    except Exception:
+                        row['grants'] = []
+    except Exception as e:
+        client.close()
+        return jsonify({'error': f'Could not list MySQL users: {str(e)}'}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({'users': users})
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/mysql-users', methods=['POST'])
+@login_required
+def api_db_mysql_user_create(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    host = (data.get('host') or 'localhost').strip() or 'localhost'
+    password = data.get('password') or ''
+    database = (data.get('database') or '').strip()
+    if not _valid_mysql_user(username):
+        return jsonify({'error': 'Username may contain letters, numbers, _, ., $, and - only.'}), 400
+    if not _valid_mysql_host(host):
+        return jsonify({'error': 'Host may contain letters, numbers, %, :, ., _, and - only.'}), 400
+    if not password:
+        return jsonify({'error': 'Password is required.'}), 400
+    if database and not _valid_identifier(database):
+        return jsonify({'error': 'Invalid database name.'}), 400
+    try:
+        privileges = _normalize_privileges(data.get('privileges'))
+        user_ref = _mysql_user_ref(username, host)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute(f"CREATE USER IF NOT EXISTS {user_ref} IDENTIFIED BY %s", (password,))
+            grant_sql = None
+            if database:
+                grant_sql = f"GRANT {', '.join(privileges)} ON {_qi(database)}.* TO {user_ref}"
+                cur.execute(grant_sql)
+            cur.execute('FLUSH PRIVILEGES')
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({
+        'ok': True,
+        'user': {'username': username, 'host': host},
+        'database': database or None,
+        'privileges': privileges,
+    }), 201
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/mysql-users/grants', methods=['POST'])
+@login_required
+def api_db_mysql_user_grant(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    host = (data.get('host') or 'localhost').strip() or 'localhost'
+    database = (data.get('database') or '').strip()
+    if not database or not _valid_identifier(database):
+        return jsonify({'error': 'Choose a valid database.'}), 400
+    try:
+        privileges = _normalize_privileges(data.get('privileges'))
+        user_ref = _mysql_user_ref(username, host)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute(f"GRANT {', '.join(privileges)} ON {_qi(database)}.* TO {user_ref}")
+            cur.execute('FLUSH PRIVILEGES')
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'user': {'username': username, 'host': host}, 'database': database, 'privileges': privileges})
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/mysql-users', methods=['DELETE'])
+@login_required
+def api_db_mysql_user_delete(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    host = (data.get('host') or 'localhost').strip() or 'localhost'
+    confirm_text = (data.get('confirm_text') or '').strip()
+    if confirm_text != f'{username}@{host}':
+        return jsonify({'error': f'Type {username}@{host} to confirm deletion.'}), 400
+    try:
+        user_ref = _mysql_user_ref(username, host)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database='')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    try:
+        with client.cursor() as cur:
+            cur.execute(f"DROP USER IF EXISTS {user_ref}")
+            cur.execute('FLUSH PRIVILEGES')
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True})
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/tables')

@@ -174,6 +174,12 @@ export const apiClient = {
       timeout: 1900000,
     })
   },
+  listMysqlUsers: (id, database = '') =>
+    api.get(`/api/databases/connections/${id}/mysql-users`, { params: { ...(database ? { database } : {}) } }),
+  createMysqlUser: (id, data) => api.post(`/api/databases/connections/${id}/mysql-users`, data),
+  grantMysqlUser: (id, data) => api.post(`/api/databases/connections/${id}/mysql-users/grants`, data),
+  deleteMysqlUser: (id, username, host, confirmText) =>
+    api.delete(`/api/databases/connections/${id}/mysql-users`, { data: { username, host, confirm_text: confirmText } }),
   listTables: (id, database) =>
     api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
   getDatabaseSchema: (id, database) =>
