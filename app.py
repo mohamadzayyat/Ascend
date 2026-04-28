@@ -1815,6 +1815,44 @@ def _resolve_domain_ips(domain):
     return sorted(resolved)
 
 
+_CLOUDFLARE_FALLBACK_CIDRS = [
+    '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+    '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+    '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+    '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+    '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+    '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+]
+
+
+def _load_cloudflare_networks():
+    cidrs = set(_CLOUDFLARE_FALLBACK_CIDRS)
+    for url in ('https://www.cloudflare.com/ips-v4', 'https://www.cloudflare.com/ips-v6'):
+        try:
+            with _urlreq.urlopen(url, timeout=4) as resp:
+                for line in resp.read().decode('utf-8', errors='replace').splitlines():
+                    line = line.strip()
+                    if line:
+                        cidrs.add(line)
+        except Exception:
+            pass
+    out = []
+    for cidr in cidrs:
+        try:
+            out.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            pass
+    return out
+
+
+def _is_cloudflare_proxy_ip(ip):
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _cached('cloudflare_networks', 86400, _load_cloudflare_networks))
+
+
 def _check_domain_points_to_server(domain):
     domain = _normalize_domain(domain)
     if not domain:
@@ -1823,6 +1861,7 @@ def _check_domain_points_to_server(domain):
     domain_ips = _resolve_domain_ips(domain)
     server_ips = _cached('server_public_ips', 60, _load_server_public_ips)
     matches = sorted(set(domain_ips) & set(server_ips))
+    cloudflare_ips = [ip for ip in domain_ips if _is_cloudflare_proxy_ip(ip)]
 
     if not domain_ips:
         return {
@@ -1841,6 +1880,21 @@ def _check_domain_points_to_server(domain):
             'error': 'Could not determine this server public IP. Set ASCEND_PUBLIC_IPS in .env.',
         }
     if not matches:
+        if cloudflare_ips and len(cloudflare_ips) == len(domain_ips):
+            return {
+                'ok': True,
+                'proxied': True,
+                'provider': 'cloudflare',
+                'domain': domain,
+                'domain_ips': domain_ips,
+                'server_ips': server_ips,
+                'matches': [],
+                'warning': (
+                    f'{domain} is proxied through Cloudflare. Public DNS shows Cloudflare edge IPs, '
+                    'so Ascend cannot verify the origin IP directly. Make sure the Cloudflare DNS '
+                    'record points to this server as the origin.'
+                ),
+            }
         return {
             'ok': False,
             'domain': domain,

@@ -59,6 +59,19 @@ export default function DomainDnsCheck({ domain, enabled = true, onStatus }) {
 
   if (state.status === 'ok') {
     const matches = state.result?.matches?.join(', ')
+    if (state.result?.proxied && state.result?.provider === 'cloudflare') {
+      return (
+        <div className="text-xs text-yellow-300 mt-2 space-y-1">
+          <p>{state.result.warning || 'Domain is proxied through Cloudflare.'}</p>
+          {state.result?.server_ips?.length > 0 && (
+            <p className="text-gray-500">Server origin IP: {state.result.server_ips.join(', ')}</p>
+          )}
+          {state.result?.domain_ips?.length > 0 && (
+            <p className="text-gray-500">Cloudflare DNS: {state.result.domain_ips.join(', ')}</p>
+          )}
+        </div>
+      )
+    }
     return (
       <p className="text-xs text-green-400 mt-2">
         DNS is pointed to this server{matches ? ` (${matches})` : ''}.
