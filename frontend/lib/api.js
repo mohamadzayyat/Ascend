@@ -143,6 +143,14 @@ export const apiClient = {
   getDbSchedule: (id) => api.get(`/api/databases/connections/${id}/schedule`),
   upsertDbSchedule: (id, data) =>
     api.put(`/api/databases/connections/${id}/schedule`, data),
+  listDbBackupSchedules: (id) =>
+    api.get(`/api/databases/connections/${id}/backup-schedules`),
+  createDbBackupSchedule: (id, data) =>
+    api.post(`/api/databases/connections/${id}/backup-schedules`, data),
+  updateDbBackupSchedule: (connId, scheduleId, data) =>
+    api.put(`/api/databases/connections/${connId}/backup-schedules/${scheduleId}`, data),
+  deleteDbBackupSchedule: (connId, scheduleId) =>
+    api.delete(`/api/databases/connections/${connId}/backup-schedules/${scheduleId}`),
 }
 
 // Build the WebSocket URL for the server-shell endpoint. Respects

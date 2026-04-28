@@ -328,9 +328,8 @@ class DatabaseConnection(db.Model):
 
 
 class BackupSchedule(db.Model):
-    """A recurring backup job for a single connection. One schedule per
-    connection keeps the UI simple — operators who want multiple cadences
-    can rotate retention or add per-DB filters later."""
+    """Recurring backup job for a connection. Multiple rows allowed — each
+    row targets one database (target_database) or all DBs when target is empty."""
     id = db.Column(db.Integer, primary_key=True)
     connection_id = db.Column(db.Integer, db.ForeignKey('database_connection.id'), nullable=False)
     enabled = db.Column(db.Boolean, default=True, nullable=False)
@@ -342,7 +341,9 @@ class BackupSchedule(db.Model):
     # IANA zone name, e.g. "America/New_York"; empty/null = server default
     schedule_timezone = db.Column(db.String(64), nullable=True)
     retention_days = db.Column(db.Integer, default=14, nullable=False)
-    databases = db.Column(db.Text)  # JSON list of DB names; null/empty == all
+    # Single DB name to dump; empty string = --all-databases. Replaces legacy `databases` JSON.
+    target_database = db.Column(db.String(255), nullable=False, default='')
+    databases = db.Column(db.Text)  # legacy JSON list; migrated into target_database / extra rows
     last_run_at = db.Column(db.DateTime)
     last_run_status = db.Column(db.String(20))  # success | failed
     last_run_error = db.Column(db.Text)
@@ -350,6 +351,13 @@ class BackupSchedule(db.Model):
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
+        td = (self.target_database or '').strip()
+        legacy = []
+        if self.databases:
+            try:
+                legacy = json.loads(self.databases) or []
+            except (TypeError, ValueError):
+                legacy = []
         return {
             'id': self.id,
             'connection_id': self.connection_id,
@@ -359,7 +367,8 @@ class BackupSchedule(db.Model):
             'at_minute': self.at_minute,
             'schedule_timezone': (self.schedule_timezone or '').strip() or None,
             'retention_days': self.retention_days,
-            'databases': json.loads(self.databases) if self.databases else [],
+            'target_database': td,
+            'databases': [td] if td else (legacy or []),
             'last_run_at': iso_utc(self.last_run_at),
             'last_run_status': self.last_run_status,
             'last_run_error': self.last_run_error,
@@ -440,6 +449,50 @@ def _sqlite_columns(table):
     return {r[1] for r in rows}
 
 
+def _migrate_backup_schedule_targets():
+    """Move legacy JSON `databases` into `target_database`; split multi-DB rows."""
+    try:
+        if 'target_database' not in _sqlite_columns('backup_schedule'):
+            return
+        changed = False
+        for s in list(BackupSchedule.query.all()):
+            raw = s.databases
+            if not raw or not str(raw).strip():
+                continue
+            try:
+                arr = [str(x).strip() for x in (json.loads(raw) or []) if str(x).strip()]
+            except (TypeError, ValueError):
+                s.databases = None
+                changed = True
+                continue
+            if len(arr) <= 1:
+                if arr and not (s.target_database or '').strip():
+                    s.target_database = arr[0][:255]
+                s.databases = None
+                changed = True
+                continue
+            s.target_database = arr[0][:255]
+            s.databases = None
+            changed = True
+            for name in arr[1:]:
+                db.session.add(BackupSchedule(
+                    connection_id=s.connection_id,
+                    enabled=s.enabled,
+                    every_hours=s.every_hours,
+                    at_hour=s.at_hour,
+                    at_minute=s.at_minute,
+                    schedule_timezone=s.schedule_timezone,
+                    retention_days=s.retention_days,
+                    target_database=name[:255],
+                    databases=None,
+                ))
+        if changed:
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f'[migrate_schema] backup_schedule target migration: {e}', file=sys.stderr)
+
+
 def migrate_schema():
     """Idempotent migration from the pre-App single-table schema.
 
@@ -462,7 +515,9 @@ def migrate_schema():
         add_col('app', 'disk_size_computed_at DATETIME')
         add_col('backup_schedule', 'at_hour INTEGER DEFAULT 2')
         add_col('backup_schedule', 'schedule_timezone VARCHAR(64)')
+        add_col('backup_schedule', "target_database VARCHAR(255) DEFAULT ''")
         db.session.commit()
+        _migrate_backup_schedule_targets()
 
         # 2. Backfill Apps for legacy Projects
         legacy_projects = [p for p in Project.query.all() if not p.apps]
@@ -4461,11 +4516,15 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual'):
         databases = []
         if schedule_id is not None:
             sched = db.session.get(BackupSchedule, schedule_id)
-            if sched and sched.databases:
-                try:
-                    databases = json.loads(sched.databases) or []
-                except (TypeError, ValueError):
-                    databases = []
+            if sched:
+                td = (getattr(sched, 'target_database', None) or '').strip()
+                if td and re.fullmatch(r'[A-Za-z0-9_$]+', td):
+                    databases = [td]
+                elif sched.databases:
+                    try:
+                        databases = json.loads(sched.databases) or []
+                    except (TypeError, ValueError):
+                        databases = []
         if databases:
             argv += ['--databases', *databases]
         else:
@@ -4632,14 +4691,139 @@ def _server_timezone_name():
     return 'UTC'
 
 
-def _resolve_iana_zone(tz_name):
-    """ZoneInfo for APScheduler; falls back to UTC on unknown names."""
+_iana_tz_lower_map = None
+
+
+def _iana_tz_lower_map_build():
+    """Lowercase IANA name → canonical spelling (built once)."""
+    global _iana_tz_lower_map
+    if _iana_tz_lower_map is None:
+        from zoneinfo import available_timezones
+        _iana_tz_lower_map = {z.lower(): z for z in available_timezones()}
+    return _iana_tz_lower_map
+
+
+def _canonical_timezone_name(raw):
+    """Normalize user input (e.g. Asia\\Beirut, asia/beirut) to canonical IANA id."""
+    if raw is None:
+        return None
+    s = str(raw).strip().replace('\\', '/')
+    while '//' in s:
+        s = s.replace('//', '/')
+    if not s:
+        return None
+    m = _iana_tz_lower_map_build()
+    low = s.lower()
+    if low in m:
+        return m[low]
     from zoneinfo import ZoneInfo
-    name = (tz_name or 'UTC').strip() or 'UTC'
     try:
-        return ZoneInfo(name)
+        zi = ZoneInfo(s)
+        return getattr(zi, 'key', None) or s
+    except Exception:
+        pass
+    raise ValueError(
+        'Unknown timezone. Use an IANA name with forward slashes, e.g. Asia/Beirut. '
+        'Hour and minute are interpreted in that zone (your local time), not the server clock.',
+    )
+
+
+def _resolve_iana_zone(tz_name):
+    """ZoneInfo for APScheduler; normalizes slashes/case; falls back to UTC."""
+    from zoneinfo import ZoneInfo
+    s = (tz_name or 'UTC').strip().replace('\\', '/').replace('//', '/') or 'UTC'
+    m = _iana_tz_lower_map_build()
+    canon = m.get(s.lower())
+    if canon:
+        return ZoneInfo(canon)
+    try:
+        return ZoneInfo(s)
     except Exception:
         return ZoneInfo('UTC')
+
+
+def _normalize_schedule_target_database(val):
+    if val is None:
+        return ''
+    s = str(val).strip()
+    if not s:
+        return ''
+    if not re.fullmatch(r'[A-Za-z0-9_$]+', s):
+        raise ValueError('Database name must be alphanumeric/underscore, or empty for all databases.')
+    return s[:255]
+
+
+def _apply_backup_schedule_fields(sched, data, *, partial):
+    """Populate BackupSchedule from JSON. Raises ValueError on bad input."""
+    if not partial or 'enabled' in data:
+        sched.enabled = bool(data.get('enabled', True if not partial else sched.enabled))
+    if not partial or 'every_hours' in data:
+        try:
+            v = int(data.get('every_hours', 24 if not partial else sched.every_hours))
+        except (TypeError, ValueError):
+            raise ValueError('every_hours must be an integer.')
+        if not 1 <= v <= 24 * 30:
+            raise ValueError('every_hours must be between 1 and 720.')
+        sched.every_hours = v
+    if not partial or 'at_hour' in data:
+        try:
+            ah = int(data.get('at_hour', 2 if not partial else sched.at_hour))
+        except (TypeError, ValueError):
+            raise ValueError('at_hour must be an integer.')
+        if not 0 <= ah <= 23:
+            raise ValueError('at_hour must be 0–23.')
+        sched.at_hour = ah
+    if not partial or 'at_minute' in data:
+        try:
+            m = int(data.get('at_minute', 0 if not partial else sched.at_minute))
+        except (TypeError, ValueError):
+            raise ValueError('at_minute must be an integer.')
+        if not 0 <= m <= 59:
+            raise ValueError('at_minute must be 0–59.')
+        sched.at_minute = m
+    if not partial or 'schedule_timezone' in data:
+        tz_raw = data.get('schedule_timezone')
+        if tz_raw is None or (isinstance(tz_raw, str) and not tz_raw.strip()):
+            sched.schedule_timezone = None
+        else:
+            sched.schedule_timezone = _canonical_timezone_name(tz_raw)
+    if not partial or 'retention_days' in data:
+        try:
+            r = int(data.get('retention_days', 14 if not partial else sched.retention_days))
+        except (TypeError, ValueError):
+            raise ValueError('retention_days must be an integer.')
+        if not 1 <= r <= 365 * 5:
+            raise ValueError('retention_days must be between 1 and 1825.')
+        sched.retention_days = r
+    if not partial or 'target_database' in data or 'databases' in data:
+        if 'target_database' in data:
+            sched.target_database = _normalize_schedule_target_database(data.get('target_database'))
+        elif 'databases' in data:
+            dbs = data.get('databases') or []
+            if not isinstance(dbs, list):
+                raise ValueError('databases must be a list.')
+            if len(dbs) > 1:
+                raise ValueError('Use separate schedule rows per database (target_database).')
+            sched.target_database = _normalize_schedule_target_database(dbs[0]) if dbs else ''
+        elif not partial:
+            sched.target_database = ''
+        sched.databases = None
+
+
+def _backup_schedule_next_run_at(sched):
+    ap = _ensure_scheduler()
+    if not ap or not sched.enabled:
+        return None
+    job = ap.get_job(f'db-backup-{sched.id}')
+    if not job or not job.next_run_time:
+        return None
+    return iso_utc(job.next_run_time)
+
+
+def _schedule_dict_with_next(s):
+    d = s.to_dict()
+    d['next_run_at'] = _backup_schedule_next_run_at(s)
+    return d
 
 
 @app.route('/api/databases/connections/<int:conn_id>/schedule', methods=['GET'])
@@ -4651,9 +4835,11 @@ def api_db_schedule_get(conn_id):
     conn, err = _conn_owned(conn_id)
     if err:
         return err
-    sched = BackupSchedule.query.filter_by(connection_id=conn.id).first()
+    rows = BackupSchedule.query.filter_by(connection_id=conn.id).order_by(BackupSchedule.id).all()
+    out = [_schedule_dict_with_next(s) for s in rows]
     return jsonify({
-        'schedule': sched.to_dict() if sched else None,
+        'schedules': out,
+        'schedule': out[0] if out else None,
         'server_timezone': _server_timezone_name(),
     })
 
@@ -4662,6 +4848,7 @@ def api_db_schedule_get(conn_id):
 @csrf.exempt
 @login_required
 def api_db_schedule_upsert(conn_id):
+    """Updates the first schedule row only (legacy). Prefer /backup-schedules for multiple."""
     err = _admin_required()
     if err:
         return err
@@ -4669,64 +4856,101 @@ def api_db_schedule_upsert(conn_id):
     if err:
         return err
     data = request.get_json(silent=True) or {}
-    sched = BackupSchedule.query.filter_by(connection_id=conn.id).first()
+    sched = BackupSchedule.query.filter_by(connection_id=conn.id).order_by(BackupSchedule.id).first()
     if sched is None:
-        sched = BackupSchedule(connection_id=conn.id)
+        sched = BackupSchedule(connection_id=conn.id, target_database='', databases=None)
         db.session.add(sched)
-    if 'enabled' in data:
-        sched.enabled = bool(data['enabled'])
-    if 'every_hours' in data:
-        try:
-            v = int(data['every_hours'])
-        except (TypeError, ValueError):
-            return jsonify({'error': 'every_hours must be an integer.'}), 400
-        if not 1 <= v <= 24 * 30:
-            return jsonify({'error': 'every_hours must be between 1 and 720.'}), 400
-        sched.every_hours = v
-    if 'at_hour' in data:
-        try:
-            ah = int(data['at_hour'])
-        except (TypeError, ValueError):
-            return jsonify({'error': 'at_hour must be an integer.'}), 400
-        if not 0 <= ah <= 23:
-            return jsonify({'error': 'at_hour must be 0–23.'}), 400
-        sched.at_hour = ah
-    if 'at_minute' in data:
-        try:
-            m = int(data['at_minute'])
-        except (TypeError, ValueError):
-            return jsonify({'error': 'at_minute must be an integer.'}), 400
-        if not 0 <= m <= 59:
-            return jsonify({'error': 'at_minute must be 0–59.'}), 400
-        sched.at_minute = m
-    if 'schedule_timezone' in data:
-        tz_raw = data.get('schedule_timezone')
-        if tz_raw is None or (isinstance(tz_raw, str) and not tz_raw.strip()):
-            sched.schedule_timezone = None
-        else:
-            tz_s = str(tz_raw).strip()
-            try:
-                from zoneinfo import ZoneInfo
-                ZoneInfo(tz_s)
-            except Exception:
-                return jsonify({'error': f'Unknown timezone: {tz_s}'}), 400
-            sched.schedule_timezone = tz_s
-    if 'retention_days' in data:
-        try:
-            r = int(data['retention_days'])
-        except (TypeError, ValueError):
-            return jsonify({'error': 'retention_days must be an integer.'}), 400
-        if not 1 <= r <= 365 * 5:
-            return jsonify({'error': 'retention_days must be between 1 and 1825.'}), 400
-        sched.retention_days = r
-    if 'databases' in data:
-        dbs = data['databases'] or []
-        if not isinstance(dbs, list):
-            return jsonify({'error': 'databases must be a list of names.'}), 400
-        sched.databases = json.dumps([str(d) for d in dbs])
+    try:
+        _apply_backup_schedule_fields(sched, data, partial=True)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     db.session.commit()
     _reschedule_backup_jobs()
     return jsonify({'schedule': sched.to_dict(), 'server_timezone': _server_timezone_name()})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/backup-schedules', methods=['GET'])
+@login_required
+def api_db_backup_schedules_list(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    rows = BackupSchedule.query.filter_by(connection_id=conn.id).order_by(BackupSchedule.id).all()
+    return jsonify({
+        'schedules': [_schedule_dict_with_next(s) for s in rows],
+        'server_timezone': _server_timezone_name(),
+    })
+
+
+@app.route('/api/databases/connections/<int:conn_id>/backup-schedules', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_db_backup_schedules_create(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    sched = BackupSchedule(connection_id=conn.id, target_database='', databases=None)
+    try:
+        _apply_backup_schedule_fields(sched, data, partial=False)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    db.session.add(sched)
+    db.session.commit()
+    _reschedule_backup_jobs()
+    db.session.refresh(sched)
+    return jsonify({'schedule': _schedule_dict_with_next(sched), 'server_timezone': _server_timezone_name()})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/backup-schedules/<int:sid>', methods=['PUT'])
+@csrf.exempt
+@login_required
+def api_db_backup_schedules_update(conn_id, sid):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    sched = db.session.get(BackupSchedule, sid)
+    if not sched or sched.connection_id != conn.id:
+        return jsonify({'error': 'Schedule not found.'}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        _apply_backup_schedule_fields(sched, data, partial=True)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    db.session.commit()
+    _reschedule_backup_jobs()
+    db.session.refresh(sched)
+    return jsonify({'schedule': _schedule_dict_with_next(sched), 'server_timezone': _server_timezone_name()})
+
+
+@app.route('/api/databases/connections/<int:conn_id>/backup-schedules/<int:sid>', methods=['DELETE'])
+@csrf.exempt
+@login_required
+def api_db_backup_schedules_delete(conn_id, sid):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    sched = db.session.get(BackupSchedule, sid)
+    if not sched or sched.connection_id != conn.id:
+        return jsonify({'error': 'Schedule not found.'}), 404
+    for a in BackupArchive.query.filter_by(schedule_id=sid).all():
+        a.schedule_id = None
+    db.session.delete(sched)
+    db.session.commit()
+    _reschedule_backup_jobs()
+    return jsonify({'ok': True})
 
 
 # ── APScheduler wiring ──────────────────────────────────────────
