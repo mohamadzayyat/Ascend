@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { Github, Mail, Shield, ShieldCheck, Users } from 'lucide-react'
+import { Archive, Github, Mail, Shield, ShieldCheck, Users } from 'lucide-react'
 import { useAuth } from '@/lib/hooks/useAuth'
 
 export default function Settings() {
@@ -88,6 +88,22 @@ export default function Settings() {
             </div>
             <p className="text-gray-400 text-sm">
               Create panel users, assign roles, and reset passwords.
+            </p>
+          </Link>
+        )}
+        {user?.is_admin && (
+          <Link
+            href="/settings/ascend-backup"
+            className="bg-secondary rounded-lg border border-gray-700 hover:border-accent p-6 transition group"
+          >
+            <div className="flex items-center gap-3 mb-2">
+              <Archive className="w-6 h-6 text-accent" />
+              <h3 className="text-white font-bold group-hover:text-accent transition">
+                Ascend Backup
+              </h3>
+            </div>
+            <p className="text-gray-400 text-sm">
+              Backup and restore the panel database, config, and Ascend-owned server files.
             </p>
           </Link>
         )}

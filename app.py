@@ -38,6 +38,7 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 import dotenv
 from urllib import request as _urlreq, error as _urlerr
@@ -74,9 +75,11 @@ try:
 except AttributeError:
     is_root = False  # Windows
 DEPLOYMENTS_DIR = Path("/root") if is_root else BASE_DIR / "deployments"
+ASCEND_BACKUPS_DIR = BASE_DIR / "ascend-backups"
 
 LOG_DIR.mkdir(exist_ok=True)
 DEPLOYMENTS_DIR.mkdir(exist_ok=True)
+ASCEND_BACKUPS_DIR.mkdir(exist_ok=True)
 
 dotenv.load_dotenv(BASE_DIR / '.env')
 
@@ -1293,6 +1296,235 @@ def api_settings_backup_upload_test():
                 pass
     _audit_log('backup_upload.test', 'ok', 'Remote backup upload test succeeded', {'uploaded_to': target})
     return jsonify({'ok': True, 'uploaded_to': target})
+
+
+def _ascend_db_paths():
+    paths = []
+    uri = app.config.get('SQLALCHEMY_DATABASE_URI') or ''
+    if uri.startswith('sqlite:///'):
+        paths.append(Path(uri.replace('sqlite:///', '', 1)))
+    for name in ('ascend.db', 'cpanel.db'):
+        paths.append(BASE_DIR / name)
+    seen = set()
+    out = []
+    for p in paths:
+        try:
+            rp = p.resolve()
+        except Exception:
+            rp = p
+        if str(rp) not in seen and p.exists():
+            seen.add(str(rp))
+            out.append(p)
+    return out
+
+
+def _ascend_backup_name(prefix='ascend-backup'):
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    return f'{prefix}-{stamp}.zip'
+
+
+def _ascend_backup_manifest(reason='manual'):
+    return {
+        'name': 'Ascend self backup',
+        'version': 1,
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'created_by': getattr(current_user, 'username', 'system') if current_user else 'system',
+        'reason': reason,
+        'base_dir': str(BASE_DIR),
+    }
+
+
+def _create_ascend_backup(reason='manual'):
+    ASCEND_BACKUPS_DIR.mkdir(exist_ok=True)
+    filename = _ascend_backup_name('ascend-safety' if reason == 'restore-safety' else 'ascend-backup')
+    target = ASCEND_BACKUPS_DIR / filename
+    manifest = _ascend_backup_manifest(reason)
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('manifest.json', json.dumps(manifest, indent=2))
+        for db_path in _ascend_db_paths():
+            zf.write(db_path, f'files/{db_path.name}')
+        for rel in ('.env', 'frontend/.env.local'):
+            p = BASE_DIR / rel
+            if p.exists() and p.is_file():
+                zf.write(p, f'files/{rel}')
+        for p in (Path('/etc/nginx/sites-available/ascend'), Path('/etc/nginx/sites-enabled/ascend')):
+            if p.exists() and p.is_file():
+                zf.write(p, f'nginx/{p.name}')
+    return target
+
+
+def _ascend_backup_info(path):
+    st = path.stat()
+    manifest = {}
+    try:
+        with zipfile.ZipFile(path, 'r') as zf:
+            if 'manifest.json' in zf.namelist():
+                manifest = json.loads(zf.read('manifest.json').decode('utf-8', errors='replace'))
+    except Exception:
+        manifest = {}
+    return {
+        'filename': path.name,
+        'size_bytes': st.st_size,
+        'created_at': datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+        'manifest': manifest,
+    }
+
+
+def _ascend_backup_path(filename):
+    safe = secure_filename(filename or '')
+    if not safe or not safe.endswith('.zip'):
+        raise ValueError('Invalid backup filename.')
+    path = (ASCEND_BACKUPS_DIR / safe).resolve()
+    if ASCEND_BACKUPS_DIR.resolve() not in path.parents:
+        raise ValueError('Invalid backup path.')
+    return path
+
+
+def _schedule_ascend_restart():
+    if not shutil.which('systemctl'):
+        return {'scheduled': False, 'reason': 'systemctl not available'}
+    cmd = 'sleep 2; systemctl restart ascend-backend ascend-frontend'
+    try:
+        if shutil.which('systemd-run'):
+            unit = f'ascend-restore-restart-{int(time.time())}'
+            subprocess.Popen(
+                ['systemd-run', '--unit', unit, '--description', 'Ascend restore restart', '/bin/bash', '-lc', cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return {'scheduled': True, 'launcher': 'systemd-run', 'unit': unit}
+        subprocess.Popen(['setsid', '/bin/bash', '-lc', cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return {'scheduled': True, 'launcher': 'setsid'}
+    except Exception as exc:
+        return {'scheduled': False, 'error': str(exc)}
+
+
+def _restore_ascend_backup(path):
+    safety = _create_ascend_backup(reason='restore-safety')
+    with tempfile.TemporaryDirectory(prefix='ascend-restore-') as td:
+        tmp = Path(td)
+        with zipfile.ZipFile(path, 'r') as zf:
+            zf.extractall(tmp)
+        files_dir = tmp / 'files'
+        restored = []
+        db.session.remove()
+        db.engine.dispose()
+        for name in ('ascend.db', 'cpanel.db'):
+            src = files_dir / name
+            if src.exists():
+                dst = BASE_DIR / name
+                shutil.copy2(src, dst)
+                restored.append(str(dst))
+        for rel in ('.env', 'frontend/.env.local'):
+            src = files_dir / rel
+            if src.exists():
+                dst = BASE_DIR / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                restored.append(str(dst))
+        nginx_dir = tmp / 'nginx'
+        nginx_src = nginx_dir / 'ascend'
+        if nginx_src.exists() and Path('/etc/nginx/sites-available').exists():
+            dst = Path('/etc/nginx/sites-available/ascend')
+            shutil.copy2(nginx_src, dst)
+            restored.append(str(dst))
+    restart = _schedule_ascend_restart()
+    return {'safety_backup': safety.name, 'restored': restored, 'restart': restart}
+
+
+@app.route('/api/settings/ascend-backups', methods=['GET'])
+@login_required
+def api_ascend_backups_list():
+    err = _admin_required()
+    if err:
+        return err
+    ASCEND_BACKUPS_DIR.mkdir(exist_ok=True)
+    rows = sorted(ASCEND_BACKUPS_DIR.glob('*.zip'), key=lambda p: p.stat().st_mtime, reverse=True)
+    return jsonify({'backups': [_ascend_backup_info(p) for p in rows[:100]]})
+
+
+@app.route('/api/settings/ascend-backups', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_ascend_backups_create():
+    err = _admin_required()
+    if err:
+        return err
+    path = _create_ascend_backup()
+    uploaded_to = None
+    upload_error = None
+    try:
+        uploaded_to = _upload_backup_to_remote(str(path), path.name)
+    except Exception as exc:
+        upload_error = str(exc)
+    _audit_log('ascend_backup.created', 'ok', f'Ascend backup created: {path.name}', {'uploaded_to': uploaded_to, 'upload_error': upload_error})
+    return jsonify({'backup': _ascend_backup_info(path), 'uploaded_to': uploaded_to, 'upload_error': upload_error})
+
+
+@app.route('/api/settings/ascend-backups/<filename>/download')
+@login_required
+def api_ascend_backups_download(filename):
+    err = _admin_required()
+    if err:
+        return err
+    try:
+        path = _ascend_backup_path(filename)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if not path.exists():
+        return jsonify({'error': 'Backup not found'}), 404
+    return send_file(str(path), as_attachment=True, download_name=path.name, mimetype='application/zip')
+
+
+@app.route('/api/settings/ascend-backups/upload', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_ascend_backups_upload():
+    err = _admin_required()
+    if err:
+        return err
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'No backup file uploaded.'}), 400
+    safe = secure_filename(f.filename or '')
+    if not safe.endswith('.zip'):
+        return jsonify({'error': 'Upload an Ascend .zip backup.'}), 400
+    target = ASCEND_BACKUPS_DIR / f'uploaded-{int(time.time())}-{safe}'
+    f.save(target)
+    try:
+        with zipfile.ZipFile(target, 'r') as zf:
+            if 'manifest.json' not in zf.namelist():
+                raise ValueError('Backup manifest missing.')
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        return jsonify({'error': f'Invalid Ascend backup: {exc}'}), 400
+    _audit_log('ascend_backup.uploaded', 'ok', f'Ascend backup uploaded: {target.name}')
+    return jsonify({'backup': _ascend_backup_info(target)})
+
+
+@app.route('/api/settings/ascend-backups/<filename>/restore', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_ascend_backups_restore(filename):
+    err = _admin_required()
+    if err:
+        return err
+    try:
+        path = _ascend_backup_path(filename)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if not path.exists():
+        return jsonify({'error': 'Backup not found'}), 404
+    data = request.get_json(silent=True) or {}
+    if data.get('confirm_text') != path.name:
+        return jsonify({'error': 'Type the backup filename exactly to confirm.', 'confirm_required': True, 'confirm_text': path.name}), 400
+    try:
+        result = _restore_ascend_backup(path)
+        _audit_log('ascend_backup.restored', 'ok', f'Ascend backup restored: {path.name}', result)
+        return jsonify({'ok': True, **result})
+    except Exception as exc:
+        _audit_log('ascend_backup.restore_failed', 'failed', str(exc), {'filename': path.name})
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/projects', methods=['GET'])

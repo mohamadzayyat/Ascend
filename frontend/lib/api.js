@@ -75,6 +75,20 @@ export const apiClient = {
   getBackupUploadSettings: () => api.get('/api/settings/backup-upload'),
   updateBackupUploadSettings: (data) => api.put('/api/settings/backup-upload', data),
   testBackupUploadSettings: () => api.post('/api/settings/backup-upload/test', {}, { timeout: 120000 }),
+  listAscendBackups: () => api.get('/api/settings/ascend-backups'),
+  createAscendBackup: () => api.post('/api/settings/ascend-backups', {}, { timeout: 120000 }),
+  uploadAscendBackup: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.post('/api/settings/ascend-backups/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    })
+  },
+  restoreAscendBackup: (filename, confirmText) =>
+    api.post(`/api/settings/ascend-backups/${encodeURIComponent(filename)}/restore`, { confirm_text: confirmText }, { timeout: 120000 }),
+  downloadAscendBackupUrl: (filename) =>
+    `${API_URL}/api/settings/ascend-backups/${encodeURIComponent(filename)}/download`,
 
   getGitHubCredentials: () => api.get('/api/github-credentials'),
   addGitHubCredential: (username, token) => api.post('/api/github-credentials', { username, token }),

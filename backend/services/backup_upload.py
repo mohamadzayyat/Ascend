@@ -101,6 +101,7 @@ def _upload_backup_to_remote(filepath, filename):
             current = _webdav_join(current, part)
             _webdav_request('MKCOL', current, username, password)
     target = _webdav_join(url, remote_path, filename)
+    content_type = 'application/zip' if str(filename).lower().endswith('.zip') else 'application/sql'
     with open(filepath, 'rb') as fh:
-        _webdav_request('PUT', target, username, password, data=fh.read(), content_type='application/sql')
+        _webdav_request('PUT', target, username, password, data=fh.read(), content_type=content_type)
     return target
