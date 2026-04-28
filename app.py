@@ -3102,6 +3102,11 @@ def _verify_http_challenge_route(domain, log_file):
             pass
 
 
+def _domain_is_cloudflare_proxied(domain):
+    dns = _check_domain_points_to_server(domain)
+    return bool(dns.get('ok') and dns.get('proxied') and dns.get('provider') == 'cloudflare')
+
+
 def _find_valid_certificate(domain, min_days=7):
     live_dir = '/etc/letsencrypt/live'
     if not domain or not os.path.isdir(live_dir):
@@ -3364,7 +3369,14 @@ def setup_nginx_config(app_row, log_file):
         log_file.write("  Nginx reloaded\n")
 
         if app_row.enable_ssl and not existing_cert:
-            if not _verify_http_challenge_route(app_row.domain, log_file):
+            cloudflare_proxied = _domain_is_cloudflare_proxied(app_row.domain)
+            if cloudflare_proxied:
+                log_file.write(
+                    "  Domain is proxied through Cloudflare; skipping strict public HTTP "
+                    "challenge preflight because Cloudflare may return edge-layer responses. "
+                    "Certbot will still verify issuance.\n"
+                )
+            elif not _verify_http_challenge_route(app_row.domain, log_file):
                 log_file.write(
                     "  SSL preflight failed: Let's Encrypt will not be able to reach "
                     "this domain over HTTP. Check DNS, firewall, port 80, and proxy settings.\n"
