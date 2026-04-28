@@ -182,6 +182,8 @@ export const apiClient = {
     api.delete(`/api/databases/connections/${id}/mysql-users`, { data: { username, host, confirm_text: confirmText } }),
   listTables: (id, database) =>
     api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
+  createTable: (id, data) => api.post(`/api/databases/connections/${id}/tables`, data),
+  addTableColumn: (id, data) => api.post(`/api/databases/connections/${id}/table-columns`, data),
   getDatabaseSchema: (id, database) =>
     api.get(`/api/databases/connections/${id}/database-schema`, { params: { database } }),
   getTableRows: (id, database, table, page = 1, perPage = 50, search = '') =>

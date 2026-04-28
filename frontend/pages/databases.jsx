@@ -26,6 +26,18 @@ const DB_COLLATIONS = {
 }
 
 const MYSQL_PRIVILEGE_OPTIONS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'INDEX', 'ALTER', 'CREATE VIEW', 'SHOW VIEW', 'TRIGGER']
+const COLUMN_TYPES = ['INT', 'BIGINT', 'VARCHAR', 'TEXT', 'LONGTEXT', 'DECIMAL', 'DATETIME', 'TIMESTAMP', 'DATE', 'TINYINT', 'BOOLEAN', 'JSON']
+
+function columnDefinitionPreview(col) {
+  const name = col.name?.trim() || 'column_name'
+  const type = col.type || 'VARCHAR'
+  const length = col.length?.trim() || (type === 'VARCHAR' ? '255' : '')
+  const typeSql = length ? `${type}(${length})` : type
+  const parts = [`\`${name}\` ${typeSql}`, col.nullable ? 'NULL' : 'NOT NULL']
+  if (col.default !== undefined && col.default !== '') parts.push(String(col.default).toUpperCase() === 'NULL' ? 'DEFAULT NULL' : `DEFAULT '${String(col.default).replace(/'/g, "''")}'`)
+  if (col.auto_increment) parts.push('AUTO_INCREMENT')
+  return parts.join(' ')
+}
 
 const COMMON_TIMEZONES = [
   'Asia/Beirut',
@@ -812,6 +824,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   const [changes, setChanges] = useState({})
   const [insertOpen, setInsertOpen] = useState(false)
   const [newRow, setNewRow] = useState({})
+  const [addColumnOpen, setAddColumnOpen] = useState(false)
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(searchInput.trim()), 350)
@@ -824,6 +837,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     setChanges({})
     setEditing(null)
     setInsertOpen(false)
+    setAddColumnOpen(false)
     setNewRow({})
     setDesign(null)
     setView('data')
@@ -860,6 +874,19 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
       .finally(() => !cancelled && setDesignLoading(false))
     return () => { cancelled = true }
   }, [view, design, connectionId, database, table])
+
+  const reloadDesign = async () => {
+    setDesignLoading(true)
+    setError('')
+    try {
+      const res = await apiClient.getTableDesign(connectionId, database, table)
+      setDesign(res.data)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load table design')
+    } finally {
+      setDesignLoading(false)
+    }
+  }
 
   if (error) return <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}<button type="button" onClick={() => { setError(''); loadRows() }} className="ml-3 underline">Retry</button></div>
   if (!data) return <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading...</div>
@@ -913,7 +940,23 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
         </div>}
       </div>
       {message && <div className="rounded border border-green-500/30 bg-green-500/10 px-3 py-2 text-green-300 text-xs">{message}</div>}
-      {view === 'design' ? <TableDesignPanel design={design} loading={designLoading} /> : <>
+      {view === 'design' ? (
+        <TableDesignPanel
+          design={design}
+          loading={designLoading}
+          connectionId={connectionId}
+          database={database}
+          table={table}
+          addColumnOpen={addColumnOpen}
+          onToggleAddColumn={() => setAddColumnOpen((v) => !v)}
+          onColumnAdded={async () => {
+            setMessage('Column added.')
+            setAddColumnOpen(false)
+            await reloadDesign()
+            await loadRows()
+          }}
+        />
+      ) : <>
         {showSearch && <div className="relative max-w-md shrink-0"><Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" /><input type="search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search rows (any column)..." className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600" /></div>}
         <div className="flex items-center justify-between text-xs text-gray-400 shrink-0"><span>{data.total.toLocaleString()} row{data.total === 1 ? '' : 's'}{data.search ? ' matching search' : ' total'} - page {data.page} of {totalPages}</span><div className="flex items-center gap-2"><button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Prev</button><button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Next</button></div></div>
         {insertOpen && <div className="rounded border border-gray-700 bg-secondary p-3"><div className="text-sm font-semibold text-white mb-2">Insert row</div><div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">{data.columns.map((col) => <label key={col} className="text-xs text-gray-400">{col}<input value={newRow[col] ?? ''} onChange={(e) => setNewRow((r) => ({ ...r, [col]: e.target.value }))} placeholder="leave empty for default/null" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label>)}</div><div className="mt-3 flex gap-2"><button type="button" onClick={insertRow} className="px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold">Insert</button><button type="button" onClick={() => { setInsertOpen(false); setNewRow({}) }} className="px-3 py-1.5 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs">Cancel</button></div></div>}
@@ -923,15 +966,72 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   )
 }
 
-function TableDesignPanel({ design, loading }) {
+function TableDesignPanel({ design, loading, connectionId, database, table, addColumnOpen, onToggleAddColumn, onColumnAdded }) {
   const [tab, setTab] = useState('fields')
   if (loading || !design) return <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading table design...</div>
   const tabs = [['fields', 'Fields'], ['indexes', 'Indexes'], ['foreign_keys', 'Foreign Keys'], ['triggers', 'Triggers'], ['sql', 'SQL Preview']]
-  return <div className="flex-1 min-h-0 flex flex-col gap-3"><div className="flex flex-wrap gap-2">{tabs.map(([id, label]) => <button key={id} type="button" onClick={() => setTab(id)} className={`px-3 py-1.5 rounded text-sm ${tab === id ? 'bg-accent text-white' : 'bg-primary text-gray-300 hover:text-white'}`}>{label}</button>)}</div>{tab === 'fields' && <DesignTable columns={['Name', 'Type', 'Length', 'Decimals', 'Not null', 'Key', 'Default', 'Extra', 'Charset', 'Collation', 'Comment']}>{design.columns.map((c) => <tr key={c.name} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{c.name}</td><td className="px-3 py-1.5">{c.data_type}</td><td className="px-3 py-1.5">{c.char_length || c.numeric_precision || ''}</td><td className="px-3 py-1.5">{c.numeric_scale ?? ''}</td><td className="px-3 py-1.5">{c.nullable ? '' : 'yes'}</td><td className="px-3 py-1.5">{c.key || ''}</td><td className="px-3 py-1.5 font-mono text-xs">{c.default ?? ''}</td><td className="px-3 py-1.5">{c.extra || ''}</td><td className="px-3 py-1.5">{c.charset || ''}</td><td className="px-3 py-1.5">{c.collation || ''}</td><td className="px-3 py-1.5">{c.comment || ''}</td></tr>)}</DesignTable>}{tab === 'indexes' && <DesignTable columns={['Name', 'Unique', 'Seq', 'Column', 'Type', 'Collation', 'Cardinality', 'Nullable']}>{design.indexes.map((idx, i) => <tr key={`${idx.name}-${i}`} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{idx.name}</td><td className="px-3 py-1.5">{idx.unique ? 'yes' : 'no'}</td><td className="px-3 py-1.5">{idx.sequence}</td><td className="px-3 py-1.5 font-mono text-xs">{idx.column}</td><td className="px-3 py-1.5">{idx.type}</td><td className="px-3 py-1.5">{idx.collation || ''}</td><td className="px-3 py-1.5">{idx.cardinality ?? ''}</td><td className="px-3 py-1.5">{idx.nullable || ''}</td></tr>)}</DesignTable>}{tab === 'foreign_keys' && <DesignTable columns={['Constraint', 'Column', 'References']}>{design.foreign_keys.map((fk, i) => <tr key={`${fk.constraint}-${i}`} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{fk.constraint}</td><td className="px-3 py-1.5 font-mono text-xs">{fk.column}</td><td className="px-3 py-1.5 font-mono text-xs">{fk.referenced_schema}.{fk.referenced_table}.{fk.referenced_column}</td></tr>)}</DesignTable>}{tab === 'triggers' && <DesignTable columns={['Name', 'Timing', 'Event', 'Statement']}>{design.triggers.map((tr) => <tr key={tr.name} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{tr.name}</td><td className="px-3 py-1.5">{tr.timing}</td><td className="px-3 py-1.5">{tr.event}</td><td className="px-3 py-1.5 font-mono text-xs whitespace-pre-wrap">{tr.statement}</td></tr>)}</DesignTable>}{tab === 'sql' && <pre className="flex-1 min-h-0 overflow-auto rounded border border-gray-700 bg-primary p-3 text-xs text-gray-200 whitespace-pre-wrap">{design.create_sql || 'No SQL returned.'}</pre>}</div>
+  return <div className="flex-1 min-h-0 flex flex-col gap-3"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap gap-2">{tabs.map(([id, label]) => <button key={id} type="button" onClick={() => setTab(id)} className={`px-3 py-1.5 rounded text-sm ${tab === id ? 'bg-accent text-white' : 'bg-primary text-gray-300 hover:text-white'}`}>{label}</button>)}</div><button type="button" onClick={onToggleAddColumn} className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1"><Plus className="w-3 h-3" /> Add column</button></div>{addColumnOpen && <AddColumnPanel connectionId={connectionId} database={database} table={table} columns={design.columns || []} onAdded={onColumnAdded} />}{tab === 'fields' && <DesignTable columns={['Name', 'Type', 'Length', 'Decimals', 'Not null', 'Key', 'Default', 'Extra', 'Charset', 'Collation', 'Comment']}>{design.columns.map((c) => <tr key={c.name} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{c.name}</td><td className="px-3 py-1.5">{c.data_type}</td><td className="px-3 py-1.5">{c.char_length || c.numeric_precision || ''}</td><td className="px-3 py-1.5">{c.numeric_scale ?? ''}</td><td className="px-3 py-1.5">{c.nullable ? '' : 'yes'}</td><td className="px-3 py-1.5">{c.key || ''}</td><td className="px-3 py-1.5 font-mono text-xs">{c.default ?? ''}</td><td className="px-3 py-1.5">{c.extra || ''}</td><td className="px-3 py-1.5">{c.charset || ''}</td><td className="px-3 py-1.5">{c.collation || ''}</td><td className="px-3 py-1.5">{c.comment || ''}</td></tr>)}</DesignTable>}{tab === 'indexes' && <DesignTable columns={['Name', 'Unique', 'Seq', 'Column', 'Type', 'Collation', 'Cardinality', 'Nullable']}>{design.indexes.map((idx, i) => <tr key={`${idx.name}-${i}`} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{idx.name}</td><td className="px-3 py-1.5">{idx.unique ? 'yes' : 'no'}</td><td className="px-3 py-1.5">{idx.sequence}</td><td className="px-3 py-1.5 font-mono text-xs">{idx.column}</td><td className="px-3 py-1.5">{idx.type}</td><td className="px-3 py-1.5">{idx.collation || ''}</td><td className="px-3 py-1.5">{idx.cardinality ?? ''}</td><td className="px-3 py-1.5">{idx.nullable || ''}</td></tr>)}</DesignTable>}{tab === 'foreign_keys' && <DesignTable columns={['Constraint', 'Column', 'References']}>{design.foreign_keys.map((fk, i) => <tr key={`${fk.constraint}-${i}`} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{fk.constraint}</td><td className="px-3 py-1.5 font-mono text-xs">{fk.column}</td><td className="px-3 py-1.5 font-mono text-xs">{fk.referenced_schema}.{fk.referenced_table}.{fk.referenced_column}</td></tr>)}</DesignTable>}{tab === 'triggers' && <DesignTable columns={['Name', 'Timing', 'Event', 'Statement']}>{design.triggers.map((tr) => <tr key={tr.name} className="border-t border-gray-700"><td className="px-3 py-1.5 font-mono text-xs text-white">{tr.name}</td><td className="px-3 py-1.5">{tr.timing}</td><td className="px-3 py-1.5">{tr.event}</td><td className="px-3 py-1.5 font-mono text-xs whitespace-pre-wrap">{tr.statement}</td></tr>)}</DesignTable>}{tab === 'sql' && <pre className="flex-1 min-h-0 overflow-auto rounded border border-gray-700 bg-primary p-3 text-xs text-gray-200 whitespace-pre-wrap">{design.create_sql || 'No SQL returned.'}</pre>}</div>
+}
+
+function AddColumnPanel({ connectionId, database, table, columns, onAdded }) {
+  const [form, setForm] = useState({ name: '', type: 'VARCHAR', length: '255', nullable: true, default: '', auto_increment: false, after: columns[columns.length - 1]?.name || '' })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const preview = `ALTER TABLE \`${table}\` ADD COLUMN ${columnDefinitionPreview(form)}${form.after ? ` AFTER \`${form.after}\`` : ''};`
+  const submit = async () => {
+    setBusy(true); setError('')
+    try {
+      await apiClient.addTableColumn(connectionId, { database, table, column: form, after: form.after })
+      onAdded()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not add column')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <div className="rounded border border-gray-700 bg-secondary p-3"><div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-2"><label className="text-xs text-gray-400">Name<input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Type<select value={form.type} onChange={(e) => setForm((f) => ({ ...f, type: e.target.value, length: e.target.value === 'VARCHAR' ? '255' : '' }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{COLUMN_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label><label className="text-xs text-gray-400">Length<input value={form.length} onChange={(e) => setForm((f) => ({ ...f, length: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" placeholder="255 or 10,2" /></label><label className="text-xs text-gray-400">Default<input value={form.default} onChange={(e) => setForm((f) => ({ ...f, default: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">After<select value={form.after} onChange={(e) => setForm((f) => ({ ...f, after: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white"><option value="">First</option>{columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select></label><div className="flex items-end gap-3 text-xs text-gray-300"><label className="inline-flex items-center gap-1"><input type="checkbox" checked={form.nullable} onChange={(e) => setForm((f) => ({ ...f, nullable: e.target.checked }))} /> Null</label><label className="inline-flex items-center gap-1"><input type="checkbox" checked={form.auto_increment} onChange={(e) => setForm((f) => ({ ...f, auto_increment: e.target.checked, nullable: false }))} /> AI</label></div></div><pre className="mt-3 rounded border border-gray-700 bg-primary p-2 text-xs text-gray-300 whitespace-pre-wrap">{preview}</pre>{error && <div className="mt-2 text-red-300 text-xs">{error}</div>}<button type="button" onClick={submit} disabled={busy || !form.name.trim()} className="mt-3 px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-2 disabled:opacity-50">{busy && <Loader2 className="w-3 h-3 animate-spin" />} Apply add column</button></div>
 }
 
 function DesignTable({ columns, children }) {
   return <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0"><tr>{columns.map((c) => <th key={c} className="px-3 py-2 font-semibold whitespace-nowrap">{c}</th>)}</tr></thead><tbody className="text-gray-300">{children}</tbody></table></div>
+}
+
+function CreateTablePanel({ connectionId, database, onCreated }) {
+  const [form, setForm] = useState({
+    table: '',
+    engine: 'InnoDB',
+    charset: 'utf8mb4',
+    collation: 'utf8mb4_general_ci',
+    columns: [{ name: 'id', type: 'INT', length: '11', nullable: false, auto_increment: true, default: '' }],
+    primary_key: 'id',
+  })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const patchColumn = (idx, updates) => {
+    setForm((f) => ({ ...f, columns: f.columns.map((c, i) => (i === idx ? { ...c, ...updates } : c)) }))
+  }
+  const addColumn = () => setForm((f) => ({ ...f, columns: [...f.columns, { name: '', type: 'VARCHAR', length: '255', nullable: true, default: '' }] }))
+  const removeColumn = (idx) => setForm((f) => ({ ...f, columns: f.columns.filter((_, i) => i !== idx) }))
+  const preview = useMemo(() => {
+    const table = form.table.trim() || 'table_name'
+    const defs = form.columns.map(columnDefinitionPreview)
+    if (form.primary_key) defs.push(`PRIMARY KEY (\`${form.primary_key}\`)`)
+    return `CREATE TABLE \`${table}\` (\n  ${defs.join(',\n  ')}\n) ENGINE=${form.engine} DEFAULT CHARSET=${form.charset} COLLATE=${form.collation};`
+  }, [form])
+  const submit = async () => {
+    setBusy(true); setError('')
+    try {
+      const name = form.table.trim()
+      const payload = { ...form, table: name, columns: form.columns.filter((c) => c.name.trim()) }
+      await apiClient.createTable(connectionId, payload)
+      onCreated(name)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not create table')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <div className="rounded border border-gray-700 bg-secondary p-3 max-w-5xl"><div className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3"><label className="text-xs text-gray-400 md:col-span-2">Table name<input value={form.table} onChange={(e) => setForm((f) => ({ ...f, table: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" placeholder="new_table" /></label><label className="text-xs text-gray-400">Engine<input value={form.engine} onChange={(e) => setForm((f) => ({ ...f, engine: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Collation<select value={form.collation} onChange={(e) => setForm((f) => ({ ...f, collation: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{(DB_COLLATIONS[form.charset] || DB_COLLATIONS.utf8mb4).map((c) => <option key={c} value={c}>{c}</option>)}</select></label></div><div className="space-y-2">{form.columns.map((col, idx) => <div key={idx} className="grid grid-cols-1 md:grid-cols-7 gap-2 items-end"><label className="text-xs text-gray-400 md:col-span-2">Column<input value={col.name} onChange={(e) => patchColumn(idx, { name: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Type<select value={col.type} onChange={(e) => patchColumn(idx, { type: e.target.value, length: e.target.value === 'VARCHAR' ? '255' : e.target.value === 'INT' ? '11' : '' })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{COLUMN_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label><label className="text-xs text-gray-400">Length<input value={col.length || ''} onChange={(e) => patchColumn(idx, { length: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Default<input value={col.default || ''} onChange={(e) => patchColumn(idx, { default: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><div className="flex flex-wrap gap-2 text-xs text-gray-300"><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!col.nullable} onChange={(e) => patchColumn(idx, { nullable: e.target.checked })} /> Null</label><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!col.auto_increment} onChange={(e) => patchColumn(idx, { auto_increment: e.target.checked, nullable: false })} /> AI</label><label className="inline-flex items-center gap-1"><input type="radio" checked={form.primary_key === col.name && !!col.name} onChange={() => setForm((f) => ({ ...f, primary_key: col.name }))} /> PK</label></div><button type="button" onClick={() => removeColumn(idx)} disabled={form.columns.length <= 1} className="px-2 py-1.5 bg-primary hover:bg-gray-700 rounded text-red-300 text-xs disabled:opacity-40">Remove</button></div>)}</div><button type="button" onClick={addColumn} className="mt-3 px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1"><Plus className="w-3 h-3" /> Add field</button><pre className="mt-3 rounded border border-gray-700 bg-primary p-2 text-xs text-gray-300 whitespace-pre-wrap">{preview}</pre>{error && <div className="mt-2 text-red-300 text-xs">{error}</div>}<button type="button" onClick={submit} disabled={busy || !form.table.trim()} className="mt-3 px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-2 disabled:opacity-50">{busy && <Loader2 className="w-3 h-3 animate-spin" />} Create table</button></div>
 }
 
 function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab }) {
@@ -941,11 +1041,25 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
   const [table, setTable] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
 
   const treeSel = browseSelection?.connectionId === connection.id ? browseSelection : null
   const folderMode = treeSel && (treeSel.folder === 'tables' || treeSel.folder === 'views')
   const browseRef = useRef(browseSelection)
   browseRef.current = browseSelection
+
+  const loadTables = useCallback(async (dbName = database) => {
+    if (!dbName) { setTables([]); setTable(''); return }
+    const res = await apiClient.listTables(connection.id, dbName)
+    const tlist = res.data.tables || []
+    setTables(tlist)
+    const ts = browseRef.current?.connectionId === connection.id ? browseRef.current : null
+    const fromTree = ts
+      && ts.database === dbName
+      && (ts.kind === 'table' || ts.kind === 'view')
+    if (fromTree) setTable(ts.name)
+    else setTable(tlist[0]?.name || '')
+  }, [connection.id, database])
 
   useEffect(() => {
     let cancelled = false
@@ -984,21 +1098,10 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
     if (folderMode) return
     if (!database) { setTables([]); setTable(''); return }
     let cancelled = false
-    apiClient.listTables(connection.id, database)
-      .then((res) => {
-        if (cancelled) return
-        const tlist = res.data.tables || []
-        setTables(tlist)
-        const ts = browseRef.current?.connectionId === connection.id ? browseRef.current : null
-        const fromTree = ts
-          && ts.database === database
-          && (ts.kind === 'table' || ts.kind === 'view')
-        if (fromTree) setTable(ts.name)
-        else setTable(tlist[0]?.name || '')
-      })
+    loadTables(database)
       .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load tables'))
     return () => { cancelled = true }
-  }, [connection.id, database, folderMode])
+  }, [connection.id, database, folderMode, loadTables])
 
   useEffect(() => {
     if (folderMode) return
@@ -1061,7 +1164,21 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
           ))}
         </select>
         {loading && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
+        <button type="button" onClick={() => setCreateOpen((v) => !v)} disabled={!database} className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1 disabled:opacity-50"><Plus className="w-3 h-3" /> Create table</button>
       </div>
+
+      {createOpen && (
+        <CreateTablePanel
+          connectionId={connection.id}
+          database={database}
+          onCreated={async (name) => {
+            setCreateOpen(false)
+            await loadTables(database)
+            setTable(name)
+            onBrowseSelectionChange({ connectionId: connection.id, database, name, kind: 'table' })
+          }}
+        />
+      )}
 
       {treeSel && (treeSel.kind === 'table' || treeSel.kind === 'view') && (
         <div className="text-xs text-gray-500">

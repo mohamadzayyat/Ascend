@@ -176,6 +176,12 @@ _MYSQL_PRIVILEGES = {
     'REFERENCES',
 }
 
+_COLUMN_TYPES = {
+    'INT', 'BIGINT', 'SMALLINT', 'TINYINT', 'VARCHAR', 'CHAR',
+    'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'DECIMAL', 'DATE', 'DATETIME',
+    'TIMESTAMP', 'TIME', 'BOOLEAN', 'JSON', 'DOUBLE', 'FLOAT',
+}
+
 
 def _mysql_user_ref(username, host):
     if not _valid_mysql_user(username) or not _valid_mysql_host(host):
@@ -195,6 +201,45 @@ def _normalize_privileges(raw):
     if invalid:
         raise ValueError(f'Invalid privilege: {invalid[0]}')
     return sorted(set(privs))
+
+
+def _sql_string(value):
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _column_definition_sql(col):
+    name = (col.get('name') or '').strip()
+    if not _valid_identifier(name):
+        raise ValueError('Invalid column name.')
+    data_type = (col.get('type') or 'VARCHAR').strip().upper()
+    if data_type not in _COLUMN_TYPES:
+        raise ValueError('Unsupported column type.')
+    length = str(col.get('length') or '').strip()
+    if length:
+        if not re.fullmatch(r'\d+(?:\s*,\s*\d+)?', length):
+            raise ValueError('Invalid column length/precision.')
+        type_sql = f'{data_type}({length.replace(" ", "")})'
+    elif data_type == 'VARCHAR':
+        type_sql = 'VARCHAR(255)'
+    else:
+        type_sql = data_type
+    parts = [_qi(name), type_sql]
+    parts.append('NULL' if bool(col.get('nullable')) else 'NOT NULL')
+    default = col.get('default')
+    if default is not None and str(default) != '':
+        d = str(default).strip()
+        if d.upper() == 'NULL':
+            parts.append('DEFAULT NULL')
+        elif d.upper() in ('CURRENT_TIMESTAMP', 'CURRENT_TIMESTAMP()'):
+            parts.append('DEFAULT CURRENT_TIMESTAMP')
+        else:
+            parts.append(f'DEFAULT {_sql_string(default)}')
+    if bool(col.get('auto_increment')):
+        parts.append('AUTO_INCREMENT')
+    comment = str(col.get('comment') or '').strip()
+    if comment:
+        parts.append(f'COMMENT {_sql_string(comment[:1024])}')
+    return ' '.join(parts)
 
 
 def _database_create_sql(name, charset='utf8mb4', collation='utf8mb4_general_ci', if_not_exists=False):
@@ -721,6 +766,106 @@ def api_db_tables_list(conn_id):
         except:
             pass
     return jsonify({'tables': rows})
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/tables', methods=['POST'])
+@login_required
+def api_db_table_create(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    database = (data.get('database') or '').strip()
+    table = (data.get('table') or '').strip()
+    columns = data.get('columns') or []
+    engine = (data.get('engine') or 'InnoDB').strip()
+    charset = (data.get('charset') or 'utf8mb4').strip()
+    collation = (data.get('collation') or 'utf8mb4_general_ci').strip()
+    primary_key = (data.get('primary_key') or '').strip()
+    if not _valid_identifier(database) or not _valid_identifier(table):
+        return jsonify({'error': 'Invalid database or table name.'}), 400
+    if not columns:
+        return jsonify({'error': 'Add at least one column.'}), 400
+    if not _valid_mysql_token(engine) or not _valid_mysql_token(charset) or not _valid_mysql_token(collation):
+        return jsonify({'error': 'Invalid engine, charset, or collation.'}), 400
+    try:
+        col_defs = [_column_definition_sql(c) for c in columns]
+        if primary_key:
+            if not _valid_identifier(primary_key):
+                return jsonify({'error': 'Invalid primary key column.'}), 400
+            col_defs.append(f'PRIMARY KEY ({_qi(primary_key)})')
+        sql = (
+            f'CREATE TABLE {_qi(table)} (\n  '
+            + ',\n  '.join(col_defs)
+            + f'\n) ENGINE={engine} DEFAULT CHARSET={charset} COLLATE={collation}'
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    started = time.time()
+    try:
+        with client.cursor() as cur:
+            cur.execute(sql)
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e), 'sql': sql, 'duration_ms': int((time.time() - started) * 1000)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'table': table, 'sql': sql, 'duration_ms': int((time.time() - started) * 1000)}), 201
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/table-columns', methods=['POST'])
+@login_required
+def api_db_table_column_add(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data, database, table = _db_table_request_data()
+    column = data.get('column') or {}
+    after = (data.get('after') or '').strip()
+    try:
+        col_sql = _column_definition_sql(column)
+        after_sql = ''
+        if after:
+            if not _valid_identifier(after):
+                return jsonify({'error': 'Invalid AFTER column.'}), 400
+            after_sql = f' AFTER {_qi(after)}'
+        elif data.get('first'):
+            after_sql = ' FIRST'
+        sql = f'ALTER TABLE {_qi(table)} ADD COLUMN {col_sql}{after_sql}'
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    started = time.time()
+    try:
+        with client.cursor() as cur:
+            cur.execute(sql)
+        client.commit()
+    except Exception as e:
+        client.close()
+        return jsonify({'error': str(e), 'sql': sql, 'duration_ms': int((time.time() - started) * 1000)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'sql': sql, 'duration_ms': int((time.time() - started) * 1000)})
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/database-schema')
