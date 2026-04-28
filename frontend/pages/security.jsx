@@ -3,58 +3,138 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  Clipboard,
+  FileWarning,
   Loader2,
   Play,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
   Wrench,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
-function Badge({ value, tone = 'gray' }) {
-  const cls = {
+const TABS = [
+  ['overview', 'Overview'],
+  ['malware', 'Malware'],
+  ['ip', 'IP Protection'],
+  ['fixes', 'Fixes'],
+  ['logs', 'Logs'],
+]
+
+function toneClasses(tone) {
+  return {
     green: 'border-green-500/40 bg-green-500/10 text-green-200',
     yellow: 'border-yellow-500/40 bg-yellow-500/10 text-yellow-200',
     red: 'border-red-500/40 bg-red-500/10 text-red-200',
     blue: 'border-blue-500/40 bg-blue-500/10 text-blue-200',
     gray: 'border-gray-600 bg-primary/40 text-gray-300',
   }[tone] || 'border-gray-600 bg-primary/40 text-gray-300'
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs ${cls}`}>{value}</span>
 }
 
-function ToolCard({ title, installed, subtitle, status }) {
-  return (
-    <div className="rounded-lg border border-gray-700 bg-secondary p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="text-white font-semibold">{title}</div>
-          <div className="text-gray-500 text-xs mt-1 break-all">{subtitle || 'Not detected'}</div>
-        </div>
-        <Badge value={installed ? 'installed' : 'missing'} tone={installed ? 'green' : 'yellow'} />
-      </div>
-      {status && <div className="text-xs text-gray-400 mt-3">{status}</div>}
-    </div>
-  )
+function Badge({ value, tone = 'gray' }) {
+  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs ${toneClasses(tone)}`}>{value}</span>
 }
 
-function Kpi({ label, value, tone = 'gray' }) {
-  const color = {
-    green: 'text-green-300',
-    yellow: 'text-yellow-300',
-    red: 'text-red-300',
-    blue: 'text-blue-300',
-    gray: 'text-white',
-  }[tone] || 'text-white'
+function Metric({ label, value, tone = 'gray', hint }) {
+  const color = { green: 'text-green-300', yellow: 'text-yellow-300', red: 'text-red-300', blue: 'text-blue-300', gray: 'text-white' }[tone] || 'text-white'
   return (
     <div className="rounded-lg border border-gray-700 bg-secondary p-4">
       <div className="text-gray-400 text-sm">{label}</div>
-      <div className={`text-3xl font-bold mt-2 ${color}`}>{value}</div>
+      <div className={`text-2xl font-bold mt-2 ${color}`}>{value}</div>
+      {hint && <div className="text-gray-500 text-xs mt-2">{hint}</div>}
     </div>
   )
 }
 
+function StatusRow({ title, ok, detail, action, busy, onAction }) {
+  return (
+    <div className="rounded-lg border border-gray-700 bg-primary/30 p-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          {ok ? <CheckCircle2 className="w-4 h-4 text-green-300" /> : <AlertTriangle className="w-4 h-4 text-yellow-300" />}
+          <span className="text-white font-medium">{title}</span>
+          <Badge value={ok ? 'OK' : 'Needs attention'} tone={ok ? 'green' : 'yellow'} />
+        </div>
+        <div className="text-gray-400 text-sm mt-1 break-words">{detail}</div>
+      </div>
+      {action && (
+        <button onClick={onAction} disabled={busy} className="px-3 py-2 border border-gray-600 rounded text-white text-sm inline-flex items-center gap-2 hover:bg-secondary disabled:opacity-50">
+          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
+          {action}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function IssueCard({ issue, onFix, busy }) {
+  const icon = issue.severity === 'critical' ? <ShieldAlert className="w-5 h-5 text-red-300" /> : <FileWarning className="w-5 h-5 text-yellow-300" />
+  return (
+    <div className={`rounded-lg border p-4 ${issue.severity === 'critical' ? 'border-red-500/40 bg-red-500/10' : 'border-yellow-500/40 bg-yellow-500/10'}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex gap-3 min-w-0">
+          {icon}
+          <div>
+            <div className="text-white font-semibold">{issue.title}</div>
+            <div className="text-gray-300 text-sm mt-1">{issue.message}</div>
+            {issue.command && <div className="text-gray-500 text-xs font-mono mt-2 break-all">{issue.command}</div>}
+          </div>
+        </div>
+        {issue.fix && (
+          <button onClick={() => onFix(issue.fix)} disabled={busy === issue.fix} className="px-3 py-2 rounded border border-gray-600 text-white text-sm inline-flex items-center gap-2 hover:bg-secondary disabled:opacity-50">
+            {busy === issue.fix ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
+            Fix
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function LogViewer({ log, logKind, setLogKind }) {
+  const lines = (log || 'No log output yet.').split('\n')
+  const copyLog = () => navigator.clipboard?.writeText(log || '')
+  return (
+    <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-700 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-white font-semibold">Logs</h2>
+        <div className="flex flex-wrap gap-2">
+          {['scan', 'install', 'crowdsec'].map((kind) => (
+            <button key={kind} onClick={() => setLogKind(kind)} className={`px-3 py-1.5 rounded text-xs ${logKind === kind ? 'bg-accent text-white' : 'border border-gray-600 text-gray-300 hover:bg-primary'}`}>
+              {kind}
+            </button>
+          ))}
+          <button onClick={copyLog} className="px-3 py-1.5 rounded text-xs border border-gray-600 text-gray-300 hover:bg-primary inline-flex items-center gap-1">
+            <Clipboard className="w-3 h-3" /> Copy
+          </button>
+        </div>
+      </div>
+      <pre className="m-0 max-h-[520px] overflow-auto bg-[#050914] p-4 text-xs whitespace-pre-wrap font-mono">
+        {lines.map((line, idx) => {
+          const bad = /error|failed|denied|not found|lock|fatal/i.test(line)
+          const good = /success|completed|installed|enabled|done/i.test(line)
+          return <div key={idx} className={bad ? 'text-red-300' : good ? 'text-green-300' : 'text-gray-300'}>{line || ' '}</div>
+        })}
+      </pre>
+    </section>
+  )
+}
+
+function latestDate(files) {
+  return (files || []).map((f) => f.updated_at).filter(Boolean).sort().pop()
+}
+
+function daysSince(iso) {
+  if (!iso) return null
+  const ms = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(ms)) return null
+  return ms / 86400000
+}
+
 export default function SecurityPage() {
+  const [activeTab, setActiveTab] = useState('overview')
   const [status, setStatus] = useState(null)
   const [logKind, setLogKind] = useState('scan')
   const [log, setLog] = useState('')
@@ -66,17 +146,22 @@ export default function SecurityPage() {
   const [error, setError] = useState('')
 
   const state = status?.state || {}
+  const tools = status?.tools || {}
   const scan = state.scan || {}
   const install = state.install || {}
   const crowdsecInstall = state.crowdsec_install || {}
   const findings = state.findings || scan.findings || []
   const quarantineItems = state.quarantine || []
+  const crowdsecDecisions = tools.crowdsec_decisions?.items || []
   const scanRunning = ['starting', 'running'].includes(scan.status)
   const installRunning = ['starting', 'running'].includes(install.status)
   const crowdsecInstallRunning = ['starting', 'running'].includes(crowdsecInstall.status)
-  const clamInstalled = !!status?.tools?.clamscan?.installed
-  const crowdsecInstalled = !!status?.tools?.cscli?.installed
-  const crowdsecDecisions = status?.tools?.crowdsec_decisions?.items || []
+  const clamInstalled = !!tools.clamscan?.installed
+  const freshclamInstalled = !!tools.freshclam?.installed
+  const crowdsecInstalled = !!tools.cscli?.installed
+  const bouncerOk = !!tools.crowdsec_firewall_bouncer_service?.ok
+  const definitionsNewest = latestDate(tools.definitions?.database_files)
+  const definitionsAge = daysSince(definitionsNewest)
 
   const load = async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true)
@@ -91,9 +176,7 @@ export default function SecurityPage() {
       setSelectedPaths((current) => {
         if (Object.keys(current).length) return current
         const next = {}
-        for (const p of statusData.scan_paths || []) {
-          next[p.key] = ['web_roots', 'tmp', 'deployments', 'static_sites'].includes(p.key)
-        }
+        for (const p of statusData.scan_paths || []) next[p.key] = ['web_roots', 'tmp', 'deployments', 'static_sites'].includes(p.key)
         return next
       })
     } catch (e) {
@@ -110,32 +193,51 @@ export default function SecurityPage() {
     return () => clearInterval(timer)
   }, [scanRunning, installRunning, crowdsecInstallRunning, logKind])
 
-  const summary = useMemo(() => {
-    const definitions = status?.tools?.definitions?.database_files || []
-    const newest = definitions
-      .map((f) => f.updated_at)
-      .filter(Boolean)
-      .sort()
-      .pop()
-    return {
-      newestDefinitions: newest ? new Date(newest).toLocaleString() : 'unknown',
-      activeThreats: findings.length,
-      quarantined: quarantineItems.length,
-      scanStatus: scan.status || 'never',
-      blockedIps: crowdsecDecisions.length,
-    }
-  }, [status, findings.length, quarantineItems.length, scan.status, crowdsecDecisions.length])
+  const issues = useMemo(() => {
+    const rows = []
+    if (!clamInstalled) rows.push({ severity: 'critical', title: 'Malware scanner is missing', message: 'ClamAV is not installed, so Ascend cannot scan websites or uploads for malware.', fix: 'install_clamav' })
+    if (clamInstalled && !freshclamInstalled) rows.push({ severity: 'warning', title: 'ClamAV updater is missing', message: 'freshclam is not available, so malware signatures may become stale.', fix: 'install_clamav' })
+    if (clamInstalled && definitionsAge !== null && definitionsAge > 2) rows.push({ severity: 'warning', title: 'Virus definitions are stale', message: `Latest definition file is ${Math.floor(definitionsAge)} days old. Update signatures before trusting scan results.`, fix: 'clamav_update_definitions', command: 'freshclam' })
+    if (clamInstalled && tools.clamav_freshclam_service?.available && !tools.clamav_freshclam_service?.ok) rows.push({ severity: 'warning', title: 'ClamAV updater service is stopped', message: 'freshclam is installed but the background updater is not active.', fix: 'clamav_restart_updates', command: 'systemctl restart clamav-freshclam' })
+    if (findings.length > 0) rows.push({ severity: 'critical', title: 'Malware findings exist', message: `${findings.length} infected file record(s) require review. Keep quarantine enabled and inspect the affected projects.` })
+    if (!crowdsecInstalled) rows.push({ severity: 'critical', title: 'IP blocking is not installed', message: 'CrowdSec is missing, so abusive SSH/Nginx traffic is not being blocked by Ascend.', fix: 'install_crowdsec' })
+    if (crowdsecInstalled && tools.crowdsec_service?.available && !tools.crowdsec_service?.ok) rows.push({ severity: 'critical', title: 'CrowdSec agent is stopped', message: 'Attacks may not be detected until the CrowdSec service is running.', fix: 'crowdsec_restart', command: 'systemctl restart crowdsec' })
+    if (crowdsecInstalled && !bouncerOk) rows.push({ severity: 'critical', title: 'Firewall bouncer is not enforcing blocks', message: 'CrowdSec may detect attackers, but IPs will not be blocked until the bouncer is running.', fix: 'crowdsec_bouncer_restart', command: 'systemctl restart crowdsec-firewall-bouncer' })
+    if (tools.crowdsec_decisions?.error && crowdsecInstalled) rows.push({ severity: 'warning', title: 'Could not read CrowdSec decisions', message: tools.crowdsec_decisions.error, fix: 'crowdsec_restart' })
+    if (install.status === 'failed' || crowdsecInstall.status === 'failed') rows.push({ severity: 'warning', title: 'Previous install failed', message: 'A prior security install/repair failed. Check Logs, then clear the failed state when resolved.', fix: 'clear_failed_state' })
+    return rows
+  }, [clamInstalled, freshclamInstalled, definitionsAge, tools, findings.length, crowdsecInstalled, bouncerOk, install.status, crowdsecInstall.status])
 
-  const startInstall = async () => {
-    setBusy('install')
+  const health = useMemo(() => {
+    const critical = issues.filter((i) => i.severity === 'critical').length
+    const warning = issues.filter((i) => i.severity !== 'critical').length
+    const score = Math.max(0, 100 - critical * 25 - warning * 10)
+    const label = critical ? 'Critical' : warning ? 'Needs attention' : 'Protected'
+    const tone = critical ? 'red' : warning ? 'yellow' : 'green'
+    return { score, label, tone, critical, warning }
+  }, [issues])
+
+  const runFix = async (fix) => {
+    setBusy(fix)
     setMessage('')
+    setError('')
     try {
-      const { data } = await apiClient.startSecurityInstall()
-      setMessage(data.message || 'Install started')
-      setLogKind('install')
+      if (fix === 'install_clamav') {
+        const { data } = await apiClient.startSecurityInstall()
+        setMessage(data.message || 'ClamAV install started')
+        setLogKind('install')
+      } else if (fix === 'install_crowdsec') {
+        const { data } = await apiClient.startCrowdSecInstall()
+        setMessage(data.message || 'CrowdSec install started')
+        setLogKind('crowdsec')
+      } else {
+        const { data } = await apiClient.repairSecurity(fix)
+        setMessage(data.message || 'Repair completed')
+      }
       await load({ quiet: true })
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to start ClamAV install')
+      const detail = e.response?.data?.results?.find((r) => r.stderr || r.stdout)
+      setError(e.response?.data?.error || detail?.stderr || detail?.stdout || 'Repair failed')
     } finally {
       setBusy('')
     }
@@ -144,6 +246,7 @@ export default function SecurityPage() {
   const startScan = async () => {
     setBusy('scan')
     setMessage('')
+    setError('')
     try {
       const paths = Object.entries(selectedPaths).filter(([, enabled]) => enabled).map(([key]) => key)
       const { data } = await apiClient.startSecurityScan({ paths, quarantine })
@@ -152,21 +255,6 @@ export default function SecurityPage() {
       await load({ quiet: true })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to start security scan')
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const startCrowdSecInstall = async () => {
-    setBusy('crowdsec')
-    setMessage('')
-    try {
-      const { data } = await apiClient.startCrowdSecInstall()
-      setMessage(data.message || 'CrowdSec install started')
-      setLogKind('crowdsec')
-      await load({ quiet: true })
-    } catch (e) {
-      setError(e.response?.data?.error || 'Failed to start CrowdSec install')
     } finally {
       setBusy('')
     }
@@ -214,12 +302,12 @@ export default function SecurityPage() {
 
   return (
     <div className="p-8 max-w-7xl">
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-start gap-3">
           <ShieldCheck className="w-10 h-10 text-accent shrink-0" />
           <div>
             <h1 className="text-3xl font-bold text-white">Security Center</h1>
-            <p className="text-gray-400 text-sm mt-1">Malware scanning, quarantine, and server security findings powered by ClamAV.</p>
+            <p className="text-gray-400 text-sm mt-1">A practical protection workflow: detect malware, quarantine threats, block attackers, and repair broken protection services.</p>
           </div>
         </div>
         <button onClick={() => load()} disabled={loading} className="px-3 py-2 border border-gray-600 rounded text-white text-sm inline-flex items-center gap-2 hover:bg-secondary disabled:opacity-50">
@@ -228,7 +316,7 @@ export default function SecurityPage() {
       </div>
 
       {message && <div className="mb-4 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-200 text-sm">{message}</div>}
-      {error && <div className="mb-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>}
+      {error && <div className="mb-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm whitespace-pre-wrap">{error}</div>}
 
       {loading && !status ? (
         <div className="rounded-lg border border-gray-700 bg-secondary p-8 text-gray-400 flex items-center gap-2">
@@ -236,242 +324,142 @@ export default function SecurityPage() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <Kpi label="Scanner" value={clamInstalled ? 'Ready' : 'Missing'} tone={clamInstalled ? 'green' : 'yellow'} />
-            <Kpi label="Scan status" value={summary.scanStatus} tone={scan.status === 'infected' ? 'red' : scanRunning ? 'blue' : 'green'} />
-            <Kpi label="Findings" value={summary.activeThreats} tone={summary.activeThreats ? 'red' : 'green'} />
-            <Kpi label="Blocked IPs" value={summary.blockedIps} tone={summary.blockedIps ? 'red' : crowdsecInstalled ? 'green' : 'yellow'} />
-          </div>
-
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
-            <div className="xl:col-span-2 rounded-lg border border-gray-700 bg-secondary p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                <div>
-                  <h2 className="text-white font-semibold text-lg">Malware Scan</h2>
-                  <p className="text-gray-500 text-sm">Select the areas Ascend should scan. Infected files are moved to quarantine by default.</p>
-                </div>
-                <button
-                  onClick={startScan}
-                  disabled={!clamInstalled || scanRunning || installRunning || busy === 'scan'}
-                  className="px-4 py-2 bg-accent text-white rounded-lg text-sm inline-flex items-center gap-2 hover:bg-blue-600 disabled:opacity-50"
-                >
-                  {busy === 'scan' || scanRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                  Start scan
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-                {(status?.scan_paths || []).map((p) => (
-                  <label key={p.key} className={`rounded border p-3 flex items-start gap-3 ${p.exists ? 'border-gray-700 bg-primary/30' : 'border-gray-800 bg-primary/10 opacity-60'}`}>
-                    <input
-                      type="checkbox"
-                      checked={!!selectedPaths[p.key]}
-                      disabled={!p.exists}
-                      onChange={(e) => setSelectedPaths((cur) => ({ ...cur, [p.key]: e.target.checked }))}
-                      className="mt-1"
-                    />
-                    <span>
-                      <span className="block text-white text-sm font-medium">{p.label}</span>
-                      <span className="block text-gray-500 text-xs font-mono break-all">{p.path}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-
-              <label className="inline-flex items-center gap-2 text-sm text-gray-300">
-                <input type="checkbox" checked={quarantine} onChange={(e) => setQuarantine(e.target.checked)} />
-                Move infected files to quarantine
-              </label>
-
-              {scan.message && (
-                <div className={`mt-4 rounded border p-3 text-sm ${scan.status === 'infected' ? 'border-red-500/30 bg-red-500/10 text-red-200' : scan.status === 'failed' ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200' : 'border-gray-700 bg-primary/30 text-gray-300'}`}>
-                  {scanRunning && <Loader2 className="w-4 h-4 animate-spin inline mr-2" />}
-                  {scan.message}
-                  {scan.finished_at && <span className="text-gray-500 ml-2">{new Date(scan.finished_at).toLocaleString()}</span>}
-                </div>
-              )}
-            </div>
-
-            <div className="space-y-4">
-              <ToolCard
-                title="ClamAV scanner"
-                installed={clamInstalled}
-                subtitle={status?.tools?.clamscan?.version}
-              />
-              <ToolCard
-                title="Freshclam updates"
-                installed={!!status?.tools?.freshclam?.installed}
-                subtitle={status?.tools?.freshclam?.version}
-                status={`Definitions: ${summary.newestDefinitions}`}
-              />
-              <button
-                onClick={startInstall}
-                disabled={installRunning || busy === 'install'}
-                className="w-full px-4 py-2 border border-gray-600 rounded-lg text-white text-sm inline-flex items-center justify-center gap-2 hover:bg-primary disabled:opacity-50"
-              >
-                {installRunning || busy === 'install' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
-                Install / repair ClamAV
-              </button>
-              {install.message && (
-                <div className="text-xs text-gray-400 rounded border border-gray-700 bg-primary/30 p-3">
-                  {install.message}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden mb-6">
-            <div className="px-5 py-4 border-b border-gray-700 flex flex-wrap items-center justify-between gap-3">
+          <section className={`mb-5 rounded-lg border p-5 ${toneClasses(health.tone)}`}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2">
-                  <Ban className="w-5 h-5 text-accent" /> IP Blocking
-                </h2>
-                <p className="text-gray-500 text-sm mt-1">CrowdSec watches SSH/Nginx behavior and the firewall bouncer blocks active attack decisions.</p>
+                <div className="text-sm opacity-80">Server protection</div>
+                <div className="text-3xl font-bold text-white mt-1">{health.label}</div>
+                <div className="text-sm mt-2">{health.critical} critical, {health.warning} warning</div>
               </div>
-              <button
-                onClick={startCrowdSecInstall}
-                disabled={crowdsecInstallRunning || busy === 'crowdsec'}
-                className="px-4 py-2 border border-gray-600 rounded-lg text-white text-sm inline-flex items-center gap-2 hover:bg-primary disabled:opacity-50"
-              >
-                {crowdsecInstallRunning || busy === 'crowdsec' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
-                Install / repair CrowdSec
-              </button>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-5 border-b border-gray-700">
-              <ToolCard
-                title="CrowdSec agent"
-                installed={crowdsecInstalled}
-                subtitle={status?.tools?.crowdsec?.version || status?.tools?.cscli?.version}
-                status={`Service: ${status?.tools?.crowdsec_service?.active || 'unknown'}`}
-              />
-              <ToolCard
-                title="Firewall bouncer"
-                installed={status?.tools?.crowdsec_firewall_bouncer_service?.ok}
-                subtitle="Enforces CrowdSec decisions on the server firewall"
-                status={`Service: ${status?.tools?.crowdsec_firewall_bouncer_service?.active || 'unknown'}`}
-              />
-              <div className="rounded-lg border border-gray-700 bg-primary/30 p-4">
-                <div className="text-gray-400 text-sm">Active CrowdSec decisions</div>
-                <div className={`text-3xl font-bold mt-2 ${crowdsecDecisions.length ? 'text-red-300' : 'text-green-300'}`}>{crowdsecDecisions.length}</div>
-                {crowdsecInstall.message && <div className="text-xs text-gray-400 mt-3">{crowdsecInstall.message}</div>}
+              <div className="text-right">
+                <div className="text-5xl font-bold text-white">{health.score}</div>
+                <div className="text-xs opacity-80">health score</div>
               </div>
             </div>
-            {status?.tools?.crowdsec_decisions?.error && (
-              <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">
-                {status.tools.crowdsec_decisions.error}
-              </div>
-            )}
-            {crowdsecDecisions.length === 0 ? (
-              <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[900px]">
-                  <thead className="bg-primary/60 text-gray-400">
-                    <tr>
-                      <th className="px-4 py-3 font-medium">Value</th>
-                      <th className="px-4 py-3 font-medium">Type</th>
-                      <th className="px-4 py-3 font-medium">Reason</th>
-                      <th className="px-4 py-3 font-medium">Origin</th>
-                      <th className="px-4 py-3 font-medium">Until</th>
-                      <th className="px-4 py-3 font-medium"></th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-700/70">
-                    {crowdsecDecisions.map((item, idx) => (
-                      <tr key={`${item.id || item.value}-${idx}`}>
-                        <td className="px-4 py-3 text-white font-mono">{item.value || item.id || '-'}</td>
-                        <td className="px-4 py-3 text-gray-300">{item.type || item.scope || '-'}</td>
-                        <td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td>
-                        <td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td>
-                        <td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td>
-                        <td className="px-4 py-3 text-right">
-                          <button
-                            onClick={() => unblockDecision(item)}
-                            disabled={busy === `unblock-${item.value || item.id}`}
-                            className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50"
-                          >
-                            Unblock
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </section>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
-            <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold inline-flex items-center gap-2">
-                  {findings.length ? <AlertTriangle className="w-4 h-4 text-red-300" /> : <CheckCircle2 className="w-4 h-4 text-green-300" />}
-                  Findings
-                </h2>
-                <button onClick={clearFindings} disabled={!findings.length || busy === 'clear-findings'} className="text-xs px-2 py-1 border border-gray-600 rounded text-gray-300 hover:bg-primary disabled:opacity-50">
-                  Clear
-                </button>
-              </div>
-              {findings.length === 0 ? (
-                <div className="p-8 text-center text-gray-500 text-sm">No malware findings recorded.</div>
-              ) : (
-                <div className="max-h-80 overflow-auto divide-y divide-gray-700">
-                  {findings.map((item, idx) => (
-                    <div key={`${item.path}-${idx}`} className="p-4">
-                      <div className="flex flex-wrap gap-2 items-center mb-2">
-                        <Badge value={item.severity || 'critical'} tone="red" />
-                        {item.quarantine_status && <Badge value={`quarantine: ${item.quarantine_status}`} tone={item.quarantine_status === 'moved' ? 'yellow' : 'gray'} />}
-                      </div>
-                      <div className="text-red-200 text-sm font-medium">{item.signature}</div>
-                      <div className="text-gray-400 text-xs font-mono break-all mt-1">{item.path}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
-                <h2 className="text-white font-semibold">Quarantine</h2>
-                <button onClick={clearQuarantine} disabled={!quarantineItems.length || busy === 'clear-quarantine'} className="text-xs px-2 py-1 border border-red-500/40 rounded text-red-200 hover:bg-red-500/10 disabled:opacity-50 inline-flex items-center gap-1">
-                  <Trash2 className="w-3 h-3" /> Delete all
-                </button>
-              </div>
-              {quarantineItems.length === 0 ? (
-                <div className="p-8 text-center text-gray-500 text-sm">No files in quarantine.</div>
-              ) : (
-                <div className="max-h-80 overflow-auto divide-y divide-gray-700">
-                  {quarantineItems.map((item, idx) => (
-                    <div key={`${item.quarantine_path}-${idx}`} className="p-4">
-                      <div className="text-yellow-200 text-sm">{item.signature}</div>
-                      <div className="text-gray-400 text-xs font-mono break-all mt-1">{item.original_path}</div>
-                      <div className="text-gray-500 text-xs font-mono break-all mt-1">{item.quarantine_path}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
+          <div className="mb-6 flex flex-wrap gap-2 border-b border-gray-700">
+            {TABS.map(([key, label]) => (
+              <button key={key} onClick={() => setActiveTab(key)} className={`px-4 py-3 text-sm border-b-2 ${activeTab === key ? 'border-accent text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>
+                {label}
+              </button>
+            ))}
           </div>
 
-          <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
-              <h2 className="text-white font-semibold">Live Log</h2>
-              <div className="flex gap-2">
-                {['scan', 'install', 'crowdsec'].map((kind) => (
-                  <button
-                    key={kind}
-                    onClick={() => setLogKind(kind)}
-                    className={`px-3 py-1.5 rounded text-xs ${logKind === kind ? 'bg-accent text-white' : 'border border-gray-600 text-gray-300 hover:bg-primary'}`}
-                  >
-                    {kind}
-                  </button>
-                ))}
+          {activeTab === 'overview' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <Metric label="Malware scanner" value={clamInstalled ? 'Ready' : 'Missing'} tone={clamInstalled ? 'green' : 'red'} hint={tools.clamscan?.version || 'ClamAV not detected'} />
+                <Metric label="Last scan" value={scan.status || 'Never'} tone={scan.status === 'infected' ? 'red' : scanRunning ? 'blue' : scan.status ? 'green' : 'yellow'} hint={scan.finished_at ? new Date(scan.finished_at).toLocaleString() : 'No completed scan'} />
+                <Metric label="Blocked IPs" value={crowdsecDecisions.length} tone={crowdsecDecisions.length ? 'red' : crowdsecInstalled ? 'green' : 'yellow'} hint={crowdsecInstalled ? 'CrowdSec decisions' : 'CrowdSec not installed'} />
+                <Metric label="Quarantine" value={quarantineItems.length} tone={quarantineItems.length ? 'yellow' : 'green'} hint={`${findings.length} finding records`} />
+              </div>
+              <section className="rounded-lg border border-gray-700 bg-secondary p-5">
+                <div className="flex items-center justify-between gap-3 mb-4">
+                  <h2 className="text-white font-semibold text-lg">Protection Issues</h2>
+                  <button onClick={() => setActiveTab('fixes')} className="text-accent text-sm hover:underline">Open fixes</button>
+                </div>
+                {issues.length === 0 ? (
+                  <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4 text-green-200 text-sm inline-flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" /> No active security issues detected.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    {issues.slice(0, 6).map((issue) => <IssueCard key={issue.title} issue={issue} onFix={runFix} busy={busy} />)}
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeTab === 'malware' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                <section className="xl:col-span-2 rounded-lg border border-gray-700 bg-secondary p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div>
+                      <h2 className="text-white font-semibold text-lg">Malware Scan</h2>
+                      <p className="text-gray-500 text-sm">Choose paths, run ClamAV, and quarantine infected files automatically.</p>
+                    </div>
+                    <button onClick={startScan} disabled={!clamInstalled || scanRunning || busy === 'scan'} className="px-4 py-2 bg-accent text-white rounded-lg text-sm inline-flex items-center gap-2 hover:bg-blue-600 disabled:opacity-50">
+                      {busy === 'scan' || scanRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} Start scan
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                    {(status?.scan_paths || []).map((p) => (
+                      <label key={p.key} className={`rounded border p-3 flex items-start gap-3 ${p.exists ? 'border-gray-700 bg-primary/30' : 'border-gray-800 bg-primary/10 opacity-60'}`}>
+                        <input type="checkbox" checked={!!selectedPaths[p.key]} disabled={!p.exists} onChange={(e) => setSelectedPaths((cur) => ({ ...cur, [p.key]: e.target.checked }))} className="mt-1" />
+                        <span>
+                          <span className="block text-white text-sm font-medium">{p.label}</span>
+                          <span className="block text-gray-500 text-xs font-mono break-all">{p.path}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                    <input type="checkbox" checked={quarantine} onChange={(e) => setQuarantine(e.target.checked)} /> Move infected files to quarantine
+                  </label>
+                  {scan.message && <div className={`mt-4 rounded border p-3 text-sm ${scan.status === 'infected' ? 'border-red-500/30 bg-red-500/10 text-red-200' : scan.status === 'failed' ? 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200' : 'border-gray-700 bg-primary/30 text-gray-300'}`}>{scanRunning && <Loader2 className="w-4 h-4 animate-spin inline mr-2" />}{scan.message}</div>}
+                </section>
+                <section className="rounded-lg border border-gray-700 bg-secondary p-5 space-y-3">
+                  <StatusRow title="ClamAV scanner" ok={clamInstalled} detail={tools.clamscan?.version || 'Not installed'} action={!clamInstalled ? 'Install' : 'Repair'} busy={busy === 'install_clamav'} onAction={() => runFix('install_clamav')} />
+                  <StatusRow title="Definition updates" ok={freshclamInstalled && (!definitionsAge || definitionsAge <= 2)} detail={definitionsNewest ? `Latest: ${new Date(definitionsNewest).toLocaleString()}` : 'Definitions not found yet'} action="Update" busy={busy === 'clamav_update_definitions'} onAction={() => runFix('clamav_update_definitions')} />
+                  <StatusRow title="Updater service" ok={!tools.clamav_freshclam_service?.available || tools.clamav_freshclam_service?.ok} detail={`Service: ${tools.clamav_freshclam_service?.active || 'unknown'}`} action="Restart" busy={busy === 'clamav_restart_updates'} onAction={() => runFix('clamav_restart_updates')} />
+                </section>
+              </div>
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                  <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
+                    <h2 className="text-white font-semibold">Findings</h2>
+                    <button onClick={clearFindings} disabled={!findings.length || busy === 'clear-findings'} className="text-xs px-2 py-1 border border-gray-600 rounded text-gray-300 hover:bg-primary disabled:opacity-50">Clear</button>
+                  </div>
+                  {findings.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No malware findings recorded.</div> : <div className="max-h-80 overflow-auto divide-y divide-gray-700">{findings.map((item, idx) => <div key={`${item.path}-${idx}`} className="p-4"><Badge value={item.severity || 'critical'} tone="red" /><div className="text-red-200 text-sm font-medium mt-2">{item.signature}</div><div className="text-gray-400 text-xs font-mono break-all mt-1">{item.path}</div></div>)}</div>}
+                </section>
+                <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                  <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
+                    <h2 className="text-white font-semibold">Quarantine</h2>
+                    <button onClick={clearQuarantine} disabled={!quarantineItems.length || busy === 'clear-quarantine'} className="text-xs px-2 py-1 border border-red-500/40 rounded text-red-200 hover:bg-red-500/10 disabled:opacity-50 inline-flex items-center gap-1"><Trash2 className="w-3 h-3" /> Delete all</button>
+                  </div>
+                  {quarantineItems.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No files in quarantine.</div> : <div className="max-h-80 overflow-auto divide-y divide-gray-700">{quarantineItems.map((item, idx) => <div key={`${item.quarantine_path}-${idx}`} className="p-4"><div className="text-yellow-200 text-sm">{item.signature}</div><div className="text-gray-400 text-xs font-mono break-all mt-1">{item.original_path}</div><div className="text-gray-500 text-xs font-mono break-all mt-1">{item.quarantine_path}</div></div>)}</div>}
+                </section>
               </div>
             </div>
-            <pre className="m-0 max-h-[420px] overflow-auto bg-[#050914] p-4 text-xs text-gray-300 whitespace-pre-wrap font-mono">
-              {log || 'No log output yet.'}
-            </pre>
-          </section>
+          )}
+
+          {activeTab === 'ip' && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <StatusRow title="CrowdSec agent" ok={crowdsecInstalled && tools.crowdsec_service?.ok} detail={`${tools.crowdsec?.version || tools.cscli?.version || 'Not installed'} | Service: ${tools.crowdsec_service?.active || 'unknown'}`} action={crowdsecInstalled ? 'Restart' : 'Install'} busy={busy === (crowdsecInstalled ? 'crowdsec_restart' : 'install_crowdsec')} onAction={() => runFix(crowdsecInstalled ? 'crowdsec_restart' : 'install_crowdsec')} />
+                <StatusRow title="Firewall bouncer" ok={bouncerOk} detail={`Service: ${tools.crowdsec_firewall_bouncer_service?.active || 'unknown'}`} action="Repair" busy={busy === 'crowdsec_bouncer_restart'} onAction={() => runFix('crowdsec_bouncer_restart')} />
+                <StatusRow title="Nginx/SSH collections" ok={crowdsecInstalled} detail="Installs core Linux, SSH, and Nginx detection collections." action="Apply" busy={busy === 'crowdsec_collections'} onAction={() => runFix('crowdsec_collections')} />
+              </div>
+              <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-700">
+                  <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Ban className="w-5 h-5 text-accent" /> Active IP Blocks</h2>
+                  <p className="text-gray-500 text-sm mt-1">These are active CrowdSec decisions. Removing one unblocks the IP.</p>
+                </div>
+                {tools.crowdsec_decisions?.error && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{tools.crowdsec_decisions.error}</div>}
+                {crowdsecDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div> : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left min-w-[900px]">
+                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Value</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Origin</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
+                      <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${item.id || item.value}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value || item.id || '-'}</td><td className="px-4 py-3 text-gray-300">{item.type || item.scope || '-'}</td><td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td><td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td><td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${item.value || item.id}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeTab === 'fixes' && (
+            <section className="rounded-lg border border-gray-700 bg-secondary p-5">
+              <h2 className="text-white font-semibold text-lg mb-1">Recommended Fixes</h2>
+              <p className="text-gray-500 text-sm mb-4">Ascend only runs safe repairs here: install, restart services, update definitions, and apply CrowdSec collections.</p>
+              {issues.length === 0 ? <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-4 text-green-200 text-sm">No fixes needed right now.</div> : <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">{issues.map((issue) => <IssueCard key={issue.title} issue={issue} onFix={runFix} busy={busy} />)}</div>}
+            </section>
+          )}
+
+          {activeTab === 'logs' && <LogViewer log={log} logKind={logKind} setLogKind={setLogKind} />}
         </>
       )}
     </div>

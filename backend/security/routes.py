@@ -62,6 +62,23 @@ def _run(cmd, timeout=4):
         return 1, '', str(exc)
 
 
+def _run_repair_steps(steps, timeout=45):
+    results = []
+    ok = True
+    for step in steps:
+        rc, out, err = _run(step, timeout=timeout)
+        results.append({
+            'cmd': ' '.join(step),
+            'returncode': rc,
+            'stdout': out[-4000:],
+            'stderr': err[-4000:],
+        })
+        if rc != 0:
+            ok = False
+            break
+    return ok, results
+
+
 def _tool_version(name, args):
     path = shutil.which(name)
     if not path:
@@ -341,6 +358,76 @@ def api_security_crowdsec_decision_delete():
         return jsonify({'error': err or out or 'Could not delete CrowdSec decision.'}), 500
     _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed: {value or decision_id}', {'id': decision_id, 'value': value})
     return jsonify({'message': 'CrowdSec decision removed.', 'output': out})
+
+
+@bp.route('/api/security/repair', methods=['POST'])
+@login_required
+def api_security_repair():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    action = str(data.get('action') or '').strip()
+    systemctl = shutil.which('systemctl')
+    actions = {
+        'clamav_restart_updates': {
+            'label': 'Restart ClamAV updater',
+            'steps': [[systemctl, 'restart', 'clamav-freshclam.service']] if systemctl else [],
+        },
+        'clamav_update_definitions': {
+            'label': 'Update ClamAV definitions',
+            'steps': (
+                [[systemctl, 'stop', 'clamav-freshclam.service'], [shutil.which('freshclam') or 'freshclam'], [systemctl, 'start', 'clamav-freshclam.service']]
+                if systemctl else [[shutil.which('freshclam') or 'freshclam']]
+            ),
+            'timeout': 180,
+        },
+        'clamav_restart_daemon': {
+            'label': 'Restart ClamAV daemon',
+            'steps': [[systemctl, 'restart', 'clamav-daemon.service']] if systemctl else [],
+        },
+        'crowdsec_restart': {
+            'label': 'Restart CrowdSec',
+            'steps': [[systemctl, 'restart', 'crowdsec.service']] if systemctl else [],
+        },
+        'crowdsec_bouncer_restart': {
+            'label': 'Restart CrowdSec firewall bouncer',
+            'steps': [[systemctl, 'restart', 'crowdsec-firewall-bouncer.service']] if systemctl else [],
+        },
+        'crowdsec_collections': {
+            'label': 'Install core CrowdSec collections',
+            'steps': [
+                [shutil.which('cscli') or 'cscli', 'hub', 'update'],
+                [shutil.which('cscli') or 'cscli', 'collections', 'install', 'crowdsecurity/linux', 'crowdsecurity/sshd', 'crowdsecurity/nginx'],
+                *([[systemctl, 'restart', 'crowdsec.service']] if systemctl else []),
+            ],
+            'timeout': 90,
+        },
+        'clear_failed_state': {
+            'label': 'Clear failed install state',
+            'steps': [],
+        },
+    }
+    spec = actions.get(action)
+    if not spec:
+        return jsonify({'error': 'Unknown repair action.'}), 400
+    if action == 'clear_failed_state':
+        state = _load_json(STATE_PATH, {})
+        for key in ('install', 'crowdsec_install'):
+            if isinstance(state.get(key), dict) and state[key].get('status') in {'failed', 'success'}:
+                state[key]['status'] = 'idle'
+        _write_json(STATE_PATH, state)
+        _audit_log('security.repair', 'ok', spec['label'], {'action': action})
+        return jsonify({'message': 'Security install state cleared.', 'results': []})
+    steps = [s for s in spec.get('steps') or [] if s and s[0]]
+    if not steps:
+        return jsonify({'error': 'This repair needs systemctl or the required tool, but it was not found.'}), 400
+    ok, results = _run_repair_steps(steps, timeout=spec.get('timeout', 45))
+    status = 'ok' if ok else 'failed'
+    _audit_log('security.repair', status, spec['label'], {'action': action, 'results': results})
+    if not ok:
+        return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
+    return jsonify({'message': f'{spec["label"]} completed.', 'results': results})
 
 
 @bp.route('/api/security/findings', methods=['DELETE'])

@@ -112,6 +112,7 @@ export const apiClient = {
   startSecurityInstall: () => api.post('/api/security/install/start'),
   startSecurityScan: (data) => api.post('/api/security/scan/start', data || {}),
   startCrowdSecInstall: () => api.post('/api/security/crowdsec/install/start'),
+  repairSecurity: (action) => api.post('/api/security/repair', { action }, { timeout: 240000 }),
   deleteCrowdSecDecision: (decision) => api.delete('/api/security/crowdsec/decisions', { data: decision || {} }),
   getSecurityLogs: (kind = 'scan') => api.get('/api/security/logs', { params: { kind } }),
   clearSecurityFindings: () => api.delete('/api/security/findings'),
