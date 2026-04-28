@@ -94,6 +94,8 @@ def install_clamav(args):
         _append_log(args.log, state['install']['message'])
         return 1
 
+    env = os.environ.copy()
+    env['DEBIAN_FRONTEND'] = 'noninteractive'
     commands = [
         ['apt-get', 'update'],
         ['apt-get', 'install', '-y', 'clamav', 'clamav-daemon'],
@@ -106,7 +108,7 @@ def install_clamav(args):
     rc = 0
     for cmd in commands:
         _append_log(args.log, f'$ {" ".join(cmd)}')
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', env=env)
         for line in proc.stdout or []:
             _append_log(args.log, line.rstrip('\n'))
         proc.wait()
@@ -126,6 +128,82 @@ def install_clamav(args):
     })
     _write_json(args.state, state)
     return 0 if ok else (rc or 1)
+
+
+def _run_logged(args, cmd, *, shell=False, env=None, allow_failure=False):
+    display = cmd if isinstance(cmd, str) else ' '.join(cmd)
+    _append_log(args.log, f'$ {display}')
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', shell=shell, env=env)
+    for line in proc.stdout or []:
+        _append_log(args.log, line.rstrip('\n'))
+    proc.wait()
+    if proc.returncode != 0 and not allow_failure:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+    return proc.returncode
+
+
+def install_crowdsec(args):
+    state = _load_state(args.state)
+    state['crowdsec_install'] = {
+        'status': 'running',
+        'started_at': _now(),
+        'finished_at': None,
+        'message': 'Installing CrowdSec and firewall bouncer...',
+    }
+    _write_json(args.state, state)
+    Path(args.log).write_text('', encoding='utf-8')
+
+    if platform.system().lower() != 'linux':
+        state['crowdsec_install'].update({
+            'status': 'failed',
+            'finished_at': _now(),
+            'message': 'CrowdSec auto-install is only available on Linux servers.',
+        })
+        _write_json(args.state, state)
+        _append_log(args.log, state['crowdsec_install']['message'])
+        return 1
+
+    if shutil.which('apt-get') is None:
+        state['crowdsec_install'].update({
+            'status': 'failed',
+            'finished_at': _now(),
+            'message': 'apt-get was not found. Install CrowdSec manually.',
+        })
+        _write_json(args.state, state)
+        _append_log(args.log, state['crowdsec_install']['message'])
+        return 1
+
+    env = os.environ.copy()
+    env['DEBIAN_FRONTEND'] = 'noninteractive'
+    rc = 0
+    try:
+        _run_logged(args, ['apt-get', 'update'], env=env)
+        _run_logged(args, ['apt-get', 'install', '-y', 'curl', 'gnupg', 'apt-transport-https', 'ca-certificates'], env=env)
+        if not shutil.which('cscli'):
+            _run_logged(args, 'curl -s https://install.crowdsec.net | sh', shell=True, env=env)
+        _run_logged(args, ['apt-get', 'update'], env=env)
+        _run_logged(args, ['apt-get', 'install', '-y', 'crowdsec', 'crowdsec-firewall-bouncer-iptables'], env=env)
+        if shutil.which('cscli'):
+            _run_logged(args, ['cscli', 'hub', 'update'], env=env, allow_failure=True)
+            _run_logged(args, ['cscli', 'collections', 'install', 'crowdsecurity/linux', 'crowdsecurity/sshd', 'crowdsecurity/nginx'], env=env, allow_failure=True)
+        if shutil.which('systemctl'):
+            _run_logged(args, ['systemctl', 'enable', '--now', 'crowdsec'], env=env, allow_failure=True)
+            _run_logged(args, ['systemctl', 'enable', '--now', 'crowdsec-firewall-bouncer'], env=env, allow_failure=True)
+            _run_logged(args, ['systemctl', 'restart', 'crowdsec'], env=env, allow_failure=True)
+    except subprocess.CalledProcessError as exc:
+        rc = exc.returncode or 1
+
+    ok = shutil.which('cscli') is not None
+    state = _load_state(args.state)
+    state['crowdsec_install'] = {
+        'status': 'success' if ok and rc == 0 else 'failed',
+        'started_at': state.get('crowdsec_install', {}).get('started_at'),
+        'finished_at': _now(),
+        'message': 'CrowdSec is installed and the firewall bouncer is enabled.' if ok and rc == 0 else 'CrowdSec install failed. Review the CrowdSec install log.',
+        'returncode': rc,
+    }
+    _write_json(args.state, state)
+    return 0 if ok and rc == 0 else (rc or 1)
 
 
 def scan(args):
@@ -254,14 +332,19 @@ def main():
     p_scan.add_argument('--quarantine', action='store_true')
     p_scan.add_argument('paths', nargs='*')
 
+    p_crowdsec = sub.add_parser('install-crowdsec')
+    p_crowdsec.add_argument('--state', required=True)
+    p_crowdsec.add_argument('--log', required=True)
+
     args = parser.parse_args()
     if args.cmd == 'install':
         return install_clamav(args)
     if args.cmd == 'scan':
         return scan(args)
+    if args.cmd == 'install-crowdsec':
+        return install_crowdsec(args)
     return 2
 
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  Ban,
   CheckCircle2,
   Loader2,
   Play,
@@ -67,11 +68,15 @@ export default function SecurityPage() {
   const state = status?.state || {}
   const scan = state.scan || {}
   const install = state.install || {}
+  const crowdsecInstall = state.crowdsec_install || {}
   const findings = state.findings || scan.findings || []
   const quarantineItems = state.quarantine || []
   const scanRunning = ['starting', 'running'].includes(scan.status)
   const installRunning = ['starting', 'running'].includes(install.status)
+  const crowdsecInstallRunning = ['starting', 'running'].includes(crowdsecInstall.status)
   const clamInstalled = !!status?.tools?.clamscan?.installed
+  const crowdsecInstalled = !!status?.tools?.cscli?.installed
+  const crowdsecDecisions = status?.tools?.crowdsec_decisions?.items || []
 
   const load = async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true)
@@ -100,10 +105,10 @@ export default function SecurityPage() {
 
   useEffect(() => { load() }, [logKind])
   useEffect(() => {
-    if (!scanRunning && !installRunning) return undefined
+    if (!scanRunning && !installRunning && !crowdsecInstallRunning) return undefined
     const timer = setInterval(() => load({ quiet: true }), 2500)
     return () => clearInterval(timer)
-  }, [scanRunning, installRunning, logKind])
+  }, [scanRunning, installRunning, crowdsecInstallRunning, logKind])
 
   const summary = useMemo(() => {
     const definitions = status?.tools?.definitions?.database_files || []
@@ -117,8 +122,9 @@ export default function SecurityPage() {
       activeThreats: findings.length,
       quarantined: quarantineItems.length,
       scanStatus: scan.status || 'never',
+      blockedIps: crowdsecDecisions.length,
     }
-  }, [status, findings.length, quarantineItems.length, scan.status])
+  }, [status, findings.length, quarantineItems.length, scan.status, crowdsecDecisions.length])
 
   const startInstall = async () => {
     setBusy('install')
@@ -146,6 +152,35 @@ export default function SecurityPage() {
       await load({ quiet: true })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to start security scan')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const startCrowdSecInstall = async () => {
+    setBusy('crowdsec')
+    setMessage('')
+    try {
+      const { data } = await apiClient.startCrowdSecInstall()
+      setMessage(data.message || 'CrowdSec install started')
+      setLogKind('crowdsec')
+      await load({ quiet: true })
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to start CrowdSec install')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const unblockDecision = async (item) => {
+    const label = item.value || item.id
+    if (!window.confirm(`Remove CrowdSec block for ${label}?`)) return
+    setBusy(`unblock-${label}`)
+    try {
+      await apiClient.deleteCrowdSecDecision({ id: item.id, value: item.value })
+      await load({ quiet: true })
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to remove CrowdSec decision')
     } finally {
       setBusy('')
     }
@@ -205,7 +240,7 @@ export default function SecurityPage() {
             <Kpi label="Scanner" value={clamInstalled ? 'Ready' : 'Missing'} tone={clamInstalled ? 'green' : 'yellow'} />
             <Kpi label="Scan status" value={summary.scanStatus} tone={scan.status === 'infected' ? 'red' : scanRunning ? 'blue' : 'green'} />
             <Kpi label="Findings" value={summary.activeThreats} tone={summary.activeThreats ? 'red' : 'green'} />
-            <Kpi label="Quarantine" value={summary.quarantined} tone={summary.quarantined ? 'yellow' : 'gray'} />
+            <Kpi label="Blocked IPs" value={summary.blockedIps} tone={summary.blockedIps ? 'red' : crowdsecInstalled ? 'green' : 'yellow'} />
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
@@ -285,6 +320,87 @@ export default function SecurityPage() {
             </div>
           </div>
 
+          <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden mb-6">
+            <div className="px-5 py-4 border-b border-gray-700 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2">
+                  <Ban className="w-5 h-5 text-accent" /> IP Blocking
+                </h2>
+                <p className="text-gray-500 text-sm mt-1">CrowdSec watches SSH/Nginx behavior and the firewall bouncer blocks active attack decisions.</p>
+              </div>
+              <button
+                onClick={startCrowdSecInstall}
+                disabled={crowdsecInstallRunning || busy === 'crowdsec'}
+                className="px-4 py-2 border border-gray-600 rounded-lg text-white text-sm inline-flex items-center gap-2 hover:bg-primary disabled:opacity-50"
+              >
+                {crowdsecInstallRunning || busy === 'crowdsec' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wrench className="w-4 h-4" />}
+                Install / repair CrowdSec
+              </button>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-5 border-b border-gray-700">
+              <ToolCard
+                title="CrowdSec agent"
+                installed={crowdsecInstalled}
+                subtitle={status?.tools?.crowdsec?.version || status?.tools?.cscli?.version}
+                status={`Service: ${status?.tools?.crowdsec_service?.active || 'unknown'}`}
+              />
+              <ToolCard
+                title="Firewall bouncer"
+                installed={status?.tools?.crowdsec_firewall_bouncer_service?.ok}
+                subtitle="Enforces CrowdSec decisions on the server firewall"
+                status={`Service: ${status?.tools?.crowdsec_firewall_bouncer_service?.active || 'unknown'}`}
+              />
+              <div className="rounded-lg border border-gray-700 bg-primary/30 p-4">
+                <div className="text-gray-400 text-sm">Active CrowdSec decisions</div>
+                <div className={`text-3xl font-bold mt-2 ${crowdsecDecisions.length ? 'text-red-300' : 'text-green-300'}`}>{crowdsecDecisions.length}</div>
+                {crowdsecInstall.message && <div className="text-xs text-gray-400 mt-3">{crowdsecInstall.message}</div>}
+              </div>
+            </div>
+            {status?.tools?.crowdsec_decisions?.error && (
+              <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">
+                {status.tools.crowdsec_decisions.error}
+              </div>
+            )}
+            {crowdsecDecisions.length === 0 ? (
+              <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left min-w-[900px]">
+                  <thead className="bg-primary/60 text-gray-400">
+                    <tr>
+                      <th className="px-4 py-3 font-medium">Value</th>
+                      <th className="px-4 py-3 font-medium">Type</th>
+                      <th className="px-4 py-3 font-medium">Reason</th>
+                      <th className="px-4 py-3 font-medium">Origin</th>
+                      <th className="px-4 py-3 font-medium">Until</th>
+                      <th className="px-4 py-3 font-medium"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-700/70">
+                    {crowdsecDecisions.map((item, idx) => (
+                      <tr key={`${item.id || item.value}-${idx}`}>
+                        <td className="px-4 py-3 text-white font-mono">{item.value || item.id || '-'}</td>
+                        <td className="px-4 py-3 text-gray-300">{item.type || item.scope || '-'}</td>
+                        <td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td>
+                        <td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td>
+                        <td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => unblockDecision(item)}
+                            disabled={busy === `unblock-${item.value || item.id}`}
+                            className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50"
+                          >
+                            Unblock
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
             <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
@@ -341,7 +457,7 @@ export default function SecurityPage() {
             <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3">
               <h2 className="text-white font-semibold">Live Log</h2>
               <div className="flex gap-2">
-                {['scan', 'install'].map((kind) => (
+                {['scan', 'install', 'crowdsec'].map((kind) => (
                   <button
                     key={kind}
                     onClick={() => setLogKind(kind)}

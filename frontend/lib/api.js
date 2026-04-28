@@ -111,6 +111,8 @@ export const apiClient = {
   getSecurityCenterStatus: () => api.get('/api/security/status'),
   startSecurityInstall: () => api.post('/api/security/install/start'),
   startSecurityScan: (data) => api.post('/api/security/scan/start', data || {}),
+  startCrowdSecInstall: () => api.post('/api/security/crowdsec/install/start'),
+  deleteCrowdSecDecision: (decision) => api.delete('/api/security/crowdsec/decisions', { data: decision || {} }),
   getSecurityLogs: (kind = 'scan') => api.get('/api/security/logs', { params: { kind } }),
   clearSecurityFindings: () => api.delete('/api/security/findings'),
   clearSecurityQuarantine: () => api.delete('/api/security/quarantine'),

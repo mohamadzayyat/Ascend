@@ -19,6 +19,7 @@ SECURITY_DIR = None
 STATE_PATH = None
 SCAN_LOG_PATH = None
 INSTALL_LOG_PATH = None
+CROWDSEC_LOG_PATH = None
 QUARANTINE_DIR = None
 _admin_required = None
 _audit_log = None
@@ -91,6 +92,49 @@ def _service_active(name):
     return {'available': True, 'active': out or 'unknown', 'ok': rc == 0}
 
 
+def _crowdsec_version():
+    path = shutil.which('crowdsec')
+    if not path:
+        return {'installed': False, 'path': None, 'version': None}
+    rc, out, err = _run([path, '-version'])
+    text = out or err
+    first = text.splitlines()[0] if text else ''
+    return {'installed': True, 'path': path, 'version': first[:180], 'returncode': rc}
+
+
+def _crowdsec_decisions():
+    cscli = shutil.which('cscli')
+    if not cscli:
+        return {'available': False, 'items': [], 'error': 'cscli is not installed.'}
+    rc, out, err = _run([cscli, 'decisions', 'list', '-o', 'json'], timeout=8)
+    if rc != 0:
+        return {'available': True, 'items': [], 'error': err or out or 'Could not list CrowdSec decisions.'}
+    try:
+        parsed = json.loads(out or '[]')
+    except json.JSONDecodeError:
+        return {'available': True, 'items': [], 'error': 'CrowdSec returned invalid JSON.'}
+    if isinstance(parsed, dict):
+        raw_items = parsed.get('decisions') or parsed.get('items') or parsed.get('data') or []
+    else:
+        raw_items = parsed
+    items = []
+    for item in raw_items if isinstance(raw_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        items.append({
+            'id': item.get('id') or item.get('ID'),
+            'value': item.get('value') or item.get('Value') or item.get('scope_value'),
+            'scope': item.get('scope') or item.get('Scope'),
+            'type': item.get('type') or item.get('Type'),
+            'origin': item.get('origin') or item.get('Origin'),
+            'reason': item.get('reason') or item.get('Reason'),
+            'duration': item.get('duration') or item.get('Duration'),
+            'until': item.get('until') or item.get('Until'),
+            'scenario': item.get('scenario') or item.get('Scenario'),
+        })
+    return {'available': True, 'items': items, 'error': ''}
+
+
 def _scan_paths():
     candidates = [
         {'key': 'web_roots', 'label': 'Web roots', 'path': '/var/www'},
@@ -106,6 +150,7 @@ def _current_status():
     state = _load_json(STATE_PATH, {})
     clamscan = _tool_version('clamscan', ['--version'])
     freshclam = _tool_version('freshclam', ['--version'])
+    cscli = _tool_version('cscli', ['version'])
     return {
         'server': {
             'platform': platform.platform(),
@@ -115,6 +160,11 @@ def _current_status():
         'tools': {
             'clamscan': clamscan,
             'freshclam': freshclam,
+            'crowdsec': _crowdsec_version(),
+            'cscli': cscli,
+            'crowdsec_service': _service_active('crowdsec.service'),
+            'crowdsec_firewall_bouncer_service': _service_active('crowdsec-firewall-bouncer.service'),
+            'crowdsec_decisions': _crowdsec_decisions(),
             'clamav_freshclam_service': _service_active('clamav-freshclam.service'),
             'clamav_daemon_service': _service_active('clamav-daemon.service'),
             'definitions': _freshclam_status(),
@@ -124,6 +174,7 @@ def _current_status():
         'logs': {
             'scan': str(SCAN_LOG_PATH),
             'install': str(INSTALL_LOG_PATH),
+            'crowdsec': str(CROWDSEC_LOG_PATH),
         },
         'updated_at': _now(),
     }
@@ -158,7 +209,7 @@ def _maybe_notify_findings(status):
 
 
 def register_security_feature(*, flask_app, csrf_protect, base_dir, deployments_dir, static_sites_dir, admin_required, audit_log, notify_email_async):
-    global BASE_DIR, DEPLOYMENTS_DIR, STATIC_SITES_DIR, SECURITY_DIR, STATE_PATH, SCAN_LOG_PATH, INSTALL_LOG_PATH, QUARANTINE_DIR
+    global BASE_DIR, DEPLOYMENTS_DIR, STATIC_SITES_DIR, SECURITY_DIR, STATE_PATH, SCAN_LOG_PATH, INSTALL_LOG_PATH, CROWDSEC_LOG_PATH, QUARANTINE_DIR
     global _admin_required, _audit_log, _notify_email_async
     BASE_DIR = Path(base_dir)
     DEPLOYMENTS_DIR = Path(deployments_dir)
@@ -167,6 +218,7 @@ def register_security_feature(*, flask_app, csrf_protect, base_dir, deployments_
     STATE_PATH = SECURITY_DIR / 'security-state.json'
     SCAN_LOG_PATH = SECURITY_DIR / 'scan.log'
     INSTALL_LOG_PATH = SECURITY_DIR / 'install.log'
+    CROWDSEC_LOG_PATH = SECURITY_DIR / 'crowdsec-install.log'
     QUARANTINE_DIR = SECURITY_DIR / 'quarantine'
     SECURITY_DIR.mkdir(parents=True, exist_ok=True)
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
@@ -210,6 +262,24 @@ def api_security_install_start():
     return jsonify({'message': 'ClamAV install started.', 'pid': launch['pid']})
 
 
+@bp.route('/api/security/crowdsec/install/start', methods=['POST'])
+@login_required
+def api_security_crowdsec_install_start():
+    gate = _admin_required()
+    if gate:
+        return gate
+    state = _load_json(STATE_PATH, {})
+    if (state.get('crowdsec_install') or {}).get('status') == 'running':
+        return jsonify({'message': 'CrowdSec install is already running.', 'state': state})
+    state['crowdsec_install'] = {'status': 'starting', 'started_at': _now(), 'message': 'Starting CrowdSec install...'}
+    _write_json(STATE_PATH, state)
+    launch = _spawn_worker(['install-crowdsec', '--state', str(STATE_PATH), '--log', str(CROWDSEC_LOG_PATH)], CROWDSEC_LOG_PATH)
+    state['crowdsec_install']['pid'] = launch['pid']
+    _write_json(STATE_PATH, state)
+    _audit_log('security.crowdsec_install_started', 'ok', 'CrowdSec install started', {'pid': launch['pid']})
+    return jsonify({'message': 'CrowdSec install started.', 'pid': launch['pid']})
+
+
 @bp.route('/api/security/scan/start', methods=['POST'])
 @login_required
 def api_security_scan_start():
@@ -244,8 +314,33 @@ def api_security_scan_start():
 @login_required
 def api_security_logs():
     kind = (request.args.get('kind') or 'scan').strip().lower()
-    path = INSTALL_LOG_PATH if kind == 'install' else SCAN_LOG_PATH
+    path = CROWDSEC_LOG_PATH if kind == 'crowdsec' else INSTALL_LOG_PATH if kind == 'install' else SCAN_LOG_PATH
     return jsonify({'kind': kind, 'path': str(path), 'log': _tail(path)})
+
+
+@bp.route('/api/security/crowdsec/decisions', methods=['DELETE'])
+@login_required
+def api_security_crowdsec_decision_delete():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    value = str(data.get('value') or '').strip()
+    decision_id = str(data.get('id') or '').strip()
+    cscli = shutil.which('cscli')
+    if not cscli:
+        return jsonify({'error': 'cscli is not installed.'}), 400
+    if decision_id:
+        cmd = [cscli, 'decisions', 'delete', '--id', decision_id]
+    elif value:
+        cmd = [cscli, 'decisions', 'delete', '--ip', value]
+    else:
+        return jsonify({'error': 'Decision id or IP value is required.'}), 400
+    rc, out, err = _run(cmd, timeout=10)
+    if rc != 0:
+        return jsonify({'error': err or out or 'Could not delete CrowdSec decision.'}), 500
+    _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed: {value or decision_id}', {'id': decision_id, 'value': value})
+    return jsonify({'message': 'CrowdSec decision removed.', 'output': out})
 
 
 @bp.route('/api/security/findings', methods=['DELETE'])
