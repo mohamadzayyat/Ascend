@@ -22,7 +22,7 @@ export default function Sidebar() {
         className="fixed top-4 left-4 z-50 md:hidden p-2 rounded-lg bg-secondary border border-gray-700 text-white hover:bg-primary transition"
         aria-label="Open navigation"
       >
-        <img src="/logo/main_logo.png" alt="" className="h-6 w-6 object-contain" />
+        <img src="/logo/ascend-mark.svg" alt="" className="h-6 w-6 object-contain" />
       </button>
 
       <aside
@@ -33,7 +33,7 @@ export default function Sidebar() {
         <div className="p-6 h-full flex flex-col">
           <Link href="/dashboard" className="flex items-center mb-8 hover:opacity-90 transition" aria-label="Ascend dashboard">
             <img
-              src="/logo/opened_sidebar_logo.png"
+              src="/logo/ascend-wordmark.svg"
               alt="Ascend"
               className="h-9 w-auto max-w-full object-contain"
             />

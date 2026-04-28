@@ -1,0 +1,24 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ascend">
+  <defs>
+    <linearGradient id="markStroke" x1="48" y1="218" x2="205" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B82F6"/>
+      <stop offset="0.5" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="markFill" x1="48" y1="222" x2="206" y2="35" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#60A5FA" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0.12"/>
+    </linearGradient>
+    <filter id="softGlow" x="-40" y="-40" width="336" height="336" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+  <path d="M128 21L212 69V165C212 198.6 187.2 226.2 128 239C68.8 226.2 44 198.6 44 165V69L128 21Z" fill="#0B1220"/>
+  <path d="M128 21L212 69V165C212 198.6 187.2 226.2 128 239C68.8 226.2 44 198.6 44 165V69L128 21Z" fill="url(#markFill)"/>
+  <path d="M128 25.5L208 71.2V164.5C208 195.8 185 222.1 128 234.9C71 222.1 48 195.8 48 164.5V71.2L128 25.5Z" stroke="url(#markStroke)" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M72 184L119.6 74.5C123 66.8 133.9 66.8 137.3 74.5L184 184" stroke="url(#markStroke)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M94 149H162" stroke="#E0F2FE" stroke-width="16" stroke-linecap="round"/>
+  <path d="M151 117L183 149L215 101" stroke="url(#markStroke)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="128" cy="149" r="13" fill="#0B1220" stroke="#E0F2FE" stroke-width="7"/>
+  <path d="M151 117L183 149L215 101" stroke="#22D3EE" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" opacity="0.28" filter="url(#softGlow)"/>
+</svg>

@@ -44,7 +44,7 @@ export default function Login() {
         <div className="bg-secondary rounded-lg shadow-2xl p-8 border border-gray-700">
           <div className="text-center mb-8">
             <img
-              src="/logo/opened_sidebar_logo.png"
+              src="/logo/ascend-wordmark.svg"
               alt="Ascend"
               className="h-12 w-auto mx-auto mb-4 object-contain"
             />

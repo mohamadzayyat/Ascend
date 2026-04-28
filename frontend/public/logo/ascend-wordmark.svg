@@ -1,0 +1,23 @@
+<svg width="760" height="216" viewBox="0 0 760 216" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ascend self-hosted VPS deployment">
+  <defs>
+    <linearGradient id="wordMarkStroke" x1="37" y1="184" x2="175" y2="28" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B82F6"/>
+      <stop offset="0.52" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="wordText" x1="232" y1="67" x2="594" y2="151" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#93C5FD"/>
+    </linearGradient>
+  </defs>
+  <g>
+    <path d="M106 19L181 62V147.5C181 177.2 159 201.6 106 213C53 201.6 31 177.2 31 147.5V62L106 19Z" fill="#0B1220"/>
+    <path d="M106 23L177 64V147C177 174.8 156.7 198.3 106 209.3C55.3 198.3 35 174.8 35 147V64L106 23Z" stroke="url(#wordMarkStroke)" stroke-width="7" stroke-linejoin="round"/>
+    <path d="M57 163L99 66.5C102 59.7 111.7 59.7 114.7 66.5L156 163" stroke="url(#wordMarkStroke)" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M77 132H137" stroke="#E0F2FE" stroke-width="13" stroke-linecap="round"/>
+    <path d="M127 104L155 132L184 89" stroke="url(#wordMarkStroke)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="106" cy="132" r="11" fill="#0B1220" stroke="#E0F2FE" stroke-width="6"/>
+  </g>
+  <text x="226" y="121" fill="url(#wordText)" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="70" font-weight="800" letter-spacing="0">Ascend</text>
+  <text x="231" y="160" fill="#38BDF8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" letter-spacing="5">SELF-HOSTED VPS DEPLOYMENT</text>
+</svg>
