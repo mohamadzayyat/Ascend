@@ -3231,9 +3231,42 @@ def _domain_is_cloudflare_proxied(domain):
     return bool(dns.get('ok') and dns.get('proxied') and dns.get('provider') == 'cloudflare')
 
 
+def _www_alias_for_domain(domain):
+    domain = _normalize_domain(domain)
+    if not domain or domain.startswith('www.'):
+        return None
+    labels = domain.split('.')
+    if len(labels) == 2:
+        return f'www.{domain}'
+    return None
+
+
+def _app_server_names(app_row):
+    primary = _normalize_domain(app_row.domain)
+    if not primary:
+        return []
+    names = [primary]
+    alias = _www_alias_for_domain(primary)
+    if alias:
+        names.append(alias)
+    return names
+
+
+def _nginx_redirect_if_needed(app_row, indent='        '):
+    alias = _www_alias_for_domain(app_row.domain)
+    if not alias:
+        return ''
+    return f"{indent}if ($host = {alias}) {{ return 301 $scheme://{app_row.domain}$request_uri; }}\n"
+
+
 def _find_valid_certificate(domain, min_days=7):
+    return _find_valid_certificate_for_domains([domain], min_days=min_days)
+
+
+def _find_valid_certificate_for_domains(domains, min_days=7):
     live_dir = '/etc/letsencrypt/live'
-    if not domain or not os.path.isdir(live_dir):
+    wanted = {d.lower() for d in (domains or []) if d}
+    if not wanted or not os.path.isdir(live_dir):
         return None
 
     now = datetime.now(timezone.utc)
@@ -3273,7 +3306,7 @@ def _find_valid_certificate(domain, min_days=7):
             if cn_match:
                 names.append(cn_match.group(1).strip().lower())
 
-        if domain.lower() not in names or not_after is None:
+        if not wanted.issubset(set(names)) or not_after is None:
             continue
         days_remaining = int((not_after - now).total_seconds() // 86400)
         if days_remaining >= min_days:
@@ -3372,11 +3405,13 @@ def _php_fpm_socket(app_row):
 def _build_php_locations(app_row):
     root = str(_php_public_dir(app_row))
     socket_path = _php_fpm_socket(app_row)
+    redirect = _nginx_redirect_if_needed(app_row)
     return (
         f"    root {root};\n"
         f"    index index.php index.html;\n"
         f"\n"
         f"    location / {{\n"
+        f"{redirect}"
         f"        try_files $uri $uri/ /index.php?$query_string;\n"
         f"    }}\n"
         f"\n"
@@ -3391,18 +3426,23 @@ def _build_php_locations(app_row):
 
 def _build_static_locations(app_row):
     root = str(_static_nginx_root(app_row))
+    redirect = _nginx_redirect_if_needed(app_row)
     return (
         f"    root {root};\n"
         f"    index index.html;\n"
         f"\n"
         f"    location / {{\n"
+        f"{redirect}"
         f"        try_files $uri $uri/ /index.html;\n"
         f"    }}\n"
     )
 
 
 def _build_nginx_config(app_row, cert_info=None):
+    server_names = ' '.join(_app_server_names(app_row) or [app_row.domain])
+    redirect = _nginx_redirect_if_needed(app_row)
     common_proxy = (
+        f"{redirect}"
         f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
         f"        proxy_set_header Host $host;\n"
         f"        proxy_set_header X-Real-IP $remote_addr;\n"
@@ -3436,13 +3476,13 @@ def _build_nginx_config(app_row, cert_info=None):
         return (
             f"server {{\n"
             f"    listen 80;\n"
-            f"    server_name {app_row.domain};\n"
+            f"    server_name {server_names};\n"
             f"{challenge}"
             f"    location / {{ return 301 https://$host$request_uri; }}\n"
             f"}}\n\n"
             f"server {{\n"
             f"    listen 443 ssl;\n"
-            f"    server_name {app_row.domain};\n"
+            f"    server_name {server_names};\n"
             f"    client_max_body_size {app_row.client_max_body};\n"
             f"    ssl_certificate {cert_info['fullchain_path']};\n"
             f"    ssl_certificate_key {cert_info['privkey_path']};\n"
@@ -3457,7 +3497,7 @@ def _build_nginx_config(app_row, cert_info=None):
     return (
         f"server {{\n"
         f"    listen 80;\n"
-        f"    server_name {app_row.domain};\n"
+        f"    server_name {server_names};\n"
         f"    client_max_body_size {app_row.client_max_body};\n"
         f"\n"
         f"{challenge}"
@@ -3467,7 +3507,10 @@ def _build_nginx_config(app_row, cert_info=None):
     )
 
 
-def _run_certbot_nginx(domain, log_file):
+def _run_certbot_nginx(domains, log_file):
+    if isinstance(domains, str):
+        domains = [domains]
+    domains = [d for d in (domains or []) if d]
     lock_path = '/tmp/ascend-certbot.lock'
     lock_file = None
     try:
@@ -3480,11 +3523,14 @@ def _run_certbot_nginx(domain, log_file):
         log_file.write(f"  Warning: could not acquire certbot lock ({e}); continuing.\n")
 
     try:
+        domain_args = []
+        for domain in domains:
+            domain_args.extend(['-d', domain])
         cert = subprocess.run([
             'certbot', '--nginx',
-            '-d', domain,
+            *domain_args,
             '--non-interactive', '--agree-tos',
-            '-m', f'admin@{domain}',
+            '-m', f'admin@{domains[0]}',
         ], capture_output=True)
     finally:
         if lock_file:
@@ -3505,7 +3551,10 @@ def setup_nginx_config(app_row, log_file):
     domains don't silently 502 after a bad config lands.
     """
     log_file.write(f"  Domain: {app_row.domain}\n")
-    existing_cert = _find_valid_certificate(app_row.domain) if app_row.enable_ssl else None
+    server_names = _app_server_names(app_row) or [app_row.domain]
+    if len(server_names) > 1:
+        log_file.write(f"  Aliases: {', '.join(server_names[1:])}\n")
+    existing_cert = _find_valid_certificate_for_domains(server_names) if app_row.enable_ssl else None
     if existing_cert:
         log_file.write(
             f"  Existing valid certificate found: {existing_cert['name']} "
@@ -3568,7 +3617,7 @@ def setup_nginx_config(app_row, log_file):
                 return False
 
             log_file.write("  Obtaining SSL certificate...\n")
-            cert = _run_certbot_nginx(app_row.domain, log_file)
+            cert = _run_certbot_nginx(server_names, log_file)
             if cert.returncode != 0:
                 stdout = cert.stdout.decode('utf-8', errors='replace').strip()
                 stderr = cert.stderr.decode('utf-8', errors='replace').strip()
