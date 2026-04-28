@@ -33,6 +33,7 @@ export default function AppSettings({ app, onUpdate }) {
     php_public_path: app?.php_public_path || 'public',
     composer_install: app?.composer_install !== false,
     composer_command: app?.composer_command || 'composer install --no-dev --optimize-autoloader',
+    static_output_path: app?.static_output_path || 'dist',
     app_port: app?.app_port || '',
     domain: app?.domain || '',
     enable_ssl: app?.enable_ssl !== false,
@@ -53,7 +54,15 @@ export default function AppSettings({ app, onUpdate }) {
         next.php_public_path = next.php_public_path || 'public'
         next.composer_command = next.composer_command || 'composer install --no-dev --optimize-autoloader'
       }
-      if (name === 'app_type' && value !== 'php' && prev.app_type === 'php') {
+      if (name === 'app_type' && value === 'static') {
+        next.package_manager = next.package_manager || 'npm'
+        next.build_command = next.build_command || 'npm run build'
+        next.start_command = ''
+        next.pm2_name = ''
+        next.app_port = ''
+        next.static_output_path = next.static_output_path || 'dist'
+      }
+      if (name === 'app_type' && value !== 'php' && value !== 'static' && (prev.app_type === 'php' || prev.app_type === 'static')) {
         next.package_manager = 'npm'
         next.build_command = 'npm run build'
         next.start_command = 'npm start'
@@ -175,7 +184,7 @@ export default function AppSettings({ app, onUpdate }) {
     try {
       const res = await apiClient.updateApp(app.id, {
         ...formData,
-        app_port: formData.app_type === 'php' ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
+        app_port: ['php', 'static'].includes(formData.app_type) ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
       })
       setSaved(true)
       if (onUpdate) onUpdate(res.data)
@@ -317,7 +326,7 @@ export default function AppSettings({ app, onUpdate }) {
         <div className="space-y-4">
           {input('Name', 'name', 'text', 'CMS / API / Web')}
           {select('Type', 'app_type', [
-            ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
+            ['website', 'Website'], ['static', 'Static site'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
           ])}
           {input('Subdirectory (monorepo)', 'subdirectory', 'text', 'api/ or cms/', 'Leave empty if the project root is this app.')}
           {subdirCheck.status !== 'idle' && (
@@ -336,6 +345,14 @@ export default function AppSettings({ app, onUpdate }) {
             {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
             {check('Run Composer during deploy', 'composer_install')}
             {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
+          </div>
+        ) : formData.app_type === 'static' ? (
+          <div className="space-y-4">
+            {select('Package Manager', 'package_manager', [
+              ['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM'],
+            ])}
+            {input('Build Command', 'build_command', 'text', 'npm run build')}
+            {input('Static Output Directory', 'static_output_path', 'text', 'dist', 'Relative to the app directory. Vite usually outputs dist.')}
           </div>
         ) : (
           <div className="space-y-4">
@@ -358,7 +375,7 @@ export default function AppSettings({ app, onUpdate }) {
             enabled={formData.enable_ssl}
             onStatus={(status) => setDnsStatus(status)}
           />
-          {formData.app_type !== 'php' && (
+          {!['php', 'static'].includes(formData.app_type) && (
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
               <div className="flex gap-2">

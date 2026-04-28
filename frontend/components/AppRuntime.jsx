@@ -38,8 +38,9 @@ export default function AppRuntime({ appId }) {
   }
   if (!runtime) return null
 
-  const { app_type, pm2, port, port_listening, webhook_path, domain, php_version, php_fpm_socket, php_public_path } = runtime
+  const { app_type, pm2, port, port_listening, webhook_path, domain, php_version, php_fpm_socket, php_public_path, static_output_path } = runtime
   const isPhp = app_type === 'php'
+  const isStatic = app_type === 'static'
   const webhookUrl =
     webhook_path && typeof window !== 'undefined'
       ? `${window.location.origin}${webhook_path}`
@@ -100,11 +101,16 @@ export default function AppRuntime({ appId }) {
 
       <div className="grid grid-cols-2 gap-4 mb-4">
         <div>
-          <p className="text-gray-400 text-sm">{isPhp ? 'PHP-FPM' : 'PM2 status'}</p>
+          <p className="text-gray-400 text-sm">{isPhp ? 'PHP-FPM' : isStatic ? 'Static site' : 'PM2 status'}</p>
           {isPhp ? (
             <p className="text-white">
               {php_version ? `PHP ${php_version}` : 'System default'}
               <span className="text-gray-500 text-xs block font-mono truncate">{php_fpm_socket || 'socket auto-detect'}</span>
+            </p>
+          ) : isStatic ? (
+            <p className="text-white">
+              Nginx
+              <span className="text-gray-500 text-xs block font-mono truncate">{static_output_path || 'dist'}</span>
             </p>
           ) : pm2 ? (
             <>
@@ -139,9 +145,11 @@ export default function AppRuntime({ appId }) {
         </div>
 
         <div>
-          <p className="text-gray-400 text-sm">{isPhp ? 'Public root' : 'Port'}</p>
+          <p className="text-gray-400 text-sm">{isPhp ? 'Public root' : isStatic ? 'Output root' : 'Port'}</p>
           {isPhp ? (
             <p className="text-white font-mono text-xs break-all">{php_public_path || 'public'}</p>
+          ) : isStatic ? (
+            <p className="text-white font-mono text-xs break-all">{static_output_path || 'dist'}</p>
           ) : port ? (
             <p className="text-white font-mono">
               {port}
@@ -199,7 +207,11 @@ export default function AppRuntime({ appId }) {
           <div>
             <p className="text-gray-400 text-sm">Process</p>
             <p className="text-gray-500 text-xs">
-              {isPhp ? 'Write saved .env and reload PHP-FPM without rebuilding.' : 'Write saved .env and restart PM2 without rebuilding.'}
+              {isPhp
+                ? 'Write saved .env and reload PHP-FPM without rebuilding.'
+                : isStatic
+                  ? 'Reload Nginx for this static site without rebuilding.'
+                  : 'Write saved .env and restart PM2 without rebuilding.'}
             </p>
           </div>
           <button

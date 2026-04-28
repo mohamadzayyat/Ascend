@@ -144,6 +144,7 @@ class App(db.Model):
     php_public_path = db.Column(db.String(255), default='public')
     composer_install = db.Column(db.Boolean, default=True)
     composer_command = db.Column(db.String(500), default='composer install --no-dev --optimize-autoloader')
+    static_output_path = db.Column(db.String(255), default='dist')
 
     env_content = db.Column(db.Text)
 
@@ -181,6 +182,7 @@ class App(db.Model):
             'php_public_path': self.php_public_path,
             'composer_install': self.composer_install,
             'composer_command': self.composer_command,
+            'static_output_path': self.static_output_path,
             'env_content': self.env_content,
             'domain': self.domain,
             'enable_ssl': self.enable_ssl,

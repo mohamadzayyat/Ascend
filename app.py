@@ -420,6 +420,7 @@ def migrate_schema():
         add_col('app', "php_public_path VARCHAR(255) DEFAULT 'public'")
         add_col('app', 'composer_install BOOLEAN DEFAULT 1')
         add_col('app', "composer_command VARCHAR(500) DEFAULT 'composer install --no-dev --optimize-autoloader'")
+        add_col('app', "static_output_path VARCHAR(255) DEFAULT 'dist'")
         add_col('backup_schedule', 'at_hour INTEGER DEFAULT 2')
         add_col('backup_schedule', 'schedule_timezone VARCHAR(64)')
         add_col('backup_schedule', "target_database VARCHAR(255) DEFAULT ''")
@@ -451,6 +452,7 @@ def migrate_schema():
                 php_public_path='public',
                 composer_install=True,
                 composer_command='composer install --no-dev --optimize-autoloader',
+                static_output_path='dist',
                 env_content=p.env_content,
                 domain=p.domain,
                 enable_ssl=p.enable_ssl if p.enable_ssl is not None else True,
@@ -1928,7 +1930,7 @@ def _app_fields_from_dict(data, allow_all=True):
     for field in ['name', 'app_type', 'subdirectory', 'package_manager',
                   'build_command', 'start_command', 'pm2_name',
                   'php_version', 'php_public_path', 'composer_command',
-                  'env_content', 'domain', 'client_max_body']:
+                  'static_output_path', 'env_content', 'domain', 'client_max_body']:
         if field in data:
             val = data[field]
             val = (val.strip() if isinstance(val, str) else val) or None
@@ -1939,6 +1941,12 @@ def _app_fields_from_dict(data, allow_all=True):
         out['composer_install'] = bool(data['composer_install'])
     if 'app_port' in data and allow_all:
         out['app_port'] = _parse_port(data['app_port'])
+    app_type = (out.get('app_type') or data.get('app_type') or '').strip().lower()
+    if app_type in ('php', 'static'):
+        out['app_port'] = None
+    if app_type == 'static':
+        out['start_command'] = None
+        out['pm2_name'] = None
     if out.get('php_version') and not re.match(r'^\d+(?:\.\d+)?$', out['php_version']):
         raise ValueError('PHP version must look like 8.3 or 8.2')
     if out.get('php_public_path'):
@@ -1946,6 +1954,11 @@ def _app_fields_from_dict(data, allow_all=True):
         if '..' in public_path.split('/') or public_path.startswith(('/', '\\')):
             raise ValueError('PHP public path must be relative to the app directory')
         out['php_public_path'] = public_path or 'public'
+    if out.get('static_output_path'):
+        static_path = str(out['static_output_path']).strip().strip('/\\')
+        if '..' in static_path.split('/') or static_path.startswith(('/', '\\')):
+            raise ValueError('Static output path must be relative to the app directory')
+        out['static_output_path'] = static_path or 'dist'
     if out.get('subdirectory'):
         subdir = str(out['subdirectory']).strip().strip('/\\')
         parts = [p for p in re.split(r'[/\\]+', subdir) if p]
@@ -2031,7 +2044,7 @@ def api_create_app(project_id):
     for k, v in fields.items():
         setattr(new_app, k, v)
     # Auto-generate a pm2_name for process-based apps if not provided.
-    if new_app.app_type != 'php' and not new_app.pm2_name:
+    if not _is_php_app(new_app) and not _is_static_app(new_app) and not new_app.pm2_name:
         new_app.pm2_name = f"{project.folder_name}-{re.sub(r'[^a-zA-Z0-9_-]+', '-', name.lower())}"
     db.session.add(new_app)
     db.session.commit()
@@ -2080,10 +2093,16 @@ def api_update_app(app_id):
         if not subdir_check.get('ok'):
             return jsonify({'error': subdir_check.get('error') or 'Subdirectory does not exist.', 'subdirectory_check': subdir_check}), 400
 
+    old_pm2_name = a.pm2_name
     for k, v in fields.items():
         setattr(a, k, v)
+    if not _is_php_app(a) and not _is_static_app(a) and not a.pm2_name:
+        a.pm2_name = f"{a.project.folder_name}-{re.sub(r'[^a-zA-Z0-9_-]+', '-', a.name.lower())}"
     a.updated_at = datetime.now(timezone.utc)
     db.session.commit()
+    if old_pm2_name and _is_static_app(a):
+        subprocess.run(['pm2', 'delete', old_pm2_name], capture_output=True, timeout=10)
+        subprocess.run(['pm2', 'save'], capture_output=True, timeout=10)
     _audit_log('app.updated', 'ok', f'App updated: {a.project.name} / {a.name}', {'project_id': a.project_id, 'app_id': a.id})
     return jsonify(a.to_dict())
 
@@ -2226,6 +2245,20 @@ def api_restart_app(app_id):
     a = App.query.get_or_404(app_id)
     if a.project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
+    if _is_static_app(a):
+        if a.domain:
+            dep = Deployment(
+                project_id=a.project.id,
+                app_id=a.id,
+                status='pending',
+                branch=a.project.github_branch,
+                triggered_by='restart',
+            )
+            db.session.add(dep)
+            db.session.commit()
+            threading.Thread(target=restart_app_bg, args=(dep.id,), daemon=True).start()
+            return jsonify({'id': dep.id, 'status': 'pending'})
+        return jsonify({'error': 'Static apps do not have a process to restart. Configure a domain and redeploy/reload Nginx.'}), 400
     if not _is_php_app(a) and not a.pm2_name:
         return jsonify({'error': 'Set a PM2 name before restarting'}), 400
 
@@ -2855,7 +2888,18 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                         if not run_cmd(app_row.build_command, log, cwd=deploy_dir, shell=True):
                             raise RuntimeError("Build failed")
 
-                if not _is_php_app(app_row) and app_row.start_command and app_row.pm2_name:
+                if _is_static_app(app_row):
+                    static_root = _static_public_dir(app_row)
+                    log.write(f"\nStep 5: Preparing static site from {static_root}...\n")
+                    if app_row.pm2_name:
+                        run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
+                        run_cmd(['pm2', 'save'], log, check=False)
+                    if not static_root.exists() or not static_root.is_dir():
+                        raise RuntimeError(f"Static output directory not found: {app_row.static_output_path or 'dist'}")
+                    if not (static_root / 'index.html').exists():
+                        raise RuntimeError(f"Static output directory is missing index.html: {app_row.static_output_path or 'dist'}")
+                    log.write("  Static output is ready for Nginx.\n")
+                elif not _is_php_app(app_row) and app_row.start_command and app_row.pm2_name:
                     log.write(f"\nStep 5: Starting with PM2 as '{app_row.pm2_name}'...\n")
                     run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
                     if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
@@ -3051,6 +3095,12 @@ def restart_app_bg(deployment_id):
                         log.write("  Reload failed; trying restart...\n")
                         if not run_cmd(['systemctl', 'restart', service], log):
                             raise RuntimeError(f'Could not reload/restart {service}')
+                elif _is_static_app(app_row):
+                    log.write("\nStep 2: Reloading Nginx for static app...\n")
+                    if not app_row.domain:
+                        raise RuntimeError('Static app has no domain configured')
+                    if not setup_nginx_config(app_row, log):
+                        raise RuntimeError('Nginx reload failed')
                 else:
                     if not app_row.pm2_name:
                         raise RuntimeError('App has no PM2 name configured')
@@ -3241,6 +3291,10 @@ def _is_php_app(app_row):
     return (app_row.app_type or '').lower() == 'php'
 
 
+def _is_static_app(app_row):
+    return (app_row.app_type or '').lower() == 'static'
+
+
 def _php_public_dir(app_row):
     deploy_dir = _app_deploy_dir(app_row)
     public_path = (app_row.php_public_path or 'public').strip().strip('/\\')
@@ -3248,6 +3302,12 @@ def _php_public_dir(app_row):
     if public_path == 'public' and not public_dir.exists():
         return deploy_dir
     return public_dir
+
+
+def _static_public_dir(app_row):
+    deploy_dir = _app_deploy_dir(app_row)
+    output_path = (app_row.static_output_path or 'dist').strip().strip('/\\')
+    return deploy_dir / output_path if output_path else deploy_dir
 
 
 def _php_fpm_socket(app_row):
@@ -3295,6 +3355,18 @@ def _build_php_locations(app_row):
     )
 
 
+def _build_static_locations(app_row):
+    root = str(_static_public_dir(app_row))
+    return (
+        f"    root {root};\n"
+        f"    index index.html;\n"
+        f"\n"
+        f"    location / {{\n"
+        f"        try_files $uri $uri/ /index.html;\n"
+        f"    }}\n"
+    )
+
+
 def _build_nginx_config(app_row, cert_info=None):
     common_proxy = (
         f"        proxy_pass http://127.0.0.1:{app_row.app_port};\n"
@@ -3310,11 +3382,16 @@ def _build_nginx_config(app_row, cert_info=None):
         f"        try_files $uri =404;\n"
         f"    }}\n"
     )
-    app_locations = _build_php_locations(app_row) if _is_php_app(app_row) else (
+    if _is_php_app(app_row):
+        app_locations = _build_php_locations(app_row)
+    elif _is_static_app(app_row):
+        app_locations = _build_static_locations(app_row)
+    else:
+        app_locations = (
         f"    location / {{\n"
         f"{common_proxy}"
         f"    }}\n"
-    )
+        )
 
     if cert_info:
         ssl_options = ''
@@ -4229,6 +4306,7 @@ def api_app_runtime(app_id):
         'php_version': a.php_version,
         'php_fpm_socket': _php_fpm_socket(a) if _is_php_app(a) else None,
         'php_public_path': str(_php_public_dir(a)) if _is_php_app(a) else None,
+        'static_output_path': str(_static_public_dir(a)) if _is_static_app(a) else None,
         'webhook_path': webhook_path,
         'domain': a.domain,
         'status': a.status,

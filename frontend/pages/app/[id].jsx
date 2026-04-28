@@ -194,6 +194,12 @@ export default function AppDetail() {
                   <Row label="Public directory" value={app.php_public_path || 'public'} mono />
                   <Row label="Composer" value={app.composer_install ? (app.composer_command || 'composer install') : 'Disabled'} mono />
                 </>
+              ) : app.app_type === 'static' ? (
+                <>
+                  <Row label="Runtime" value="Static Nginx site" />
+                  <Row label="Build command" value={app.build_command || 'npm run build'} mono />
+                  <Row label="Output directory" value={app.static_output_path || 'dist'} mono />
+                </>
               ) : (
                 <>
                   <Row label="Package manager" value={app.package_manager} />

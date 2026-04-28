@@ -23,6 +23,7 @@ export default function NewApp() {
     php_public_path: 'public',
     composer_install: true,
     composer_command: 'composer install --no-dev --optimize-autoloader',
+    static_output_path: 'dist',
     app_port: '',
     domain: '',
     enable_ssl: true,
@@ -57,7 +58,16 @@ export default function NewApp() {
         next.composer_command = next.composer_command || 'composer install --no-dev --optimize-autoloader'
         setPortTouched(true)
       }
-      if (name === 'app_type' && value !== 'php' && prev.app_type === 'php') {
+      if (name === 'app_type' && value === 'static') {
+        next.package_manager = next.package_manager || 'npm'
+        next.build_command = next.build_command || 'npm run build'
+        next.start_command = ''
+        next.pm2_name = ''
+        next.app_port = ''
+        next.static_output_path = next.static_output_path || 'dist'
+        setPortTouched(true)
+      }
+      if (name === 'app_type' && value !== 'php' && value !== 'static' && (prev.app_type === 'php' || prev.app_type === 'static')) {
         next.package_manager = 'npm'
         next.build_command = 'npm run build'
         next.start_command = 'npm start'
@@ -68,7 +78,7 @@ export default function NewApp() {
   }
 
   const suggestPort = async ({ force = false } = {}) => {
-    if (formData.app_type === 'php') return
+    if (['php', 'static'].includes(formData.app_type)) return
     if (!force && (portTouched || formData.app_port)) return
     setPortLoading(true)
     setPortHint('')
@@ -88,7 +98,7 @@ export default function NewApp() {
   }
 
   useEffect(() => {
-    if (projectId && formData.app_type !== 'php') suggestPort()
+    if (projectId && !['php', 'static'].includes(formData.app_type)) suggestPort()
   }, [projectId, formData.app_type]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -199,7 +209,7 @@ export default function NewApp() {
     try {
       const res = await apiClient.createApp(projectId, {
         ...formData,
-        app_port: formData.app_type === 'php' ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
+        app_port: ['php', 'static'].includes(formData.app_type) ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
       })
       router.push(`/app/${res.data.id}`)
     } catch (err) {
@@ -324,7 +334,7 @@ export default function NewApp() {
           <div className="space-y-4">
             {input('Name', 'name', 'text', 'CMS / API / Web')}
             {select('Type', 'app_type', [
-              ['website', 'Website'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
+              ['website', 'Website'], ['static', 'Static site'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
             ])}
             {input('Subdirectory', 'subdirectory', 'text', 'apps/api', 'Relative path inside the repo. Leave empty for root.')}
             {subdirCheck.status !== 'idle' && (
@@ -343,6 +353,12 @@ export default function NewApp() {
               {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
               {check('Run Composer during deploy', 'composer_install')}
               {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
+            </div>
+          ) : formData.app_type === 'static' ? (
+            <div className="space-y-4">
+              {select('Package Manager', 'package_manager', [['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM']])}
+              {input('Build Command', 'build_command', 'text', 'npm run build')}
+              {input('Static Output Directory', 'static_output_path', 'text', 'dist', 'Relative to the app directory. Vite usually outputs dist.')}
             </div>
           ) : (
             <div className="space-y-4">
@@ -363,7 +379,7 @@ export default function NewApp() {
               enabled={formData.enable_ssl}
               onStatus={(status) => setDnsStatus(status)}
             />
-            {formData.app_type !== 'php' && (
+            {!['php', 'static'].includes(formData.app_type) && (
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">App Port</label>
               <div className="flex gap-2">
