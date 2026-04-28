@@ -24,6 +24,7 @@ const emptyForm = {
   use_tls: false,
   use_starttls: true,
   username: '',
+  from_name: 'Ascend',
   from_addr: '',
   notify_to: '',
   smtp_password: '',
@@ -96,6 +97,7 @@ export default function EmailSettingsPage() {
         use_tls: !!form.use_tls,
         use_starttls: !!form.use_starttls,
         username: form.username,
+        from_name: form.from_name,
         from_addr: form.from_addr,
         notify_to: form.notify_to,
         events: { ...form.events },
@@ -133,6 +135,7 @@ export default function EmailSettingsPage() {
         use_tls: form.use_tls,
         use_starttls: form.use_starttls,
         username: form.username,
+        from_name: form.from_name,
         from_addr: form.from_addr,
         notify_to: form.notify_to,
         events: form.events,
@@ -292,6 +295,15 @@ export default function EmailSettingsPage() {
                   </button>
                 </div>
               )}
+              <label className="block text-sm text-gray-300 md:col-span-2">
+                Sender name
+                <input
+                  value={form.from_name}
+                  onChange={(e) => setForm((f) => ({ ...f, from_name: e.target.value }))}
+                  className="mt-1 w-full bg-primary border border-gray-700 rounded px-3 py-2 text-white"
+                  placeholder="Ascend"
+                />
+              </label>
               <label className="block text-sm text-gray-300 md:col-span-2">
                 From address
                 <input

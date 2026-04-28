@@ -4,6 +4,7 @@ import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
   CheckCircle2, XCircle, AlertTriangle, Save, Pencil, Calendar, Table as TableIcon,
   ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText, Search, X,
+  UploadCloud, RotateCcw,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
@@ -11,6 +12,7 @@ const TABS = [
   { id: 'browse',   label: 'Browse',   icon: TableIcon },
   { id: 'sql',      label: 'SQL',      icon: Play },
   { id: 'backups',  label: 'Backups',  icon: Download },
+  { id: 'restore',  label: 'Restore',  icon: RotateCcw },
   { id: 'schedule', label: 'Schedule', icon: Calendar },
 ]
 
@@ -679,6 +681,7 @@ function ConnectionPanel({
           />
         )}
         {tab === 'backups' && <BackupsTab connection={connection} />}
+        {tab === 'restore' && <RestoreTab connection={connection} />}
         {tab === 'schedule' && <ScheduleTab connection={connection} />}
       </div>
     </div>
@@ -1212,6 +1215,7 @@ function BackupsTab({ connection }) {
 
   return (
     <div className="p-4 flex flex-col gap-3 h-full">
+      <BackupUploadSettings />
       <div className="flex items-center justify-between">
         <span className="text-sm text-gray-400">{backups.length} backup(s)</span>
         <button
@@ -1289,6 +1293,236 @@ function BackupsTab({ connection }) {
 }
 
 // ── Schedule editor (one row per database or “all”) ──────────────
+
+function BackupUploadSettings() {
+  const [form, setForm] = useState({
+    enabled: false,
+    webdav_url: 'https://app.koofr.net/dav/Koofr/Ascend-Backups',
+    username: '',
+    password: '',
+    remote_path: '',
+    has_password: false,
+  })
+  const [open, setOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiClient.getBackupUploadSettings()
+      setForm((f) => ({ ...f, ...res.data, password: '' }))
+    } catch {
+      setMessage('Could not load upload settings')
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const save = async () => {
+    setSaving(true)
+    setMessage('')
+    try {
+      const payload = {
+        enabled: !!form.enabled,
+        webdav_url: form.webdav_url,
+        username: form.username,
+        remote_path: form.remote_path,
+        clear_password: false,
+      }
+      if (form.password.trim()) payload.password = form.password.trim()
+      const res = await apiClient.updateBackupUploadSettings(payload)
+      setForm((f) => ({ ...f, ...res.data, password: '' }))
+      setMessage('Upload settings saved')
+    } catch (err) {
+      setMessage(err.response?.data?.error || 'Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const test = async () => {
+    setTesting(true)
+    setMessage('')
+    try {
+      const res = await apiClient.testBackupUploadSettings()
+      setMessage(`Test uploaded to ${res.data.uploaded_to}`)
+    } catch (err) {
+      setMessage(err.response?.data?.error || 'Upload test failed')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <div className="rounded border border-gray-700 bg-primary/35">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="w-full px-3 py-2 flex items-center justify-between gap-3 text-left">
+        <span className="inline-flex items-center gap-2 text-sm text-white font-semibold">
+          <UploadCloud className="w-4 h-4 text-accent" />
+          Remote backup upload
+          <span className={form.enabled ? 'text-green-400 text-xs' : 'text-gray-500 text-xs'}>{form.enabled ? 'enabled' : 'off'}</span>
+        </span>
+        {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+      </button>
+      {open && (
+        <div className="border-t border-gray-700 p-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+          <div className="md:col-span-2 rounded border border-blue-500/25 bg-blue-500/10 p-2 text-xs text-blue-100/90">
+            Koofr is a simple free option: create an account, enable WebDAV/app password in Koofr, then use the default URL.
+          </div>
+          <label className="md:col-span-2 flex items-center gap-2 text-gray-300">
+            <input type="checkbox" checked={!!form.enabled} onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))} />
+            Upload successful backups to WebDAV
+          </label>
+          <label className="md:col-span-2 text-gray-300">
+            WebDAV URL
+            <input value={form.webdav_url} onChange={(e) => setForm((f) => ({ ...f, webdav_url: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+          </label>
+          <label className="text-gray-300">
+            Username / email
+            <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+          </label>
+          <label className="text-gray-300">
+            Password {form.has_password && <span className="text-gray-500">(leave blank to keep)</span>}
+            <input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} placeholder={form.has_password ? '********' : ''} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+          </label>
+          <label className="md:col-span-2 text-gray-300">
+            Extra remote folder (optional)
+            <input value={form.remote_path} onChange={(e) => setForm((f) => ({ ...f, remote_path: e.target.value }))} placeholder="production/mysql" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+          </label>
+          {message && <div className="md:col-span-2 rounded border border-gray-600 bg-secondary px-2 py-1.5 text-xs text-gray-200 break-all">{message}</div>}
+          <div className="md:col-span-2 flex flex-wrap gap-2">
+            <button type="button" onClick={save} disabled={saving} className="px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50">
+              {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+              Save upload settings
+            </button>
+            <button type="button" onClick={test} disabled={testing || saving} className="px-3 py-1.5 border border-gray-600 hover:bg-primary/60 rounded text-white text-xs inline-flex items-center gap-1.5 disabled:opacity-50">
+              {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
+              Test upload
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RestoreTab({ connection }) {
+  const [backups, setBackups] = useState([])
+  const [databases, setDatabases] = useState([])
+  const [form, setForm] = useState({ backup_id: '', target_database: '', collation: 'utf8mb4_general_ci', replace_existing: true })
+  const [job, setJob] = useState(null)
+  const [error, setError] = useState('')
+  const [starting, setStarting] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const [backupRes, dbRes] = await Promise.all([apiClient.listDbBackups(connection.id), apiClient.listDatabases(connection.id)])
+      const good = (backupRes.data.backups || []).filter((b) => b.status === 'success')
+      const all = [...(dbRes.data.databases || []), ...(dbRes.data.system_databases || [])]
+      setBackups(good)
+      setDatabases(all)
+      setForm((f) => ({
+        ...f,
+        backup_id: f.backup_id || String(good[0]?.id || ''),
+        target_database: f.target_database || connection.default_database || all[0] || '',
+      }))
+      setError('')
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to load restore data')
+    }
+  }, [connection.id, connection.default_database])
+
+  useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    if (!job || job.status === 'success' || job.status === 'failed') return undefined
+    const t = setInterval(async () => {
+      try {
+        const res = await apiClient.getDbRestoreJob(job.id)
+        setJob(res.data.job)
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to refresh restore progress')
+      }
+    }, 1500)
+    return () => clearInterval(t)
+  }, [job])
+
+  const start = async () => {
+    if (!form.backup_id || !form.target_database.trim()) {
+      setError('Choose a backup and target database.')
+      return
+    }
+    const target = form.target_database.trim()
+    const targetExists = databases.includes(target)
+    const msg = targetExists
+      ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.`
+      : `Create database "${target}" and restore this backup into it?`
+    if (!window.confirm(msg)) return
+    setStarting(true)
+    setError('')
+    try {
+      const res = await apiClient.startDbRestore(connection.id, {
+        backup_id: Number(form.backup_id),
+        target_database: target,
+        collation: form.collation.trim() || 'utf8mb4_general_ci',
+        replace_existing: !!form.replace_existing,
+      })
+      setJob(res.data.job)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Restore failed to start')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  return (
+    <div className="p-4 flex flex-col gap-4 h-full">
+      <div className="rounded border border-amber-500/25 bg-amber-500/10 p-3 text-xs text-amber-100/90 leading-relaxed max-w-4xl">
+        Restoring to an existing database first creates a safety backup. New databases default to utf8mb4_general_ci.
+      </div>
+      {error && <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-3xl">
+        <label className="md:col-span-2 text-sm text-gray-300">
+          Backup
+          <select value={form.backup_id} onChange={(e) => setForm((f) => ({ ...f, backup_id: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+            {backups.map((b) => <option key={b.id} value={b.id}>{b.filename} - {formatTime(b.completed_at || b.started_at)}</option>)}
+          </select>
+        </label>
+        <label className="text-sm text-gray-300">
+          Restore to database
+          <input value={form.target_database} onChange={(e) => setForm((f) => ({ ...f, target_database: e.target.value }))} list="restore-db-list" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" />
+          <datalist id="restore-db-list">{databases.map((d) => <option key={d} value={d} />)}</datalist>
+        </label>
+        <label className="text-sm text-gray-300">
+          Collation
+          <input value={form.collation} onChange={(e) => setForm((f) => ({ ...f, collation: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white" />
+        </label>
+        <label className="md:col-span-2 flex items-center gap-2 text-sm text-gray-300">
+          <input type="checkbox" checked={!!form.replace_existing} onChange={(e) => setForm((f) => ({ ...f, replace_existing: e.target.checked }))} />
+          Replace existing database after the safety backup
+        </label>
+      </div>
+      <div>
+        <button type="button" onClick={start} disabled={starting || backups.length === 0} className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+          {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+          Start restore
+        </button>
+      </div>
+      {job && (
+        <div className="rounded border border-gray-700 bg-primary/40 p-4 max-w-3xl">
+          <div className="flex items-center justify-between gap-3 text-sm mb-2">
+            <span className="text-white font-semibold">{job.phase || job.status}</span>
+            <span className={job.status === 'failed' ? 'text-red-400' : job.status === 'success' ? 'text-green-400' : 'text-gray-300'}>{job.status}</span>
+          </div>
+          <div className="h-2 bg-gray-800 rounded overflow-hidden"><div className="h-full bg-accent transition-all" style={{ width: `${Math.max(0, Math.min(100, job.progress || 0))}%` }} /></div>
+          <div className="mt-2 text-xs text-gray-400">{job.progress || 0}% - target {job.target_database}</div>
+          {job.safety_backup_id && <div className="mt-1 text-xs text-green-300">Safety backup id: {job.safety_backup_id}</div>}
+          {job.error && <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-300 text-xs font-mono whitespace-pre-wrap">{job.error}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function ScheduleTab({ connection }) {
   const [rows, setRows] = useState([])

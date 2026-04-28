@@ -55,6 +55,9 @@ export const apiClient = {
   // SMTP can take up to ~30s before the server responds with an error; avoid client giving up first.
   testEmailNotifications: (data) =>
     api.post('/api/settings/email-notifications/test', data || {}, { timeout: 120000 }),
+  getBackupUploadSettings: () => api.get('/api/settings/backup-upload'),
+  updateBackupUploadSettings: (data) => api.put('/api/settings/backup-upload', data),
+  testBackupUploadSettings: () => api.post('/api/settings/backup-upload/test', {}, { timeout: 120000 }),
 
   getGitHubCredentials: () => api.get('/api/github-credentials'),
   addGitHubCredential: (username, token) => api.post('/api/github-credentials', { username, token }),
@@ -143,6 +146,8 @@ export const apiClient = {
     }),
   listDbBackups: (id) => api.get(`/api/databases/connections/${id}/backups`),
   runDbBackup: (id) => api.post(`/api/databases/connections/${id}/backups/run`),
+  startDbRestore: (id, data) => api.post(`/api/databases/connections/${id}/restore-jobs`, data, { timeout: 120000 }),
+  getDbRestoreJob: (jobId) => api.get(`/api/databases/restore-jobs/${jobId}`),
   downloadDbBackupUrl: (backupId) =>
     `${API_URL}/api/databases/backups/${backupId}/download`,
   deleteDbBackup: (backupId) => api.delete(`/api/databases/backups/${backupId}`),
