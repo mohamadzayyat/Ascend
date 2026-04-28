@@ -3529,6 +3529,7 @@ def _run_certbot_nginx(domains, log_file):
         cert = subprocess.run([
             'certbot', '--nginx',
             *domain_args,
+            '--expand',
             '--non-interactive', '--agree-tos',
             '-m', f'admin@{domains[0]}',
         ], capture_output=True)
