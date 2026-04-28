@@ -35,7 +35,7 @@ export default function Sidebar() {
             <img
               src="/logo/ascend-wordmark.svg"
               alt="Ascend"
-              className="h-9 w-auto max-w-full object-contain"
+              className="h-14 w-auto max-w-full object-contain"
             />
           </Link>
 

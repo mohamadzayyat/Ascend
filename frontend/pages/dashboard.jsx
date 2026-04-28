@@ -1,5 +1,7 @@
 import Link from 'next/link'
+import { useEffect, useState } from 'react'
 import { useAuth, useProjects, useCertificates } from '@/lib/hooks/useAuth'
+import { apiClient } from '@/lib/api'
 import StatCard from '@/components/StatCard'
 import ProjectCard from '@/components/ProjectCard'
 import ServerStats from '@/components/ServerStats'
@@ -17,6 +19,13 @@ export default function Dashboard() {
   const { user } = useAuth()
   const { projects, isLoading } = useProjects()
   const { certificates, scheduler } = useCertificates()
+  const [systemAlerts, setSystemAlerts] = useState([])
+
+  useEffect(() => {
+    apiClient.getSystemAlerts()
+      .then((res) => setSystemAlerts(res.data.alerts || []))
+      .catch(() => setSystemAlerts([]))
+  }, [])
 
   const allApps = projects.flatMap((p) => p.apps || [])
   const riskyCertificates = certificates
@@ -43,6 +52,30 @@ export default function Dashboard() {
         <h1 className="text-4xl font-bold text-white mb-2">Dashboard</h1>
         <p className="text-gray-400">Welcome back, {user.username}.</p>
       </div>
+
+      {systemAlerts.length > 0 && (
+        <div className="mb-8 rounded-lg border border-amber-500/30 bg-amber-500/10 overflow-hidden">
+          <div className="px-5 py-3 border-b border-amber-500/20 flex items-center justify-between gap-3">
+            <h2 className="text-amber-100 font-semibold flex items-center gap-2">
+              <AlertCircle className="w-5 h-5" />
+              Critical notifications
+            </h2>
+            <Link href="/update-center" className="text-amber-100 hover:underline text-sm font-semibold">
+              View Update Center
+            </Link>
+          </div>
+          <div className="divide-y divide-amber-500/15">
+            {systemAlerts.slice(0, 5).map((alert, idx) => (
+              <div key={`${alert.title}-${idx}`} className="px-5 py-3">
+                <div className={alert.severity === 'critical' ? 'text-red-200 font-semibold' : 'text-amber-100 font-semibold'}>
+                  {alert.title}
+                </div>
+                <div className="text-sm text-gray-300 mt-1">{alert.message}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <ServerStats />
 
