@@ -30,6 +30,9 @@ export const apiClient = {
   getAuditLog: (limit = 250) => api.get('/api/audit-log', { params: { limit } }),
   clearAuditLog: () => api.delete('/api/audit-log'),
   getBackupHealth: () => api.get('/api/backups/health'),
+  getUpdateStatus: () => api.get('/api/update/status', { timeout: 120000 }),
+  startUpdate: () => api.post('/api/update/start', {}, { timeout: 30000 }),
+  getSystemAlerts: () => api.get('/api/system/alerts'),
 
   // Projects (repo-level)
   getProjects: () => api.get('/api/projects'),

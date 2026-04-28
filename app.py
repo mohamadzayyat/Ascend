@@ -13,6 +13,7 @@ import time
 import hmac
 import hashlib
 import shutil
+import shlex
 import zipfile
 import subprocess
 import threading
@@ -144,6 +145,7 @@ SHELL_PASSPHRASE_SETTING_KEY = 'shell_passphrase_hash'
 EMAIL_NOTIFY_SETTING_KEY = 'email_notifications_v1'
 BACKUP_UPLOAD_SETTING_KEY = 'backup_upload_v1'
 AUDIT_LOG_SETTING_KEY = 'audit_log_v1'
+UPDATE_STATE_SETTING_KEY = 'update_state_v1'
 
 _EMAIL_NOTIFY_EVENT_DEFAULTS = {
     'backup_success': False,
@@ -868,6 +870,179 @@ def api_backup_health():
             'total_success_size_bytes': sum((b.size_bytes or 0) for b in backups if b.status == 'success'),
         })
     return jsonify({'items': rows})
+
+
+def _run_text(cmd, cwd=None, timeout=10):
+    try:
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        return {
+            'ok': result.returncode == 0,
+            'stdout': (result.stdout or '').strip(),
+            'stderr': (result.stderr or '').strip(),
+            'returncode': result.returncode,
+        }
+    except Exception as exc:
+        return {'ok': False, 'stdout': '', 'stderr': str(exc), 'returncode': None}
+
+
+def _update_log_path():
+    return LOG_DIR / 'ascend-update-latest.log'
+
+
+def _update_state_load():
+    return _json_setting_load(UPDATE_STATE_SETTING_KEY, {})
+
+
+def _update_state_save(data):
+    _json_setting_save(UPDATE_STATE_SETTING_KEY, data)
+
+
+def _update_running():
+    state = _update_state_load()
+    pid = state.get('pid')
+    if pid:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except Exception:
+            pass
+    unit = state.get('unit')
+    if unit and shutil.which('systemctl'):
+        active = _run_text(['systemctl', 'is-active', '--quiet', unit], timeout=5)
+        return bool(active.get('ok'))
+    return False
+
+
+def _git_update_status():
+    head = _run_text(['git', 'rev-parse', 'HEAD'], cwd=BASE_DIR)
+    branch = _run_text(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=BASE_DIR)
+    local_subject = _run_text(['git', 'log', '-1', '--pretty=%s'], cwd=BASE_DIR)
+    remote = {}
+    current_branch = branch['stdout'] if branch.get('ok') else 'main'
+    if shutil.which('git'):
+        fetch = _run_text(['git', 'fetch', '--quiet', 'origin', current_branch], cwd=BASE_DIR, timeout=30)
+        remote_ref = _run_text(['git', 'rev-parse', f'origin/{current_branch}'], cwd=BASE_DIR)
+        remote_subject = _run_text(['git', 'log', '-1', '--pretty=%s', f'origin/{current_branch}'], cwd=BASE_DIR)
+        remote = {
+            'fetch_ok': fetch.get('ok'),
+            'fetch_error': fetch.get('stderr'),
+            'commit': remote_ref.get('stdout') if remote_ref.get('ok') else '',
+            'subject': remote_subject.get('stdout') if remote_subject.get('ok') else '',
+        }
+    return {
+        'branch': current_branch,
+        'current_commit': head.get('stdout') if head.get('ok') else '',
+        'current_subject': local_subject.get('stdout') if local_subject.get('ok') else '',
+        'remote': remote,
+        'update_available': bool(remote.get('commit') and head.get('stdout') and remote.get('commit') != head.get('stdout')),
+    }
+
+
+@app.route('/api/update/status')
+@login_required
+def api_update_status():
+    err = _admin_required()
+    if err:
+        return err
+    log_path = _update_log_path()
+    tail = ''
+    if log_path.exists():
+        try:
+            tail = log_path.read_text(encoding='utf-8', errors='replace')[-12000:]
+        except Exception:
+            tail = ''
+    return jsonify({
+        **_git_update_status(),
+        'running': _update_running(),
+        'state': _update_state_load(),
+        'log_tail': tail,
+    })
+
+
+@app.route('/api/update/start', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_update_start():
+    err = _admin_required()
+    if err:
+        return err
+    if _update_running():
+        return jsonify({'error': 'An update is already running.'}), 409
+    script = BASE_DIR / 'install.sh'
+    if not script.exists():
+        return jsonify({'error': 'install.sh was not found.'}), 500
+    log_path = _update_log_path()
+    LOG_DIR.mkdir(exist_ok=True)
+    unit = f'ascend-update-{int(time.time())}'
+    cmd = f'cd {shlex.quote(str(BASE_DIR))} && ASCEND_PANEL_UPDATE=1 bash {shlex.quote(str(script))} > {shlex.quote(str(log_path))} 2>&1'
+    state = {
+        'started_at': datetime.now(timezone.utc).isoformat(),
+        'started_by': current_user.username,
+        'log_path': str(log_path),
+        'unit': unit,
+    }
+    try:
+        if shutil.which('systemd-run'):
+            proc = subprocess.run(
+                ['systemd-run', '--unit', unit, '--description', 'Ascend panel self-update', '/bin/bash', '-lc', cmd],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or 'systemd-run failed').strip())
+            state['launcher'] = 'systemd-run'
+        else:
+            with open(log_path, 'ab') as log_fh:
+                proc = subprocess.Popen(['setsid', '/bin/bash', '-lc', cmd], cwd=str(BASE_DIR), stdout=log_fh, stderr=log_fh, start_new_session=True)
+            state['launcher'] = 'setsid'
+            state['pid'] = proc.pid
+        _update_state_save(state)
+        _audit_log('update.started', 'ok', 'Panel update started in detached session', {'launcher': state.get('launcher'), 'unit': unit})
+        return jsonify({'ok': True, 'state': state})
+    except Exception as exc:
+        state['error'] = str(exc)
+        _update_state_save(state)
+        _audit_log('update.start_failed', 'failed', str(exc))
+        return jsonify({'error': f'Failed to start detached update: {exc}'}), 500
+
+
+@app.route('/api/system/alerts')
+@login_required
+def api_system_alerts():
+    alerts = []
+    try:
+        disk = shutil.disk_usage(str(DEPLOYMENTS_DIR if DEPLOYMENTS_DIR.exists() else BASE_DIR))
+        used_pct = round((disk.used / disk.total) * 100, 1) if disk.total else 0
+        if used_pct >= 90:
+            alerts.append({'severity': 'critical', 'title': 'Disk usage is critical', 'message': f'Disk is {used_pct}% full.'})
+        elif used_pct >= 80:
+            alerts.append({'severity': 'warning', 'title': 'Disk usage is high', 'message': f'Disk is {used_pct}% full.'})
+    except Exception:
+        pass
+    try:
+        mem = psutil.virtual_memory()
+        if mem.percent >= 90:
+            alerts.append({'severity': 'critical', 'title': 'Memory usage is critical', 'message': f'RAM is {mem.percent}% used.'})
+        elif mem.percent >= 80:
+            alerts.append({'severity': 'warning', 'title': 'Memory usage is high', 'message': f'RAM is {mem.percent}% used.'})
+    except Exception:
+        pass
+    try:
+        for cert in (_load_letsencrypt_certificates().get('certificates') or []):
+            if cert.get('status') in ('critical', 'expired'):
+                alerts.append({'severity': 'critical', 'title': 'SSL certificate needs attention', 'message': f"{cert.get('domain') or cert.get('name')} is {cert.get('status')}."})
+            elif cert.get('status') == 'warning':
+                alerts.append({'severity': 'warning', 'title': 'SSL certificate expiring soon', 'message': f"{cert.get('domain') or cert.get('name')} expires soon."})
+    except Exception:
+        pass
+    try:
+        failed_backups = BackupArchive.query.filter_by(status='failed').order_by(BackupArchive.started_at.desc()).limit(5).all()
+        for backup in failed_backups:
+            alerts.append({'severity': 'warning', 'title': 'Recent backup failed', 'message': f'{backup.filename}: {(backup.error_message or "backup failed")[:180]}'})
+    except Exception:
+        pass
+    return jsonify({'alerts': alerts[:20]})
 
 
 @app.route('/api/settings/backup-upload', methods=['GET', 'PUT'])

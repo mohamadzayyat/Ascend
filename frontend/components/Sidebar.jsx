@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { Activity, Database, FileText, FolderTree, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
+import { Activity, Database, DownloadCloud, FileText, FolderTree, LogOut, Settings, Terminal, Workflow } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { useAuth } from '@/lib/hooks/useAuth'
 
@@ -110,6 +110,12 @@ export default function Sidebar() {
               active={isActive('/audit')}
               icon={<FileText className="w-5 h-5" />}
               label="Audit Log"
+            />
+            <NavLink
+              href="/update-center"
+              active={isActive('/update-center')}
+              icon={<DownloadCloud className="w-5 h-5" />}
+              label="Update Center"
             />
             <button
               onClick={handleLogout}
