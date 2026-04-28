@@ -30,6 +30,7 @@ export default function AppDetail() {
   const [selectedBranch, setSelectedBranch] = useState('')
   const [branchesLoading, setBranchesLoading] = useState(false)
   const [branchesError, setBranchesError] = useState('')
+  const [focusDeploymentId, setFocusDeploymentId] = useState(null)
   const fileApi = useMemo(() => (app ? appFileApi(app.id) : null), [app?.id])
 
   useEffect(() => {
@@ -46,16 +47,15 @@ export default function AppDetail() {
     apiClient.listProjectBranches(app.project_id)
       .then((res) => {
         if (cancelled) return
-        const defaultBranch = res.data?.default_branch || project?.github_branch || 'main'
-        const names = res.data?.branches?.length ? res.data.branches : [defaultBranch]
+        const names = res.data?.branches || []
+        const defaultBranch = res.data?.default_branch || names[0] || project?.github_branch || ''
         setBranches(names)
-        setSelectedBranch((current) => current || defaultBranch)
+        setSelectedBranch((current) => (current && names.includes(current) ? current : defaultBranch))
       })
       .catch((err) => {
         if (cancelled) return
-        const fallback = project?.github_branch || 'main'
-        setBranches([fallback])
-        setSelectedBranch((current) => current || fallback)
+        setBranches([])
+        setSelectedBranch('')
         setBranchesError(err.response?.data?.error || 'Could not load branches')
       })
       .finally(() => {
@@ -91,7 +91,9 @@ export default function AppDetail() {
     setDeploying(true)
     setDeployError('')
     try {
-      await apiClient.deployApp(app.id, selectedBranch || project?.github_branch || 'main')
+      const branch = selectedBranch || branches[0] || project?.github_branch || 'main'
+      const res = await apiClient.deployApp(app.id, branch)
+      setFocusDeploymentId(res.data?.id || null)
       mutate()
       setActiveTab('deployments')
     } catch (err) {
@@ -133,7 +135,8 @@ export default function AppDetail() {
               className="bg-transparent text-white outline-none min-w-[150px] disabled:opacity-60"
               title="Deployment branch"
             >
-              {(branches.length ? branches : [project?.github_branch || 'main']).map((branch) => (
+              {branches.length === 0 && <option value="">No branches loaded</option>}
+              {branches.map((branch) => (
                 <option key={branch} value={branch} className="bg-primary text-white">
                   {branch}
                 </option>
@@ -142,7 +145,7 @@ export default function AppDetail() {
           </label>
           <button
             onClick={deploy}
-            disabled={deploying || app.status === 'deploying' || branchesLoading}
+            disabled={deploying || app.status === 'deploying' || branchesLoading || !selectedBranch}
             className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Play className="w-4 h-4" />
@@ -150,7 +153,7 @@ export default function AppDetail() {
           </button>
         </div>
         {deployError && <p className="text-red-400 text-sm mt-3">{deployError}</p>}
-        {branchesError && <p className="text-yellow-400 text-sm mt-3">{branchesError}; using the saved default branch.</p>}
+        {branchesError && <p className="text-yellow-400 text-sm mt-3">{branchesError}; deploy is disabled until real branches load.</p>}
         <div className="mt-4">
           <DiskUsage
             bytes={app.disk_size_bytes}
@@ -206,7 +209,7 @@ export default function AppDetail() {
       )}
 
       {activeTab === 'deployments' && (
-        <DeploymentLogs appId={app.id} />
+        <DeploymentLogs appId={app.id} focusDeploymentId={focusDeploymentId} />
       )}
 
       {fileApi && (

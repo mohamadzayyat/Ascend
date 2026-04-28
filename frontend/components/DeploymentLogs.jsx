@@ -64,7 +64,7 @@ function LogViewer({ deploymentId, onClose }) {
   )
 }
 
-export default function DeploymentLogs({ projectId, appId }) {
+export default function DeploymentLogs({ projectId, appId, focusDeploymentId }) {
   // Prefer per-app deployments when an appId is given; otherwise project-wide.
   const project = useProjectDeployments(appId ? null : projectId)
   const app = useAppDeployments(appId || null)
@@ -72,11 +72,15 @@ export default function DeploymentLogs({ projectId, appId }) {
   const isLoading = appId ? app.isLoading : project.isLoading
   const [selectedId, setSelectedId] = useState(null)
 
+  useEffect(() => {
+    if (focusDeploymentId) setSelectedId(focusDeploymentId)
+  }, [focusDeploymentId])
+
   // Auto-select the most recent running/pending deployment
   useEffect(() => {
     if (!deployments.length) return
     const active = deployments.find((d) => d.status === 'running' || d.status === 'pending')
-    if (active && !selectedId) setSelectedId(active.id)
+    if (active && selectedId !== active.id) setSelectedId(active.id)
   }, [deployments, selectedId])
 
   if (isLoading) {

@@ -2411,6 +2411,16 @@ def api_project_branches(project_id):
     if not owner or not repo:
         return jsonify({'error': 'Could not parse the project GitHub URL'}), 400
 
+    repo_default_branch = None
+    repo_status, repo_resp = _github_api(
+        'GET',
+        f'/repos/{owner}/{repo}',
+        cred.token,
+        timeout=15,
+    )
+    if repo_status == 200 and isinstance(repo_resp, dict):
+        repo_default_branch = (repo_resp.get('default_branch') or '').strip() or None
+
     branches = []
     for page in range(1, 6):
         status, resp = _github_api(
@@ -2430,10 +2440,17 @@ def api_project_branches(project_id):
         if len(resp) < 100:
             break
 
-    default_branch = project.github_branch or 'main'
-    if default_branch and default_branch not in branches:
-        branches.insert(0, default_branch)
-    return jsonify({'branches': branches, 'default_branch': default_branch})
+    branches = list(dict.fromkeys(branches))
+    default_branch = repo_default_branch or (project.github_branch if project.github_branch in branches else None) or (branches[0] if branches else project.github_branch or 'main')
+    saved_branch_available = bool(project.github_branch and project.github_branch in branches)
+    if repo_default_branch and project.github_branch and project.github_branch not in branches:
+        project.github_branch = repo_default_branch
+        db.session.commit()
+    return jsonify({
+        'branches': branches,
+        'default_branch': default_branch,
+        'saved_branch_available': saved_branch_available,
+    })
 
 
 @app.route('/api/project/<int:project_id>/subdirectory-check', methods=['GET'])
