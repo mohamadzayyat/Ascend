@@ -45,6 +45,7 @@ export const apiClient = {
   updateProject: (id, data) => api.put(`/api/project/${id}`, data),
   deleteProject: (id, confirmText) => api.delete(`/api/project/${id}`, { data: { confirm_text: confirmText } }),
   syncProjectWebhook: (id) => api.post(`/api/project/${id}/github-webhook/sync`),
+  listProjectBranches: (id) => api.get(`/api/project/${id}/branches`),
 
   // Apps (deployment units inside a project)
   listApps: (projectId) => api.get(`/api/project/${projectId}/apps`),
@@ -52,13 +53,13 @@ export const apiClient = {
   getApp: (id) => api.get(`/api/app/${id}`),
   updateApp: (id, data) => api.put(`/api/app/${id}`, data),
   deleteApp: (id, confirmText) => api.delete(`/api/app/${id}`, { data: { confirm_text: confirmText } }),
-  deployApp: (id) => api.post(`/api/app/${id}/deploy`),
+  deployApp: (id, branch) => api.post(`/api/app/${id}/deploy`, { branch }),
   restartApp: (id) => api.post(`/api/app/${id}/restart`),
   retryAppSsl: (id) => api.post(`/api/app/${id}/ssl/retry`),
   getAppDeployments: (id) => api.get(`/api/app/${id}/deployments`),
 
   // Deployments
-  deploy: (projectId) => api.post(`/api/project/${projectId}/deploy`),
+  deploy: (projectId, branch) => api.post(`/api/project/${projectId}/deploy`, { branch }),
   getDeployment: (id) => api.get(`/api/deployment/${id}/status`),
   getDeploymentLog: (id) => api.get(`/api/deployment/${id}/log`),
   getProjectDeployments: (projectId) => api.get(`/api/project/${projectId}/deployments`),

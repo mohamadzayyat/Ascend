@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { ArrowLeft, Play } from 'lucide-react'
+import { ArrowLeft, GitBranch, Play } from 'lucide-react'
 import { apiClient, appFileApi } from '@/lib/api'
 import { useApp, useProject } from '@/lib/hooks/useAuth'
 import AppRuntime from '@/components/AppRuntime'
@@ -26,6 +26,10 @@ export default function AppDetail() {
   const [activeTab, setActiveTab] = useState('overview')
   const [deploying, setDeploying] = useState(false)
   const [deployError, setDeployError] = useState('')
+  const [branches, setBranches] = useState([])
+  const [selectedBranch, setSelectedBranch] = useState('')
+  const [branchesLoading, setBranchesLoading] = useState(false)
+  const [branchesError, setBranchesError] = useState('')
   const fileApi = useMemo(() => (app ? appFileApi(app.id) : null), [app?.id])
 
   useEffect(() => {
@@ -33,6 +37,34 @@ export default function AppDetail() {
       setActiveTab(tab)
     }
   }, [tab])
+
+  useEffect(() => {
+    if (!app?.project_id) return
+    let cancelled = false
+    setBranchesLoading(true)
+    setBranchesError('')
+    apiClient.listProjectBranches(app.project_id)
+      .then((res) => {
+        if (cancelled) return
+        const defaultBranch = res.data?.default_branch || project?.github_branch || 'main'
+        const names = res.data?.branches?.length ? res.data.branches : [defaultBranch]
+        setBranches(names)
+        setSelectedBranch((current) => current || defaultBranch)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const fallback = project?.github_branch || 'main'
+        setBranches([fallback])
+        setSelectedBranch((current) => current || fallback)
+        setBranchesError(err.response?.data?.error || 'Could not load branches')
+      })
+      .finally(() => {
+        if (!cancelled) setBranchesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [app?.project_id, project?.github_branch])
 
   if (!id) return null
   if (isLoading) {
@@ -59,7 +91,7 @@ export default function AppDetail() {
     setDeploying(true)
     setDeployError('')
     try {
-      await apiClient.deployApp(app.id)
+      await apiClient.deployApp(app.id, selectedBranch || project?.github_branch || 'main')
       mutate()
       setActiveTab('deployments')
     } catch (err) {
@@ -92,9 +124,25 @@ export default function AppDetail() {
               {app.app_port ? ` · port ${app.app_port}` : ''}
             </p>
           </div>
+          <label className="flex items-center gap-2 px-3 py-2 bg-primary border border-gray-700 rounded-lg text-sm text-gray-200">
+            <GitBranch className="w-4 h-4 text-accent" />
+            <select
+              value={selectedBranch}
+              onChange={(e) => setSelectedBranch(e.target.value)}
+              disabled={branchesLoading || deploying || app.status === 'deploying'}
+              className="bg-transparent text-white outline-none min-w-[150px] disabled:opacity-60"
+              title="Deployment branch"
+            >
+              {(branches.length ? branches : [project?.github_branch || 'main']).map((branch) => (
+                <option key={branch} value={branch} className="bg-primary text-white">
+                  {branch}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             onClick={deploy}
-            disabled={deploying || app.status === 'deploying'}
+            disabled={deploying || app.status === 'deploying' || branchesLoading}
             className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Play className="w-4 h-4" />
@@ -102,6 +150,7 @@ export default function AppDetail() {
           </button>
         </div>
         {deployError && <p className="text-red-400 text-sm mt-3">{deployError}</p>}
+        {branchesError && <p className="text-yellow-400 text-sm mt-3">{branchesError}; using the saved default branch.</p>}
         <div className="mt-4">
           <DiskUsage
             bytes={app.disk_size_bytes}

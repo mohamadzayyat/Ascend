@@ -1782,18 +1782,23 @@ def api_deploy_app(app_id):
         return jsonify({'error': 'No GitHub credentials configured. Add credentials in Settings.'}), 400
     if a.status == 'deploying':
         return jsonify({'error': 'A deployment is already in progress for this app'}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        branch = _normalize_deploy_branch(a.project, data.get('branch'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     deployment = Deployment(
         project_id=a.project_id,
         app_id=a.id,
         status='pending',
-        branch=a.project.github_branch,
+        branch=branch,
         triggered_by='manual',
     )
     db.session.add(deployment)
     a.status = 'deploying'
     db.session.commit()
-    _audit_log('deployment.started', 'ok', f'Deployment started: {a.project.name} / {a.name}', {'deployment_id': deployment.id, 'app_id': a.id})
+    _audit_log('deployment.started', 'ok', f'Deployment started: {a.project.name} / {a.name}', {'deployment_id': deployment.id, 'app_id': a.id, 'branch': branch})
 
     threading.Thread(
         target=deploy_app_bg,
@@ -1908,13 +1913,19 @@ def api_deploy(project_id):
     if not project.apps:
         return jsonify({'error': 'Project has no apps yet — add one before deploying'}), 400
 
+    data = request.get_json(silent=True) or {}
+    try:
+        branch = _normalize_deploy_branch(project, data.get('branch'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
     deployment_ids = []
     for a in project.apps:
         if a.status == 'deploying':
             continue
         dep = Deployment(
             project_id=project.id, app_id=a.id,
-            status='pending', branch=project.github_branch, triggered_by='manual',
+            status='pending', branch=branch, triggered_by='manual',
         )
         db.session.add(dep)
         a.status = 'deploying'
@@ -1926,7 +1937,7 @@ def api_deploy(project_id):
         ).start()
         deployment_ids.append(dep.id)
 
-    _audit_log('project.deploy_started', 'ok', f'Deploy all started: {project.name}', {'project_id': project.id, 'deployment_ids': deployment_ids})
+    _audit_log('project.deploy_started', 'ok', f'Deploy all started: {project.name}', {'project_id': project.id, 'deployment_ids': deployment_ids, 'branch': branch})
     return jsonify({'deployment_ids': deployment_ids, 'status': 'pending'})
 
 
@@ -1981,6 +1992,23 @@ def _parse_github_repo(url):
     return m.group(1), m.group(2)
 
 
+_GIT_BRANCH_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
+
+
+def _normalize_deploy_branch(project, branch_value=None):
+    branch = (branch_value or project.github_branch or 'main').strip()
+    if (
+        not _GIT_BRANCH_RE.match(branch)
+        or '..' in branch
+        or '@{' in branch
+        or '\\' in branch
+        or branch.startswith(('-', '/', '.'))
+        or branch.endswith(('/', '.', '.lock'))
+    ):
+        raise ValueError('Invalid branch name')
+    return branch
+
+
 def _github_api(method, path, token, body=None, timeout=10):
     """Minimal GitHub API client using urllib. Returns (status, json|None)."""
     req = _urlreq.Request(
@@ -2008,6 +2036,46 @@ def _github_api(method, path, token, body=None, timeout=10):
             return e.code, {'message': raw}
     except (_urlerr.URLError, TimeoutError) as e:
         return 0, {'message': str(e)}
+
+
+@app.route('/api/project/<int:project_id>/branches', methods=['GET'])
+@login_required
+def api_project_branches(project_id):
+    project = Project.query.get_or_404(project_id)
+    if project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    cred = GitHubCredential.query.filter_by(user_id=current_user.id).first()
+    if not cred:
+        return jsonify({'error': 'No GitHub credentials configured. Add credentials in Settings.'}), 400
+
+    owner, repo = _parse_github_repo(project.github_url)
+    if not owner or not repo:
+        return jsonify({'error': 'Could not parse the project GitHub URL'}), 400
+
+    branches = []
+    for page in range(1, 6):
+        status, resp = _github_api(
+            'GET',
+            f'/repos/{owner}/{repo}/branches?per_page=100&page={page}',
+            cred.token,
+            timeout=15,
+        )
+        if status != 200:
+            return jsonify({
+                'error': (resp or {}).get('message') or 'Could not load repository branches',
+                'code': status,
+            }), 400
+        if not isinstance(resp, list) or not resp:
+            break
+        branches.extend([b.get('name') for b in resp if isinstance(b, dict) and b.get('name')])
+        if len(resp) < 100:
+            break
+
+    default_branch = project.github_branch or 'main'
+    if default_branch and default_branch not in branches:
+        branches.insert(0, default_branch)
+    return jsonify({'branches': branches, 'default_branch': default_branch})
 
 
 def _sync_github_webhook(project):
@@ -2240,20 +2308,21 @@ def api_delete_github_credential(cred_id):
 # Background Deployment Process
 # ═══════════════════════════════════════════
 
-def _ensure_repo_cloned(project, github_username, github_token, log):
+def _ensure_repo_cloned(project, github_username, github_token, log, branch=None):
     """Clone or fast-forward the project's repo. Returns the clone dir path."""
     clone_dir = DEPLOYMENTS_DIR / project.folder_name
+    branch = _normalize_deploy_branch(project, branch)
     log.write("Step 1: Cloning/updating repository...\n")
     if clone_dir.exists():
         log.write("  Repository exists, fetching latest...\n")
         ok = run_cmd(['git', '-C', str(clone_dir), 'fetch', '--all'], log) \
              and run_cmd(['git', '-C', str(clone_dir), 'reset', '--hard',
-                          f'origin/{project.github_branch}'], log)
+                          f'origin/{branch}'], log)
     else:
         log.write(f"  Cloning to {clone_dir}...\n")
         repo_url = project.github_url.replace('https://',
                                               f'https://{github_username}:{github_token}@')
-        ok = run_cmd(['git', 'clone', repo_url, str(clone_dir)], log, redact=repo_url)
+        ok = run_cmd(['git', 'clone', '--branch', branch, repo_url, str(clone_dir)], log, redact=repo_url)
     if not ok:
         raise RuntimeError("Failed to clone/update repository")
     return clone_dir
@@ -2341,6 +2410,7 @@ def deploy_app_bg(deployment_id, github_username, github_token):
         db.session.commit()
 
         start_time = time.time()
+        deploy_branch = deployment.branch or project.github_branch or 'main'
 
         try:
             with open(log_file, 'w', encoding='utf-8') as log:
@@ -2348,13 +2418,13 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                 log.write(f"Project: {project.name}\n")
                 log.write(f"App: {app_row.name} ({app_row.app_type})\n")
                 log.write(f"GitHub URL: {project.github_url}\n")
-                log.write(f"Branch: {project.github_branch}\n")
+                log.write(f"Branch: {deploy_branch}\n")
                 if app_row.subdirectory:
                     log.write(f"Subdirectory: {app_row.subdirectory}\n")
                 log.write("\n")
 
                 with _repo_lock(project.id):
-                    clone_dir = _ensure_repo_cloned(project, github_username, github_token, log)
+                    clone_dir = _ensure_repo_cloned(project, github_username, github_token, log, deploy_branch)
 
                 deploy_dir = _app_deploy_dir(app_row)
                 if app_row.subdirectory:

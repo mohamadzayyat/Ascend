@@ -1,7 +1,7 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/router'
-import { Plus, Play } from 'lucide-react'
+import { GitBranch, Plus, Play } from 'lucide-react'
 import { apiClient, projectFileApi } from '@/lib/api'
 import { useProject, useProjects } from '@/lib/hooks/useAuth'
 import AppCard from '@/components/AppCard'
@@ -18,7 +18,39 @@ export default function ProjectDetail() {
   const [activeTab, setActiveTab] = useState('apps')
   const [deployingAll, setDeployingAll] = useState(false)
   const [deployError, setDeployError] = useState('')
+  const [branches, setBranches] = useState([])
+  const [selectedBranch, setSelectedBranch] = useState('')
+  const [branchesLoading, setBranchesLoading] = useState(false)
+  const [branchesError, setBranchesError] = useState('')
   const fileApi = useMemo(() => (id ? projectFileApi(id) : null), [id])
+
+  useEffect(() => {
+    if (!project?.id) return
+    let cancelled = false
+    setBranchesLoading(true)
+    setBranchesError('')
+    apiClient.listProjectBranches(project.id)
+      .then((res) => {
+        if (cancelled) return
+        const defaultBranch = res.data?.default_branch || project.github_branch || 'main'
+        const names = res.data?.branches?.length ? res.data.branches : [defaultBranch]
+        setBranches(names)
+        setSelectedBranch((current) => current || defaultBranch)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const fallback = project.github_branch || 'main'
+        setBranches([fallback])
+        setSelectedBranch((current) => current || fallback)
+        setBranchesError(err.response?.data?.error || 'Could not load branches')
+      })
+      .finally(() => {
+        if (!cancelled) setBranchesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [project?.id, project?.github_branch])
 
   if (!id) return null
   if (isLoading) {
@@ -46,7 +78,7 @@ export default function ProjectDetail() {
     setDeployingAll(true)
     setDeployError('')
     try {
-      await apiClient.deploy(project.id)
+      await apiClient.deploy(project.id, selectedBranch || project.github_branch || 'main')
       mutate()
       mutateAll()
     } catch (err) {
@@ -67,7 +99,7 @@ export default function ProjectDetail() {
               {project.github_url} · {project.github_branch}
             </p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
             <Link
               href={`/projects/${project.id}/apps/new`}
               className="flex items-center gap-2 px-4 py-2 bg-primary hover:bg-gray-700 border border-gray-600 text-white font-semibold rounded-lg transition"
@@ -75,9 +107,27 @@ export default function ProjectDetail() {
               <Plus className="w-4 h-4" /> Add App
             </Link>
             {apps.length > 0 && (
+              <label className="flex items-center gap-2 px-3 py-2 bg-primary border border-gray-700 rounded-lg text-sm text-gray-200">
+                <GitBranch className="w-4 h-4 text-accent" />
+                <select
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
+                  disabled={branchesLoading || deployingAll}
+                  className="bg-transparent text-white outline-none min-w-[150px] disabled:opacity-60"
+                  title="Deployment branch"
+                >
+                  {(branches.length ? branches : [project.github_branch || 'main']).map((branch) => (
+                    <option key={branch} value={branch} className="bg-primary text-white">
+                      {branch}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {apps.length > 0 && (
               <button
                 onClick={deployAll}
-                disabled={deployingAll}
+                disabled={deployingAll || branchesLoading}
                 className="flex items-center gap-2 px-4 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50"
               >
                 <Play className="w-4 h-4" />
@@ -88,6 +138,9 @@ export default function ProjectDetail() {
         </div>
         {deployError && (
           <p className="text-red-400 text-sm mt-3">{deployError}</p>
+        )}
+        {branchesError && (
+          <p className="text-yellow-400 text-sm mt-3">{branchesError}; using the saved default branch.</p>
         )}
         {apps.length > 0 && (
           <div className="mt-4">
