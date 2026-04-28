@@ -3,7 +3,7 @@ import Head from 'next/head'
 import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
   CheckCircle2, XCircle, AlertTriangle, Save, Calendar, Table as TableIcon,
-  ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText,
+  ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText, Search, X,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
@@ -14,6 +14,16 @@ const TABS = [
   { id: 'schedule', label: 'Schedule', icon: Calendar },
 ]
 
+const COMMON_TIMEZONES = [
+  'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+  'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Asia/Dubai', 'Asia/Tokyo', 'Asia/Singapore',
+  'Australia/Sydney',
+]
+
+function newTableTabId() {
+  return `tbl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`
+}
+
 export default function DatabasesPage() {
   const [connections, setConnections] = useState([])
   const [loading, setLoading] = useState(true)
@@ -21,6 +31,7 @@ export default function DatabasesPage() {
   const [activeId, setActiveId] = useState(null)
   const [showAddForm, setShowAddForm] = useState(false)
   const [panelTab, setPanelTab] = useState('browse')
+  const [openTableTabs, setOpenTableTabs] = useState([])
   const [browseSelection, setBrowseSelection] = useState(null)
   /** When set, SQL tab applies this to the editor once then clears via callback. */
   const [pendingSql, setPendingSql] = useState(null)
@@ -60,9 +71,42 @@ export default function DatabasesPage() {
   }
 
   const handleActivateConnection = (connId) => {
+    if (connId !== activeId) {
+      setOpenTableTabs([])
+      setPanelTab('browse')
+    }
     setActiveId(connId)
-    setBrowseSelection((sel) => (sel?.connectionId === connId ? sel : null))
+    setBrowseSelection((sel) => {
+      if (!sel) return null
+      if (sel.connectionId === connId) return sel
+      return null
+    })
   }
+
+  const openTableTab = useCallback((database, name, kind) => {
+    let targetId = null
+    setOpenTableTabs((prev) => {
+      const hit = prev.find((t) => t.database === database && t.name === name && t.kind === kind)
+      if (hit) {
+        targetId = hit.id
+        return prev
+      }
+      targetId = newTableTabId()
+      return [...prev, { id: targetId, database, name, kind }]
+    })
+    if (targetId) setPanelTab(targetId)
+  }, [])
+
+  const closeTableTab = useCallback((tabId) => {
+    setOpenTableTabs((prev) => prev.filter((t) => t.id !== tabId))
+    setPanelTab((cur) => (cur === tabId ? 'browse' : cur))
+  }, [])
+
+  const onOpenTableFolder = useCallback((connId, database, folder) => {
+    setActiveId(connId)
+    setBrowseSelection({ connectionId: connId, database, folder })
+    setPanelTab('browse')
+  }, [])
 
   const onBrowseObject = (connId, database, name, kind) => {
     setActiveId(connId)
@@ -136,6 +180,11 @@ export default function DatabasesPage() {
               browseSelection={browseSelection}
               onConnectionActivate={handleActivateConnection}
               onBrowseObject={onBrowseObject}
+              onTableLeafDoubleClick={(connId, database, name, kind) => {
+                setActiveId(connId)
+                openTableTab(database, name, kind)
+              }}
+              onOpenTableFolder={onOpenTableFolder}
               onRoutineInspect={onRoutineInspect}
               onDeleted={onConnectionDeleted}
               onRefresh={refresh}
@@ -145,8 +194,11 @@ export default function DatabasesPage() {
                 connection={active}
                 tab={panelTab}
                 onTabChange={setPanelTab}
+                openTableTabs={openTableTabs}
+                onCloseTableTab={closeTableTab}
                 browseSelection={browseSelection}
                 onBrowseSelectionChange={setBrowseSelection}
+                onOpenTableTab={openTableTab}
                 pendingSql={pendingSql}
                 onPendingSqlConsumed={consumePendingSql}
               />
@@ -173,6 +225,8 @@ function SchemaNavigator({
   browseSelection,
   onConnectionActivate,
   onBrowseObject,
+  onTableLeafDoubleClick,
+  onOpenTableFolder,
   onRoutineInspect,
   onDeleted,
   onRefresh,
@@ -286,6 +340,11 @@ function SchemaNavigator({
     && browseSelection.database === dbName
     && browseSelection.name === name
     && browseSelection.kind === kind
+
+  const folderActive = (cid, dbName, catId) =>
+    browseSelection?.connectionId === cid
+    && browseSelection.database === dbName
+    && browseSelection.folder === catId
 
   return (
     <div className="w-80 shrink-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-0 max-h-full">
@@ -412,20 +471,39 @@ function SchemaNavigator({
                               const catOpen = expandedCat.has(ck)
                               const Icon = cat.icon
 
+                              const openFolderPanel = cat.id === 'tables' || cat.id === 'views'
                               return (
                                 <div key={ck} className="mt-0.5">
-                                  <button
-                                    type="button"
-                                    className="w-full flex items-center gap-1 pl-6 pr-2 py-0.5 rounded text-left text-gray-400 hover:text-gray-200 hover:bg-primary/20"
-                                    onClick={(e) => onToggleCat(e, c.id, dbName, cat.id)}
+                                  <div
+                                    className={`w-full flex items-center gap-0.5 pl-5 pr-2 py-0.5 rounded ${
+                                      folderActive(c.id, dbName, cat.id) ? 'bg-accent/15' : ''
+                                    }`}
                                   >
-                                    {catOpen ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
-                                    <Icon className="w-3.5 h-3.5 shrink-0 text-gray-500" />
-                                    <span>{cat.label}</span>
-                                    <span className="text-gray-600 text-xs ml-auto tabular-nums">{items.length}</span>
-                                  </button>
+                                    <button
+                                      type="button"
+                                      className="p-0.5 text-gray-400 hover:text-white shrink-0"
+                                      title={catOpen ? 'Collapse list' : 'Expand in sidebar'}
+                                      onClick={(e) => onToggleCat(e, c.id, dbName, cat.id)}
+                                    >
+                                      {catOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`min-w-0 flex-1 flex items-center gap-1 py-0.5 rounded text-left text-gray-400 hover:text-gray-200 hover:bg-primary/20 ${
+                                        folderActive(c.id, dbName, cat.id) ? 'text-white' : ''
+                                      }`}
+                                      title={openFolderPanel ? 'Open searchable list in Browse' : ''}
+                                      onClick={() => {
+                                        if (openFolderPanel) onOpenTableFolder(c.id, dbName, cat.id)
+                                      }}
+                                    >
+                                      <Icon className="w-3.5 h-3.5 shrink-0 text-gray-500" />
+                                      <span className="truncate">{cat.label}</span>
+                                      <span className="text-gray-600 text-xs ml-auto tabular-nums">{items.length}</span>
+                                    </button>
+                                  </div>
                                   {catOpen && (
-                                    <ul className="pl-12 pr-1 mt-0.5 space-y-0.5">
+                                    <ul className="pl-12 pr-1 mt-0.5 space-y-0.5 max-h-48 overflow-y-auto">
                                       {items.map((item) => {
                                         const name = item.name
                                         if (cat.id === 'tables' || cat.id === 'views') {
@@ -439,6 +517,10 @@ function SchemaNavigator({
                                                   sel ? 'bg-accent/25 text-white' : 'text-gray-300 hover:bg-primary/30'
                                                 }`}
                                                 onClick={() => onBrowseObject(c.id, dbName, name, kind)}
+                                                onDoubleClick={(e) => {
+                                                  e.preventDefault()
+                                                  onTableLeafDoubleClick(c.id, dbName, name, kind)
+                                                }}
                                               >
                                                 <TableIcon className="w-3 h-3 shrink-0 opacity-70" />
                                                 <span className="truncate">{name}</span>
@@ -487,14 +569,19 @@ function ConnectionPanel({
   connection,
   tab,
   onTabChange,
+  openTableTabs,
+  onCloseTableTab,
   browseSelection,
   onBrowseSelectionChange,
+  onOpenTableTab,
   pendingSql,
   onPendingSqlConsumed,
 }) {
+  const activeTable = openTableTabs.find((t) => t.id === tab) || null
+
   return (
-    <div className="flex-1 min-w-0 rounded border border-gray-700 bg-secondary flex flex-col">
-      <div className="border-b border-gray-700 flex items-center gap-1 px-2">
+    <div className="flex-1 min-w-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-0">
+      <div className="border-b border-gray-700 flex items-stretch gap-0.5 px-1 overflow-x-auto shrink-0">
         {TABS.map((t) => {
           const Icon = t.icon
           const active = tab === t.id
@@ -503,14 +590,45 @@ function ConnectionPanel({
               key={t.id}
               type="button"
               onClick={() => onTabChange(t.id)}
-              className={`px-3 py-2 text-sm flex items-center gap-2 border-b-2 ${
+              className={`shrink-0 px-2.5 py-2 text-sm flex items-center gap-1.5 border-b-2 whitespace-nowrap ${
                 active
                   ? 'border-accent text-white'
                   : 'border-transparent text-gray-400 hover:text-white'
               }`}
             >
-              <Icon className="w-4 h-4" /> {t.label}
+              <Icon className="w-4 h-4 shrink-0" /> {t.label}
             </button>
+          )
+        })}
+        {openTableTabs.map((tt) => {
+          const active = tab === tt.id
+          return (
+            <div
+              key={tt.id}
+              className={`shrink-0 flex items-stretch border-b-2 max-w-[11rem] ${
+                active ? 'border-accent' : 'border-transparent'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => onTabChange(tt.id)}
+                className={`pl-2 pr-1 py-2 text-xs flex items-center gap-1 truncate min-w-0 ${
+                  active ? 'text-white' : 'text-gray-400 hover:text-white'
+                }`}
+                title={`${tt.database} · ${tt.name} (${tt.kind})`}
+              >
+                <TableIcon className="w-3.5 h-3.5 shrink-0 opacity-70" />
+                <span className="truncate">{tt.name}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onCloseTableTab(tt.id)}
+                className="px-1.5 py-2 text-gray-500 hover:text-red-400 shrink-0"
+                title="Close tab"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )
         })}
       </div>
@@ -521,7 +639,24 @@ function ConnectionPanel({
             connection={connection}
             browseSelection={browseSelection}
             onBrowseSelectionChange={onBrowseSelectionChange}
+            onOpenTableTab={onOpenTableTab}
           />
+        )}
+        {activeTable && (
+          <div className="p-4 h-full flex flex-col min-h-0">
+            <div className="text-xs text-gray-500 mb-2">
+              {activeTable.database}
+              <span className="mx-1 text-gray-600">›</span>
+              <span className="text-gray-300">{activeTable.name}</span>
+              <span className="text-gray-600 ml-2">({activeTable.kind})</span>
+            </div>
+            <TableViewer
+              connectionId={connection.id}
+              database={activeTable.database}
+              table={activeTable.name}
+              showSearch
+            />
+          </div>
         )}
         {tab === 'sql' && (
           <SqlTab
@@ -537,9 +672,103 @@ function ConnectionPanel({
   )
 }
 
+// ── Searchable tables / views grid (opened from navigator folder) ─
+
+function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [q, setQ] = useState('')
+
+  useEffect(() => {
+    let c = false
+    setLoading(true)
+    apiClient.getDatabaseSchema(connection.id, database)
+      .then((res) => {
+        if (c) return
+        const raw = folder === 'tables' ? (res.data.tables || []) : (res.data.views || [])
+        setItems(raw)
+        setError('')
+      })
+      .catch((err) => !c && setError(err.response?.data?.error || 'Failed to load'))
+      .finally(() => !c && setLoading(false))
+    return () => { c = true }
+  }, [connection.id, database, folder])
+
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase()
+    if (!s) return items
+    return items.filter((it) => it.name.toLowerCase().includes(s))
+  }, [items, q])
+
+  return (
+    <div className="flex flex-col gap-3 h-full min-h-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-gray-400">
+          {folder === 'tables' ? 'Tables' : 'Views'} in <span className="text-gray-200">{database}</span>
+        </span>
+        <span className="text-xs text-gray-600">({items.length} total)</span>
+      </div>
+      <div className="relative max-w-md">
+        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={`Search ${folder}…`}
+          className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600"
+        />
+      </div>
+      <p className="text-xs text-gray-500">Double-click a row to open it in a new tab (search inside data there).</p>
+      {error && (
+        <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>
+      )}
+      {loading ? (
+        <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-primary text-gray-300 sticky top-0">
+              <tr>
+                <th className="px-3 py-2">Name</th>
+                {folder === 'tables' && (
+                  <>
+                    <th className="px-3 py-2">Rows</th>
+                    <th className="px-3 py-2">Size</th>
+                  </>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((it) => (
+                <tr
+                  key={it.name}
+                  className="border-t border-gray-700 hover:bg-primary/40 cursor-default"
+                  onDoubleClick={() => onOpenTableTab(database, it.name, folder === 'tables' ? 'table' : 'view')}
+                >
+                  <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{it.name}</td>
+                  {folder === 'tables' && (
+                    <>
+                      <td className="px-3 py-1.5 text-gray-400 text-xs">{(it.rows ?? 0).toLocaleString()}</td>
+                      <td className="px-3 py-1.5 text-gray-400 text-xs">{formatBytes(it.size_bytes ?? 0)}</td>
+                    </>
+                  )}
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={folder === 'tables' ? 3 : 1} className="px-3 py-8 text-center text-gray-500 text-sm">No matches</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Browse: pick a DB → pick a table → paginated rows ───────────
 
-function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
+function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab }) {
   const [databases, setDatabases] = useState([])
   const [database, setDatabase] = useState('')
   const [tables, setTables] = useState([])
@@ -548,6 +777,7 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
   const [loading, setLoading] = useState(false)
 
   const treeSel = browseSelection?.connectionId === connection.id ? browseSelection : null
+  const folderMode = treeSel && (treeSel.folder === 'tables' || treeSel.folder === 'views')
   const browseRef = useRef(browseSelection)
   browseRef.current = browseSelection
 
@@ -560,7 +790,9 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
         const all = [...(res.data.databases || []), ...(res.data.system_databases || [])]
         setDatabases(all)
         const ts = browseRef.current?.connectionId === connection.id ? browseRef.current : null
-        if (ts?.database) {
+        if (ts?.database && !ts.folder) {
+          setDatabase(ts.database)
+        } else if (ts?.folder) {
           setDatabase(ts.database)
         } else {
           const def = connection.default_database && all.includes(connection.default_database)
@@ -578,10 +810,12 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
   useEffect(() => {
     if (!treeSel) return
     setDatabase(treeSel.database)
-    setTable(treeSel.name)
-  }, [treeSel?.database, treeSel?.name, treeSel?.kind, treeSel?.connectionId])
+    if (treeSel.folder) return
+    if (treeSel.name) setTable(treeSel.name)
+  }, [treeSel?.database, treeSel?.name, treeSel?.kind, treeSel?.folder, treeSel?.connectionId])
 
   useEffect(() => {
+    if (folderMode) return
     if (!database) { setTables([]); setTable(''); return }
     let cancelled = false
     apiClient.listTables(connection.id, database)
@@ -598,13 +832,14 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
       })
       .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load tables'))
     return () => { cancelled = true }
-  }, [connection.id, database])
+  }, [connection.id, database, folderMode])
 
   useEffect(() => {
+    if (folderMode) return
     if (!treeSel || treeSel.database !== database) return
     if (treeSel.kind !== 'table' && treeSel.kind !== 'view') return
     setTable(treeSel.name)
-  }, [treeSel, database, tables])
+  }, [treeSel, database, tables, folderMode])
 
   const onDatabaseChange = (value) => {
     setDatabase(value)
@@ -623,8 +858,21 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
     }
   }
 
+  if (folderMode) {
+    return (
+      <div className="p-4 h-full flex flex-col min-h-0">
+        <TableFolderPanel
+          connection={connection}
+          database={treeSel.database}
+          folder={treeSel.folder}
+          onOpenTableTab={onOpenTableTab}
+        />
+      </div>
+    )
+  }
+
   return (
-    <div className="p-4 flex flex-col gap-4 h-full">
+    <div className="p-4 flex flex-col gap-4 h-full min-h-0">
       <div className="flex flex-wrap items-center gap-3">
         <label className="text-sm text-gray-400">Database</label>
         <select
@@ -666,30 +914,43 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange }) {
       )}
 
       {database && table && (
-        <TableViewer connectionId={connection.id} database={database} table={table} />
+        <TableViewer connectionId={connection.id} database={database} table={table} showSearch />
       )}
     </div>
   )
 }
 
-function TableViewer({ connectionId, database, table }) {
+function TableViewer({ connectionId, database, table, showSearch = false }) {
   const [data, setData] = useState(null)
   const [page, setPage] = useState(1)
   const [perPage] = useState(50)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const [searchDebounced, setSearchDebounced] = useState('')
 
-  useEffect(() => { setPage(1) }, [database, table])
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(searchInput.trim()), 350)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  useEffect(() => {
+    setSearchInput('')
+    setSearchDebounced('')
+  }, [database, table])
+
+  useEffect(() => { setPage(1) }, [database, table, searchDebounced])
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    apiClient.getTableRows(connectionId, database, table, page, perPage)
+    const q = showSearch ? searchDebounced : ''
+    apiClient.getTableRows(connectionId, database, table, page, perPage, q)
       .then((res) => !cancelled && setData(res.data))
       .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load rows'))
       .finally(() => !cancelled && setLoading(false))
     return () => { cancelled = true }
-  }, [connectionId, database, table, page, perPage])
+  }, [connectionId, database, table, page, perPage, searchDebounced, showSearch])
 
   if (error) {
     return <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>
@@ -701,9 +962,25 @@ function TableViewer({ connectionId, database, table }) {
   const totalPages = Math.max(1, Math.ceil(data.total / data.per_page))
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col">
-      <div className="flex items-center justify-between text-xs text-gray-400 mb-2">
-        <span>{data.total.toLocaleString()} rows total · page {data.page} of {totalPages}</span>
+    <div className="flex-1 min-h-0 flex flex-col gap-2">
+      {showSearch && (
+        <div className="relative max-w-md shrink-0">
+          <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search rows (any column)…"
+            className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600"
+          />
+        </div>
+      )}
+      <div className="flex items-center justify-between text-xs text-gray-400 shrink-0">
+        <span>
+          {data.total.toLocaleString()} row{data.total === 1 ? '' : 's'}
+          {data.search ? ' matching search' : ' total'}
+          {' · '}page {data.page} of {totalPages}
+        </span>
         <div className="flex items-center gap-2">
           <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Prev</button>
           <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Next</button>
@@ -1002,8 +1279,16 @@ function BackupsTab({ connection }) {
 
 function ScheduleTab({ connection }) {
   const [schedule, setSchedule] = useState({
-    enabled: true, every_hours: 24, at_minute: 0, retention_days: 14, databases: [],
+    enabled: true,
+    every_hours: 24,
+    at_hour: 2,
+    at_minute: 0,
+    schedule_timezone: null,
+    retention_days: 14,
+    databases: [],
   })
+  const [serverTimezone, setServerTimezone] = useState('UTC')
+  const [tzInput, setTzInput] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
@@ -1012,7 +1297,23 @@ function ScheduleTab({ connection }) {
   useEffect(() => {
     apiClient.getDbSchedule(connection.id)
       .then((res) => {
-        if (res.data.schedule) setSchedule(res.data.schedule)
+        if (res.data.server_timezone) setServerTimezone(res.data.server_timezone)
+        if (res.data.schedule) {
+          const s = res.data.schedule
+          setSchedule({
+            enabled: s.enabled !== false,
+            every_hours: s.every_hours ?? 24,
+            at_hour: s.at_hour ?? 2,
+            at_minute: s.at_minute ?? 0,
+            schedule_timezone: s.schedule_timezone ?? null,
+            retention_days: s.retention_days ?? 14,
+            databases: s.databases || [],
+            last_run_at: s.last_run_at,
+            last_run_status: s.last_run_status,
+            last_run_error: s.last_run_error,
+          })
+          setTzInput(s.schedule_timezone || '')
+        }
         setLoaded(true)
       })
       .catch((err) => {
@@ -1025,7 +1326,11 @@ function ScheduleTab({ connection }) {
     setSaving(true)
     setError('')
     try {
-      await apiClient.upsertDbSchedule(connection.id, schedule)
+      const payload = {
+        ...schedule,
+        schedule_timezone: tzInput.trim() || null,
+      }
+      await apiClient.upsertDbSchedule(connection.id, payload)
       setSavedAt(new Date().toLocaleTimeString())
     } catch (err) {
       setError(err.response?.data?.error || 'Save failed')
@@ -1036,8 +1341,16 @@ function ScheduleTab({ connection }) {
 
   if (!loaded) return <div className="p-4 text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
 
+  const daily = Number(schedule.every_hours) === 24
+
   return (
-    <div className="p-4 max-w-xl space-y-4">
+    <div className="p-4 max-w-2xl space-y-4">
+      <div className="rounded border border-blue-500/25 bg-blue-500/10 p-3 text-sm text-blue-100/90">
+        <strong className="text-blue-200">Real scheduled backups:</strong> Ascend registers your job with{' '}
+        <span className="font-mono text-xs">APScheduler</span> in this server process. Runs fire at the
+        configured clock time while the app is running. After a full restart, jobs reload from the database
+        on boot.
+      </div>
       <label className="flex items-center gap-2 text-white text-sm">
         <input
           type="checkbox"
@@ -1055,15 +1368,49 @@ function ScheduleTab({ connection }) {
             onChange={(e) => setSchedule((s) => ({ ...s, every_hours: Number(e.target.value) }))}
             className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white"
           />
+          <span className="text-xs text-gray-500 mt-1 block">Use 24 for once per day at the time below.</span>
         </label>
         <label className="text-sm text-gray-300">
-          At minute past the hour (0–59)
+          At hour (0–23){daily ? '' : ' (used when every 24 h)'}
+          <input
+            type="number" min={0} max={23}
+            value={schedule.at_hour ?? 2}
+            onChange={(e) => setSchedule((s) => ({ ...s, at_hour: Number(e.target.value) }))}
+            className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white"
+            disabled={!daily}
+          />
+          {!daily && (
+            <span className="text-xs text-gray-500 mt-1 block">Hour + timezone apply when interval is 24 h (daily cron).</span>
+          )}
+        </label>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="text-sm text-gray-300">
+          At minute (0–59)
           <input
             type="number" min={0} max={59}
             value={schedule.at_minute}
             onChange={(e) => setSchedule((s) => ({ ...s, at_minute: Number(e.target.value) }))}
             className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white"
           />
+        </label>
+        <label className="text-sm text-gray-300">
+          Timezone (IANA)
+          <input
+            type="text"
+            value={tzInput}
+            onChange={(e) => setTzInput(e.target.value)}
+            list="ascend-tz-list"
+            placeholder={serverTimezone}
+            className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white placeholder:text-gray-500"
+          />
+          <datalist id="ascend-tz-list">
+            <option value="" label={`Server default (${serverTimezone})`} />
+            {COMMON_TIMEZONES.map((z) => <option key={z} value={z} />)}
+          </datalist>
+          <span className="text-xs text-gray-500 mt-1 block">
+            Leave blank for server default: <span className="text-gray-400 font-mono">{serverTimezone}</span>
+          </span>
         </label>
       </div>
       <label className="block text-sm text-gray-300">

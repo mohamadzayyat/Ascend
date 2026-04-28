@@ -121,9 +121,15 @@ export const apiClient = {
     api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
   getDatabaseSchema: (id, database) =>
     api.get(`/api/databases/connections/${id}/database-schema`, { params: { database } }),
-  getTableRows: (id, database, table, page = 1, perPage = 50) =>
+  getTableRows: (id, database, table, page = 1, perPage = 50, search = '') =>
     api.get(`/api/databases/connections/${id}/table-rows`, {
-      params: { database, table, page, per_page: perPage },
+      params: {
+        database,
+        table,
+        page,
+        per_page: perPage,
+        ...(search && String(search).trim() ? { search: String(search).trim() } : {}),
+      },
     }),
   runDbQuery: (id, sql, database, confirmDestructive = false) =>
     api.post(`/api/databases/connections/${id}/query`, {

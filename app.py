@@ -337,7 +337,10 @@ class BackupSchedule(db.Model):
     # Simple schedule: every_hours + at_minute is enough for "daily at 03:30"
     # or "every 6 hours". Avoids exposing cron syntax to non-experts.
     every_hours = db.Column(db.Integer, default=24, nullable=False)
+    at_hour = db.Column(db.Integer, default=2, nullable=False)  # 0–23 (daily / cron anchor)
     at_minute = db.Column(db.Integer, default=0, nullable=False)  # 0–59
+    # IANA zone name, e.g. "America/New_York"; empty/null = server default
+    schedule_timezone = db.Column(db.String(64), nullable=True)
     retention_days = db.Column(db.Integer, default=14, nullable=False)
     databases = db.Column(db.Text)  # JSON list of DB names; null/empty == all
     last_run_at = db.Column(db.DateTime)
@@ -352,7 +355,9 @@ class BackupSchedule(db.Model):
             'connection_id': self.connection_id,
             'enabled': self.enabled,
             'every_hours': self.every_hours,
+            'at_hour': self.at_hour,
             'at_minute': self.at_minute,
+            'schedule_timezone': (self.schedule_timezone or '').strip() or None,
             'retention_days': self.retention_days,
             'databases': json.loads(self.databases) if self.databases else [],
             'last_run_at': iso_utc(self.last_run_at),
@@ -455,6 +460,8 @@ def migrate_schema():
         add_col('deployment', 'app_id INTEGER REFERENCES app(id)')
         add_col('app', 'disk_size_bytes BIGINT')
         add_col('app', 'disk_size_computed_at DATETIME')
+        add_col('backup_schedule', 'at_hour INTEGER DEFAULT 2')
+        add_col('backup_schedule', 'schedule_timezone VARCHAR(64)')
         db.session.commit()
 
         # 2. Backfill Apps for legacy Projects
@@ -4279,15 +4286,40 @@ def api_db_table_rows(conn_id):
     except (TypeError, ValueError):
         return jsonify({'error': 'page/per_page must be integers.'}), 400
     offset = (page - 1) * per_page
+    search = (request.args.get('search') or '').strip()
+    if len(search) > 200:
+        return jsonify({'error': 'search string is too long.'}), 400
+    # Strip LIKE metacharacters from user input (we add wildcards server-side).
+    search_safe = re.sub(r'[%_\\]', '', search) if search else ''
     try:
         client = _open_mysql(conn, database=database)
     except Exception as e:
         return jsonify({'error': str(e)}), 502
     try:
         with client.cursor() as cur:
-            cur.execute(f'SELECT COUNT(*) FROM `{table}`')
+            where_sql = ''
+            where_args = ()
+            if search_safe:
+                cur.execute("""
+                    SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                    ORDER BY ORDINAL_POSITION
+                    LIMIT 48
+                """, (database, table))
+                colnames = [r[0] for r in cur.fetchall() if r and r[0]]
+                parts = []
+                for c in colnames:
+                    if re.fullmatch(r'[A-Za-z0-9_$]+', c):
+                        parts.append(f'CAST(`{c}` AS CHAR CHARACTER SET utf8mb4) LIKE %s')
+                if parts:
+                    term = f'%{search_safe}%'
+                    where_sql = ' WHERE (' + ' OR '.join(parts) + ')'
+                    where_args = tuple([term] * len(parts))
+            count_sql = f'SELECT COUNT(*) FROM `{table}`' + where_sql
+            cur.execute(count_sql, where_args)
             total = (cur.fetchone() or [0])[0]
-            cur.execute(f'SELECT * FROM `{table}` LIMIT %s OFFSET %s', (per_page, offset))
+            data_sql = f'SELECT * FROM `{table}`' + where_sql + ' LIMIT %s OFFSET %s'
+            cur.execute(data_sql, where_args + (per_page, offset))
             cols = [d[0] for d in cur.description] if cur.description else []
             rows = [list(r) for r in cur.fetchall()]
     except Exception as e:
@@ -4315,6 +4347,7 @@ def api_db_table_rows(conn_id):
         'page': page,
         'per_page': per_page,
         'total': int(total),
+        'search': search or None,
     })
 
 
@@ -4582,6 +4615,33 @@ def api_db_backup_delete(backup_id):
 
 # ── Schedules ───────────────────────────────────────────────────
 
+def _server_timezone_name():
+    """Best-effort IANA timezone for the Ascend host (used as schedule default)."""
+    tz = (os.environ.get('TZ') or '').strip()
+    if tz:
+        return tz
+    try:
+        lt = datetime.now().astimezone()
+        z = lt.tzinfo
+        if z is not None:
+            key = getattr(z, 'key', None)
+            if key:
+                return str(key)
+    except Exception:
+        pass
+    return 'UTC'
+
+
+def _resolve_iana_zone(tz_name):
+    """ZoneInfo for APScheduler; falls back to UTC on unknown names."""
+    from zoneinfo import ZoneInfo
+    name = (tz_name or 'UTC').strip() or 'UTC'
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return ZoneInfo('UTC')
+
+
 @app.route('/api/databases/connections/<int:conn_id>/schedule', methods=['GET'])
 @login_required
 def api_db_schedule_get(conn_id):
@@ -4592,7 +4652,10 @@ def api_db_schedule_get(conn_id):
     if err:
         return err
     sched = BackupSchedule.query.filter_by(connection_id=conn.id).first()
-    return jsonify({'schedule': sched.to_dict() if sched else None})
+    return jsonify({
+        'schedule': sched.to_dict() if sched else None,
+        'server_timezone': _server_timezone_name(),
+    })
 
 
 @app.route('/api/databases/connections/<int:conn_id>/schedule', methods=['PUT'])
@@ -4620,6 +4683,14 @@ def api_db_schedule_upsert(conn_id):
         if not 1 <= v <= 24 * 30:
             return jsonify({'error': 'every_hours must be between 1 and 720.'}), 400
         sched.every_hours = v
+    if 'at_hour' in data:
+        try:
+            ah = int(data['at_hour'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'at_hour must be an integer.'}), 400
+        if not 0 <= ah <= 23:
+            return jsonify({'error': 'at_hour must be 0–23.'}), 400
+        sched.at_hour = ah
     if 'at_minute' in data:
         try:
             m = int(data['at_minute'])
@@ -4628,6 +4699,18 @@ def api_db_schedule_upsert(conn_id):
         if not 0 <= m <= 59:
             return jsonify({'error': 'at_minute must be 0–59.'}), 400
         sched.at_minute = m
+    if 'schedule_timezone' in data:
+        tz_raw = data.get('schedule_timezone')
+        if tz_raw is None or (isinstance(tz_raw, str) and not tz_raw.strip()):
+            sched.schedule_timezone = None
+        else:
+            tz_s = str(tz_raw).strip()
+            try:
+                from zoneinfo import ZoneInfo
+                ZoneInfo(tz_s)
+            except Exception:
+                return jsonify({'error': f'Unknown timezone: {tz_s}'}), 400
+            sched.schedule_timezone = tz_s
     if 'retention_days' in data:
         try:
             r = int(data['retention_days'])
@@ -4643,7 +4726,7 @@ def api_db_schedule_upsert(conn_id):
         sched.databases = json.dumps([str(d) for d in dbs])
     db.session.commit()
     _reschedule_backup_jobs()
-    return jsonify({'schedule': sched.to_dict()})
+    return jsonify({'schedule': sched.to_dict(), 'server_timezone': _server_timezone_name()})
 
 
 # ── APScheduler wiring ──────────────────────────────────────────
@@ -4666,6 +4749,13 @@ def _ensure_scheduler():
     return _db_scheduler
 
 
+def _schedule_tz_name(s):
+    raw = (s.schedule_timezone or '').strip() if s.schedule_timezone else ''
+    if raw:
+        return raw
+    return _server_timezone_name()
+
+
 def _reschedule_backup_jobs():
     sched = _ensure_scheduler()
     if sched is None:
@@ -4675,14 +4765,37 @@ def _reschedule_backup_jobs():
         if job.id.startswith('db-backup-'):
             sched.remove_job(job.id)
     for s in BackupSchedule.query.filter_by(enabled=True).all():
-        from apscheduler.triggers.interval import IntervalTrigger
-        # IntervalTrigger doesn't have an "at minute" concept; align by setting
-        # start_date to the next occurrence of at_minute, then run every N hours.
-        now = datetime.now(timezone.utc)
-        start = now.replace(second=0, microsecond=0, minute=s.at_minute or 0)
-        if start <= now:
-            start = start + _timedelta(hours=s.every_hours)
-        trigger = IntervalTrigger(hours=s.every_hours, start_date=start)
+        tz_name = _schedule_tz_name(s)
+        zone = _resolve_iana_zone(tz_name)
+        try:
+            ah = int(s.at_hour)
+        except (TypeError, ValueError):
+            ah = 2
+        ah = max(0, min(ah, 23))
+        try:
+            am = int(s.at_minute)
+        except (TypeError, ValueError):
+            am = 0
+        am = max(0, min(am, 59))
+        try:
+            eh = int(s.every_hours)
+        except (TypeError, ValueError):
+            eh = 24
+        eh = max(1, min(eh, 24 * 30))
+        # Daily backups: cron at clock time in the chosen timezone (real APScheduler job).
+        if eh == 24:
+            from apscheduler.triggers.cron import CronTrigger
+            trigger = CronTrigger(hour=ah, minute=am, timezone=zone)
+        else:
+            from apscheduler.triggers.interval import IntervalTrigger
+            now = datetime.now(timezone.utc)
+            start = now.replace(second=0, microsecond=0, minute=am)
+            if start <= now:
+                start = start + _timedelta(hours=eh)
+            try:
+                trigger = IntervalTrigger(hours=eh, start_date=start, timezone=zone)
+            except TypeError:
+                trigger = IntervalTrigger(hours=eh, start_date=start)
         sched.add_job(
             func=_run_backup,
             trigger=trigger,
