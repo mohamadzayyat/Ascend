@@ -121,6 +121,11 @@ export default function Dashboard() {
                 : row.status === 'running' ? 'border-blue-500/40 bg-blue-500/10 text-blue-200'
                 : row.status === 'failed' ? 'border-red-500/40 bg-red-500/10 text-red-200'
                 : 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+              const backupNote = row.last_backup?.error_message || row.last_schedule_error || ''
+              const noteIsError = row.last_backup?.status === 'failed' || row.last_schedule_status === 'failed' || /^Backup succeeded; remote upload failed:/i.test(backupNote)
+              const noteClass = noteIsError
+                ? 'border-red-500/30 bg-red-500/10 text-red-200'
+                : 'border-green-500/30 bg-green-500/10 text-green-200'
               return (
                 <div key={row.connection.id} className="rounded border border-gray-700 bg-primary/50 p-4">
                   <div className="flex items-start justify-between gap-3 mb-3">
@@ -148,9 +153,9 @@ export default function Dashboard() {
                       <div className="text-gray-200 mt-1">{row.last_backup?.status || '-'}</div>
                     </div>
                   </div>
-                  {(row.last_backup?.error_message || row.last_schedule_error) && (
-                    <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200 break-words">
-                      {row.last_backup?.error_message || row.last_schedule_error}
+                  {backupNote && (
+                    <div className={`mt-3 rounded border p-2 text-xs break-words ${noteClass}`}>
+                      {backupNote}
                     </div>
                   )}
                 </div>

@@ -972,13 +972,24 @@ def _backup_health_status(last_backup, enabled_schedules):
         return 'warning' if enabled_schedules else 'idle'
     if last_backup.status == 'failed':
         return 'failed'
-    if last_backup.status == 'pending':
+    if last_backup.status == 'pending' and not _backup_archive_is_stale_pending(last_backup):
         return 'running'
     if last_backup.completed_at:
         age_hours = (datetime.now(timezone.utc) - (last_backup.completed_at.replace(tzinfo=timezone.utc) if last_backup.completed_at.tzinfo is None else last_backup.completed_at)).total_seconds() / 3600
         if enabled_schedules and age_hours > 30:
             return 'stale'
     return 'healthy'
+
+
+def _backup_archive_is_stale_pending(backup, minutes=15):
+    if not backup or backup.status != 'pending' or backup.completed_at:
+        return False
+    started = backup.started_at
+    if not started:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds() > minutes * 60
 
 
 @app.route('/api/backups/health')
@@ -988,11 +999,12 @@ def api_backup_health():
     conns = DatabaseConnection.query.filter_by(user_id=current_user.id).order_by(DatabaseConnection.name.asc()).all()
     for conn in conns:
         backups = BackupArchive.query.filter_by(connection_id=conn.id).order_by(BackupArchive.started_at.desc()).limit(20).all()
-        last = backups[0] if backups else None
+        visible_backups = [b for b in backups if not _backup_archive_is_stale_pending(b)]
+        last = visible_backups[0] if visible_backups else (backups[0] if backups else None)
         schedules = BackupSchedule.query.filter_by(connection_id=conn.id).all()
         enabled = [s for s in schedules if s.enabled]
-        failed_count = sum(1 for b in backups if b.status == 'failed')
-        success_count = sum(1 for b in backups if b.status == 'success')
+        failed_count = sum(1 for b in visible_backups if b.status == 'failed')
+        success_count = sum(1 for b in visible_backups if b.status == 'success')
         latest_schedule = None
         if schedules:
             latest_schedule = max(schedules, key=lambda s: s.updated_at or s.created_at or datetime.min)

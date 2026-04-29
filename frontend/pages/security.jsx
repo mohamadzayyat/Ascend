@@ -281,7 +281,7 @@ export default function SecurityPage() {
     if (crowdsecInstalled && !bouncerOk) rows.push({ severity: 'critical', title: 'Firewall bouncer is not enforcing blocks', message: 'CrowdSec may detect attackers, but IPs will not be blocked until the bouncer is running.', fix: 'crowdsec_bouncer_restart', command: 'systemctl restart crowdsec-firewall-bouncer' })
     if (tools.crowdsec_decisions?.error && crowdsecInstalled) rows.push({ severity: 'warning', title: 'Could not read CrowdSec decisions', message: tools.crowdsec_decisions.error, fix: 'crowdsec_restart' })
     if (install.status === 'failed' || crowdsecInstall.status === 'failed') rows.push({ severity: 'warning', title: 'Previous install failed', message: 'A prior security install/repair failed. Check Logs, then clear the failed state when resolved.', fix: 'clear_failed_state' })
-    if ((threats.processes || []).length) rows.push({ severity: 'critical', title: 'Active miner-like process detected', message: `${threats.processes.length} process(es) match miner or stratum indicators. Open Threats and kill them.` })
+    if ((threats.processes || []).length) rows.push({ severity: 'critical', title: 'Active miner-like process detected', message: `${threats.processes.length} process(es) match miner or mining pool indicators. Open Threats and kill them.` })
     if ((threats.persistence || []).length) rows.push({ severity: 'critical', title: 'Suspicious persistence detected', message: `${threats.persistence.length} cron/system/profile file(s) contain miner indicators. Open Threats and remove them.` })
     if ((threats.immutable || []).length) rows.push({ severity: 'warning', title: 'Immutable persistence protection found', message: `${threats.immutable.length} suspicious file(s) have immutable flags that can block cleanup.` })
     return rows
@@ -595,7 +595,7 @@ export default function SecurityPage() {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Zap className="w-5 h-5 text-red-300" /> Persistence & Miner Detection</h2>
-                    <p className="text-red-100/80 text-sm mt-1">Detects active stratum/miner processes, malicious cron/systemd/profile entries, and immutable cron protection.</p>
+                  <p className="text-red-100/80 text-sm mt-1">Detects active miner processes, mining pool connections, malicious cron/systemd/profile entries, and immutable cron protection.</p>
                   </div>
                   <button onClick={loadThreats} className="px-3 py-2 rounded border border-red-300/40 text-red-100 text-sm inline-flex items-center gap-2 hover:bg-red-500/10">
                     <RefreshCw className="w-4 h-4" /> Rescan threats
@@ -606,7 +606,7 @@ export default function SecurityPage() {
               <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
                 <div className="px-5 py-4 border-b border-gray-700">
                   <h2 className="text-white font-semibold">Active Suspicious Processes</h2>
-                  <p className="text-gray-500 text-sm mt-1">Processes matching indicators such as xmrig, stratum, c3pool, or fake /root/.config/.logrotate.</p>
+                  <p className="text-gray-500 text-sm mt-1">Processes matching indicators such as xmrig, c3pool, stratum pool URLs, or fake /root/.config/.logrotate.</p>
                 </div>
                 {asArray(threats.processes).length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active miner-like processes detected.</div> : (
                   <div className="overflow-x-auto">
@@ -621,7 +621,7 @@ export default function SecurityPage() {
               <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
                 <div className="px-5 py-4 border-b border-gray-700">
                   <h2 className="text-white font-semibold">Suspicious Persistence</h2>
-                  <p className="text-gray-500 text-sm mt-1">Cron, systemd, root/home profile, tmp, and web-root files containing miner downloaders or stratum pool strings.</p>
+                  <p className="text-gray-500 text-sm mt-1">Cron, systemd, root/home profile, tmp, and web-root files containing miner downloaders or mining pool URLs.</p>
                 </div>
                 {asArray(threats.persistence).length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No suspicious persistence lines detected.</div> : (
                   <div className="divide-y divide-gray-700/70">

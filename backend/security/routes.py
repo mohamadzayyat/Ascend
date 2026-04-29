@@ -37,7 +37,10 @@ _AUTO_SSH_BLOCK_RUNNING = False
 STATUS_CROWDSEC_CACHE_SECONDS = 20
 AUTO_SSH_BLOCK_INTERVAL_SECONDS = 300
 
-THREAT_RE = re.compile(r'(getxmrig|xmrig|c3pool|stratum|auto\.c3pool\.org|80\.13\.111\.125|/root/\.config/\.logrotate|\.logrotate)', re.IGNORECASE)
+THREAT_RE = re.compile(
+    r'(getxmrig|xmrig|c3pool|stratum\+(?:tcp|ssl)://|auto\.c3pool\.org|80\.13\.111\.125|/root/\.config/\.logrotate|\.logrotate)',
+    re.IGNORECASE,
+)
 THREAT_SCAN_PATHS = [
     '/etc/cron.d',
     '/etc/cron.daily',
@@ -377,6 +380,12 @@ def _cached_crowdsec_decisions():
     cached = _CROWDSEC_DECISIONS_CACHE.get('data')
     if cached is not None and now_ts - float(_CROWDSEC_DECISIONS_CACHE.get('at') or 0) < STATUS_CROWDSEC_CACHE_SECONDS:
         return cached
+    state = _load_json(STATE_PATH, {})
+    shared = state.get('crowdsec_decisions_cache') if isinstance(state.get('crowdsec_decisions_cache'), dict) else None
+    if shared and cached is None:
+        _CROWDSEC_DECISIONS_CACHE['data'] = shared
+        _CROWDSEC_DECISIONS_CACHE['at'] = now_ts
+        cached = shared
     with _CROWDSEC_DECISIONS_LOCK:
         if not _CROWDSEC_DECISIONS_RUNNING:
             _CROWDSEC_DECISIONS_RUNNING = True
@@ -387,12 +396,15 @@ def _cached_crowdsec_decisions():
                     data = _crowdsec_decisions()
                     _CROWDSEC_DECISIONS_CACHE['at'] = time.monotonic()
                     _CROWDSEC_DECISIONS_CACHE['data'] = data
+                    state = _load_json(STATE_PATH, {})
+                    state['crowdsec_decisions_cache'] = data
+                    _write_json(STATE_PATH, state)
                 finally:
                     with _CROWDSEC_DECISIONS_LOCK:
                         _CROWDSEC_DECISIONS_RUNNING = False
 
             threading.Thread(target=worker, daemon=True, name='ascend-crowdsec-decisions').start()
-    fallback = cached or {'available': True, 'items': [], 'error': ''}
+    fallback = cached or shared or {'available': True, 'items': [], 'error': ''}
     return {**fallback, 'refreshing': True}
 
 
