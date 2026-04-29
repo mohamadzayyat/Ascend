@@ -113,6 +113,14 @@ def _is_cleanup_backup(path):
     return '.ascend-clean-' in name and name.endswith('.bak')
 
 
+def _cleanup_backup_path(source_path):
+    raw = str(source_path).replace('\\', '/').strip('/')
+    safe = re.sub(r'[^A-Za-z0-9._-]+', '_', raw).strip('._') or 'persistence'
+    backup_dir = SECURITY_DIR / 'cleanup-backups'
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir / f'{safe}.ascend-clean-{int(time.time())}.bak'
+
+
 def _scan_threat_processes():
     rc, out, err = _run(['ps', 'auxww'], timeout=8)
     rows = []
@@ -231,7 +239,7 @@ def _remove_line_from_file(path, line_no):
     if idx < 0 or idx >= len(lines):
         raise ValueError('Line number is out of range.')
     removed = lines.pop(idx)
-    backup = path.with_suffix(path.suffix + f'.ascend-clean-{int(time.time())}.bak')
+    backup = _cleanup_backup_path(path)
     shutil.copy2(path, backup)
     path.write_text('\n'.join(lines) + ('\n' if lines else ''), encoding='utf-8')
     return removed, str(backup)

@@ -443,7 +443,7 @@ export default function SecurityPage() {
   }
 
   const removeThreatLine = async (item) => {
-    if (!window.confirm(`Remove suspicious line from ${item.path}:${item.line}? A backup will be created first.`)) return
+    if (!window.confirm(`Remove suspicious line from ${item.path}:${item.line}? A safety copy will be stored outside the scanned cron/systemd paths.`)) return
     setBusy(`line-${item.path}-${item.line}`)
     try {
       await apiClient.deleteSecurityThreatPersistenceLine(item.path, item.line)
