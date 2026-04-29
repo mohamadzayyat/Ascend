@@ -98,6 +98,7 @@ export const apiClient = {
 
   // System introspection
   getServerStats: () => api.get('/api/system/stats'),
+  getProcessMonitor: (limit = 80) => api.get('/api/system/process-monitor', { params: { limit } }),
   getPm2Processes: () => api.get('/api/system/pm2'),
   getListeningPorts: () => api.get('/api/system/ports'),
   getNginxSites: () => api.get('/api/system/nginx'),

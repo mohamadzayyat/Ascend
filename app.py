@@ -4266,10 +4266,58 @@ def _load_server_stats():
     }
 
 
+def _load_process_monitor(limit=80):
+    now = time.time()
+    stats = _load_server_stats()
+    processes = []
+    for proc in psutil.process_iter(['pid', 'ppid', 'username', 'name', 'status', 'nice', 'cpu_percent', 'memory_percent', 'memory_info', 'create_time', 'cmdline', 'num_threads']):
+        try:
+            info = proc.info
+            mem = info.get('memory_info')
+            cmdline = info.get('cmdline') or []
+            command = ' '.join(str(part) for part in cmdline) if cmdline else (info.get('name') or '')
+            processes.append({
+                'pid': info.get('pid'),
+                'ppid': info.get('ppid'),
+                'user': info.get('username') or '',
+                'status': info.get('status') or '',
+                'nice': info.get('nice'),
+                'cpu_percent': round(float(info.get('cpu_percent') or 0), 1),
+                'memory_percent': round(float(info.get('memory_percent') or 0), 2),
+                'rss_bytes': getattr(mem, 'rss', 0) if mem else 0,
+                'vms_bytes': getattr(mem, 'vms', 0) if mem else 0,
+                'threads': info.get('num_threads'),
+                'runtime_seconds': max(0, int(now - float(info.get('create_time') or now))),
+                'command': command[:1200],
+                'name': info.get('name') or '',
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception:
+            continue
+    processes.sort(key=lambda p: (p.get('cpu_percent') or 0, p.get('rss_bytes') or 0), reverse=True)
+    return {
+        'summary': stats,
+        'processes': processes[:max(10, min(int(limit or 80), 300))],
+        'total_processes': len(processes),
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @app.route('/api/system/stats')
 @login_required
 def api_system_stats():
     return jsonify(_cached('server_stats', _SYSTEM_TTL, _load_server_stats))
+
+
+@app.route('/api/system/process-monitor')
+@login_required
+def api_system_process_monitor():
+    try:
+        limit = max(10, min(int(request.args.get('limit', 80)), 300))
+    except (TypeError, ValueError):
+        limit = 80
+    return jsonify(_load_process_monitor(limit))
 
 
 @app.route('/api/system/pm2')

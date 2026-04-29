@@ -1,6 +1,8 @@
-# Ascend — Deployment Management System
+# Ascend
 
-A modern, web-based deployment panel that turns your VPS into a self-hosted deployment platform. Manage unlimited projects, stream live logs, and auto-deploy on every GitHub push — all from a clean dashboard.
+Ascend is a self-hosted VPS control panel for deploying projects, managing databases, monitoring a server, and responding to security issues from a clean web UI.
+
+It is built for the common "one VPS, many apps" workflow: connect GitHub, choose a branch and app type, deploy, manage Nginx/SSL, watch logs, back up databases, and keep an eye on server health without jumping between tools.
 
 ## Stack
 
@@ -9,263 +11,307 @@ A modern, web-based deployment panel that turns your VPS into a self-hosted depl
 | Frontend | Next.js 14, Tailwind CSS, SWR |
 | Backend | Flask, SQLAlchemy, Flask-Login |
 | Process manager | PM2 |
-| Web server | Nginx + Certbot (auto-SSL) |
+| Web server | Nginx + Certbot |
 | Database | SQLite |
+| Security tooling | ClamAV, CrowdSec, system process inspection |
 
-## Features
-
-- **Multi-project dashboard** — manage websites, APIs, CMS, and custom apps from one place
-- **Real-time deployment logs** — streamed live to the browser as they happen
-- **GitHub webhooks** — auto-deploy on push with HMAC signature verification
-- **Nginx + SSL automation** — virtual host and Let's Encrypt cert created automatically
-- **Environment variables** — per-project `.env` stored and applied at deploy time
-- **Monorepo support** — deploy from a subdirectory of any repository
-- **Deployment history** — full log archive for every past deployment
-
-## Ports
-
-| Service | Default port |
-|---|---|
-| Flask backend | **8716** |
-| Next.js frontend | **8717** |
-
-Both are configurable via `.env` / npm scripts and sit well above common VPS service ports (MySQL 3306, PostgreSQL 5432, Redis 6379).
-
-## Project Structure
-
-```
-Ascend/
-├── app.py                # Flask API — auth, projects, deployments, webhooks
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-└── frontend/
-    ├── pages/            # Next.js pages (login, dashboard, projects, settings)
-    ├── components/       # UI components (ProjectCard, DeploymentLogs, …)
-    ├── lib/
-    │   ├── api.js        # Axios client pointing at the Flask API
-    │   ├── store.js      # Zustand global state
-    │   └── hooks/
-    │       └── useAuth.js  # SWR hooks for auth, projects, deployments
-    └── styles/
-```
-
-## Installation
-
-### One command (recommended)
+## Quick Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mohamadzayyat/Ascend/main/install.sh | sudo bash
 ```
 
-Or if you already cloned the repo:
+The installer:
 
-```bash
-sudo bash install.sh
+- Clones/updates Ascend in `/opt/ascend`
+- Installs Python, Node.js, Nginx, Certbot, PM2, and required packages
+- Builds the frontend
+- Creates `ascend-backend` and `ascend-frontend` systemd services
+- Configures Nginx as the public panel gateway
+- Opens port `8716` in common firewalls when available
+- Saves initial admin credentials at `/root/.ascend-admin-credentials`
+
+After install, open:
+
+```text
+http://your-server-ip:8716
 ```
 
-The script handles everything automatically:
-- Installs Python 3, Node.js 20, Nginx, Certbot, PM2
-- Clones the repo into `/opt/ascend`
-- Generates a secure `SECRET_KEY`
-- Builds the Next.js frontend
-- Creates and starts `ascend-backend` + `ascend-frontend` systemd services
-- Opens firewall ports (if ufw is active)
+Re-run the same command to update Ascend.
 
-When it finishes, open `http://your-server-ip:8717` and create your admin account.
+## Core Features
 
----
+### Dashboard
 
-## Manual Setup
+- Server resource summary
+- Project/app overview
+- Backup health cards
+- SSL report
+- Critical system alerts
+- Recent project activity
 
-### Requirements
+### Projects & Deployments
 
-- Python 3.9+
-- Node.js 18+
-- Ubuntu/Debian VPS (for Nginx/PM2/Certbot features)
+- Multi-project app management
+- Website, API, static, Node.js, and PHP app types
+- Branch selection from GitHub repositories
+- Monorepo/subdirectory support with validation
+- Per-app environment variables
+- Custom build and run commands
+- Deployment history and live logs
+- Redeploy, restart, and SSL retry actions
+- App disk usage recalculation
 
-### 1. Clone
+### GitHub Integration
 
-```bash
-git clone https://github.com/mohamadzayyat/Ascend.git
-cd Ascend
+- Store GitHub credentials in Settings
+- Deploy private or public repositories
+- Branch-aware deployment
+- GitHub webhook endpoint for push-based deployments
+- HMAC-secured webhook secrets
+
+### Nginx & SSL
+
+- Automatic Nginx site generation
+- Reverse proxy for dynamic apps
+- Static site hosting from build output
+- SPA fallback support
+- Let's Encrypt certificates through Certbot
+- Existing certificate reuse
+- Certificate expansion for additional domains such as `www`
+- Cloudflare-aware DNS/HTTP preflight behavior
+- Client body size configuration
+
+### PHP Hosting
+
+- PHP app type with php-fpm + Nginx
+- PHP version selection
+- Composer install options
+- PHP runtime detection
+- PHP version install workflow when a selected version is missing
+
+### Databases
+
+- MySQL/MariaDB connection management
+- Create databases with charset/collation defaults
+- Default charset/collation: `utf8mb4` / `utf8mb4_general_ci`
+- Browse databases, tables, table design, and records
+- SQL import support
+- SQL query runner
+- Manual backups
+- Scheduled backups
+- Backup history, download, and delete
+- Restore backups to an existing database or a new database
+- Restore safety backup before replacing an existing database
+- Restore progress tracking
+
+### Remote Backups
+
+- Remote upload support using WebDAV-compatible storage
+- Koofr-compatible backup upload flow
+- Remote backup test action
+- Backup upload status displayed in the dashboard
+- Ascend panel self-backup and restore in Settings
+
+### Email Notifications
+
+- SMTP configuration
+- Sender name and from address
+- Test email action
+- Professional HTML email templates
+- Notification settings for deployments, backups, login, project/app events, terminal/file unlocks, and system alerts
+- Sent email log tab with cleanup
+
+### Security Center
+
+- ClamAV install/repair workflow
+- Malware scans with selectable paths
+- Quarantine support
+- Scan findings and logs
+- CrowdSec install/repair workflow
+- Firewall bouncer repair with service detection
+- Active CrowdSec IP blocks
+- Manual unblock
+- SSH failed-login summaries
+- Automatic SSH brute-force blocking
+- Threats tab for miner/persistence detection
+- Suspicious process detection
+- Cron/systemd/profile persistence detection
+- Immutable flag detection and repair
+- Delete confirmed malicious cleanup backup files
+
+Security detection includes strong indicators such as:
+
+- `xmrig`
+- `getxmrig`
+- `c3pool`
+- `stratum+tcp://` and `stratum+ssl://`
+- suspicious `/root/.config/.logrotate` miner persistence
+
+### System
+
+- PM2 process inventory
+- Listening ports
+- Enabled Nginx sites
+- SSL certificate inventory and renewal status
+- PHP runtime detection
+- Live htop-style process monitor
+- Per-core CPU bars
+- Load average, uptime, memory, swap, and task count
+- Process table with PID, user, state, CPU, memory, RSS, threads, runtime, and command
+- Process filtering and pause/resume live refresh
+
+### Files & Terminal
+
+- Web terminal
+- Server file manager
+- Locked/unlocked security events for terminal and file access
+
+### Settings
+
+- Email settings and email log
+- GitHub credentials
+- Users
+- Two-factor authentication with authenticator setup
+- Display settings with multiple dark and light themes
+- Ascend self-backup and restore
+
+### Audit & Updates
+
+- Audit log for important actions
+- Update Center
+- Detached update runner so the update process survives service restarts
+- Update status and logs
+
+## Ports
+
+| Service | Default |
+|---|---|
+| Public Nginx panel gateway | `8716` |
+| Flask/Gunicorn backend | `127.0.0.1:8765` |
+| Next.js frontend | `127.0.0.1:8717` |
+
+The installer exposes `8716` publicly and keeps backend/frontend internal behind Nginx.
+
+## Project Structure
+
+```text
+Ascend/
+├── app.py
+├── backend/
+│   ├── databases/
+│   ├── file_manager/
+│   ├── security/
+│   └── services/
+├── frontend/
+│   ├── pages/
+│   ├── components/
+│   ├── lib/
+│   └── styles/
+├── install.sh
+├── requirements.txt
+├── Dockerfile
+└── docker-compose.yml
 ```
 
-### 2. Backend
+## Manual Development
+
+### Backend
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-
 cp .env.example .env
-# Edit .env — set SECRET_KEY at minimum
-
 python app.py
-# Runs on http://0.0.0.0:8716
 ```
 
-### 3. Frontend
+### Frontend
 
 ```bash
 cd frontend
 npm install
-
-# Development
-npm run dev        # http://localhost:8717
-
-# Production
-npm run build
-npm start
+npm run dev
 ```
 
-### 4. First Login
+## Environment
 
-Open `http://your-vps:8717` → you'll be redirected to `/setup` to create the admin account.
-
-## Configuration
-
-Copy `.env.example` to `.env` and set:
+Common backend variables:
 
 ```bash
-SECRET_KEY=your-random-secret-key
-PORT=8716
-CORS_ORIGIN=http://localhost:8717   # or your production domain
-
-# Optional: persist the DB outside the project dir
+SECRET_KEY=replace-with-a-random-secret
 SQLALCHEMY_DATABASE_URI=sqlite:////opt/ascend/ascend.db
 ```
 
-For the frontend, edit `frontend/.env.local`:
+Common frontend variable:
 
 ```bash
-NEXT_PUBLIC_API_URL=http://your-vps:8716
+NEXT_PUBLIC_API_URL=http://your-server-ip:8716
 ```
 
-## Docker
+The production installer writes the needed service environment automatically.
+
+## Useful Commands
 
 ```bash
-docker-compose up -d
+systemctl status ascend-backend ascend-frontend nginx
+systemctl restart ascend-backend ascend-frontend
+journalctl -u ascend-backend -f
+journalctl -u ascend-frontend -f
 ```
 
-Nginx handles ports 80/443 publicly; Flask (8716) and Next.js (8717) are internal.
-
-## API Reference
-
-### Auth
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/auth/login` | Login (JSON) |
-| `POST` | `/api/auth/logout` | Logout |
-| `POST` | `/api/auth/setup` | Create first admin |
-| `GET` | `/api/current-user` | Current session user |
-
-### Projects
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/projects` | List all projects |
-| `POST` | `/api/projects` | Create project |
-| `GET` | `/api/project/{id}` | Get project |
-| `PUT` | `/api/project/{id}` | Update project |
-| `DELETE` | `/api/project/{id}` | Delete project |
-
-### Deployments
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/project/{id}/deploy` | Trigger deployment |
-| `GET` | `/api/project/{id}/deployments` | Deployment history |
-| `GET` | `/api/deployment/{id}/status` | Deployment status |
-| `GET` | `/api/deployment/{id}/log` | Deployment log |
-
-### Webhook
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/webhook/github/{secret}` | GitHub push webhook |
-
-## Deployment Flow
-
-When a deployment is triggered (manually or via webhook), Ascend:
-
-1. Clones or fast-forwards the repository from GitHub
-2. Optionally enters a subdirectory (monorepo support)
-3. Writes the project's `.env` file
-4. Runs `npm install` (or yarn/pnpm)
-5. Runs the build command
-6. Restarts the PM2 process
-7. Writes the Nginx virtual host and reloads
-8. Obtains/renews the SSL certificate via Certbot
-
-All output is streamed to a log file and exposed via the API in real time.
-
-## Production (systemd)
-
-```ini
-# /etc/systemd/system/ascend.service
-[Unit]
-Description=Ascend Deployment Panel
-After=network.target
-
-[Service]
-User=root
-WorkingDirectory=/opt/ascend
-Environment="PATH=/opt/ascend/venv/bin"
-ExecStart=/opt/ascend/venv/bin/gunicorn -w 4 -b 0.0.0.0:8716 app:app
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
+Firewall check:
 
 ```bash
-systemctl enable ascend && systemctl start ascend
+sudo firewall-cmd --add-port=8716/tcp
+sudo firewall-cmd --permanent --add-port=8716/tcp
+sudo firewall-cmd --reload
+sudo firewall-cmd --list-ports
 ```
 
-## Nginx reverse proxy (optional)
+## API Highlights
 
-If you want to serve the frontend through nginx instead of directly on 8717:
-
-```nginx
-server {
-    listen 80;
-    server_name panel.yourdomain.com;
-
-    # Next.js frontend
-    location / {
-        proxy_pass http://127.0.0.1:8717;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # Flask API
-    location /api/ {
-        proxy_pass http://127.0.0.1:8716;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
+| Area | Endpoint Examples |
+|---|---|
+| Auth | `/api/auth/login`, `/api/auth/logout`, `/api/auth/setup`, `/api/current-user` |
+| Projects | `/api/projects`, `/api/project/{id}` |
+| Apps | `/api/project/{id}/apps`, `/api/app/{id}` |
+| Deployments | `/api/project/{id}/deploy`, `/api/deployment/{id}/log` |
+| System | `/api/system/stats`, `/api/system/process-monitor`, `/api/system/pm2`, `/api/system/ports` |
+| Databases | `/api/databases/...` |
+| Backups | `/api/backups/health`, database backup/restore endpoints |
+| Settings | `/api/settings/email-notifications`, `/api/settings/display`, `/api/settings/ascend-backups` |
+| Security | `/api/security/status`, `/api/security/scan/start`, `/api/security/threats`, `/api/security/repair` |
+| Webhooks | `/webhook/github/{secret}` |
 
 ## Troubleshooting
 
-**Frontend can't reach the backend**
-- Check `NEXT_PUBLIC_API_URL` in `frontend/.env.local` matches the backend port (8716)
-- Ensure `CORS_ORIGIN` in `.env` matches the frontend origin
+### Panel does not open publicly
 
-**Deploy fails immediately**
-- Add GitHub credentials first: Settings → GitHub Credentials
-- Verify the Personal Access Token has `repo` scope
+- Make sure port `8716` is open in the active firewall.
+- Check `systemctl status ascend-backend ascend-frontend nginx`.
+- Check Nginx error logs.
 
-**SSL certificate fails**
-- The domain must point to this VPS before running Certbot
-- Check with `dig your-domain.com`
+### Deployment fails during SSL
 
-**PM2 process not starting**
-- Check logs: `pm2 logs <app-name>`
-- Ensure the start command and app port are correct in project settings
+- Confirm DNS points to the server.
+- If using Cloudflare proxy, make sure SSL mode and proxy settings match your deployment goal.
+- For certificate expansion, Ascend passes Certbot the required expansion flow.
+
+### Static site returns 403/500
+
+- Nginx must be able to read the deployed static output.
+- Ascend avoids serving static sites directly from unreadable root-only paths.
+
+### CrowdSec detects attackers but blocks do not work
+
+- Open Security Center > IP Protection.
+- Use Repair on Firewall bouncer.
+- Confirm the bouncer service is active.
+
+### Security tab shows miner persistence
+
+Entries containing `getxmrig`, `xmrig`, `c3pool`, or `stratum+ssl://` are serious indicators. Remove live persistence lines first, then delete Ascend cleanup backups if they are confirmed malicious.
 
 ## License
 
