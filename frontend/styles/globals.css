@@ -33,6 +33,12 @@ canvas {
   .app-main .max-w-6xl {
     max-width: none;
   }
+
+  .app-main > .p-8,
+  .app-main > .p-8.max-w-7xl,
+  .app-main > .p-8.max-w-6xl {
+    padding-left: 1.75rem;
+  }
 }
 
 /* Scrollbar styling */

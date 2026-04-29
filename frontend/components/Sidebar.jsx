@@ -82,6 +82,14 @@ export default function Sidebar() {
           sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
+        <button
+          type="button"
+          onClick={toggleSidebarCollapsed}
+          className="hidden md:inline-flex absolute -right-3 top-7 z-50 h-7 w-7 items-center justify-center rounded-md border border-gray-700 bg-primary text-gray-300 shadow-md hover:border-accent hover:text-white transition"
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Minimize sidebar'}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+        </button>
         <div className={`p-4 ${sidebarCollapsed ? 'md:px-3' : 'sm:p-6'} h-full flex flex-col overflow-y-auto`}>
           <div className={`flex items-center gap-2 mb-6 sm:mb-8 ${sidebarCollapsed ? 'md:justify-center' : 'justify-between'}`}>
             <Link href="/dashboard" className="flex items-center hover:opacity-90 transition min-w-0" aria-label="Ascend dashboard">
@@ -123,15 +131,6 @@ export default function Sidebar() {
           onClick={toggleSidebar}
         />
       )}
-
-      <button
-        type="button"
-        onClick={toggleSidebarCollapsed}
-        className={`hidden md:inline-flex fixed top-6 ${sidebarCollapsed ? 'left-[4.35rem]' : 'left-[15.35rem]'} z-50 h-10 w-10 items-center justify-center rounded-full border border-gray-700 bg-secondary text-gray-200 shadow-lg shadow-black/20 hover:border-accent hover:text-white hover:bg-primary transition-all duration-300`}
-        aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Minimize sidebar'}
-      >
-        {sidebarCollapsed ? <PanelLeftOpen className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}
-      </button>
 
       <nav className="fixed bottom-0 inset-x-0 z-40 md:hidden border-t border-gray-800 bg-secondary/95 backdrop-blur">
         <div className="grid grid-cols-5">

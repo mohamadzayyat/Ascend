@@ -38,7 +38,7 @@ export default function App({ Component, pageProps }) {
     return (
       <div className="flex h-dvh min-h-screen bg-primary overflow-hidden">
         <Sidebar />
-        <main className="app-main flex-1 min-w-0 overflow-auto pt-16 pb-20 md:pt-0 md:pb-0">
+        <main className="app-main flex-1 min-w-0 overflow-auto pt-16 pb-20 md:pt-0 md:pb-0 md:pl-3">
           <Component {...pageProps} />
         </main>
       </div>
