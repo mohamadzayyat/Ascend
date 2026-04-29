@@ -33,6 +33,24 @@ const THEMES = [
     description: 'Neutral charcoal with a green infrastructure accent.',
     colors: ['#11181d', '#1f292f', '#22c55e'],
   },
+  {
+    id: 'daylight',
+    name: 'Daylight',
+    description: 'Clean light surfaces with the classic Ascend blue accent.',
+    colors: ['#f8fafc', '#ffffff', '#2563eb'],
+  },
+  {
+    id: 'mint',
+    name: 'Mint',
+    description: 'A soft light theme with calm teal operational accents.',
+    colors: ['#f0fdfa', '#ffffff', '#0d9488'],
+  },
+  {
+    id: 'paper',
+    name: 'Paper',
+    description: 'Warm neutral light panels with a focused indigo accent.',
+    colors: ['#fafaf9', '#ffffff', '#4f46e5'],
+  },
 ]
 
 function applyTheme(themeId) {
@@ -82,11 +100,11 @@ export default function DisplaySettings() {
           <Palette className="w-5 h-5 text-accent" /> Theme
         </h2>
         <p className="text-gray-400 text-sm">
-          These themes keep the same contrast model as the current dark mode, so existing tables, forms, alerts, and buttons remain readable.
+          Dark and light themes share the same component system, so tables, forms, alerts, and buttons remain readable across the panel.
         </p>
       </section>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         {THEMES.map((item) => {
           const active = item.id === theme
           return (
