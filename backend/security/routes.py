@@ -55,6 +55,11 @@ THREAT_SCAN_PATHS = [
     '/tmp',
     '/var/tmp',
 ]
+BOUNCER_SERVICE_CANDIDATES = [
+    'crowdsec-firewall-bouncer.service',
+    'crowdsec-firewall-bouncer-iptables.service',
+    'crowdsec-firewall-bouncer-nftables.service',
+]
 
 
 def _now():
@@ -134,6 +139,8 @@ def _scan_threat_files():
                 try:
                     if not path.is_file() or path.is_symlink():
                         continue
+                    if path.name in {'.bash_history', '.zsh_history', '.python_history', '.mysql_history'}:
+                        continue
                     if any(part in {'node_modules', '.git', 'venv', '__pycache__'} for part in path.parts):
                         continue
                     lines = _safe_read_lines(path)
@@ -153,6 +160,26 @@ def _scan_threat_files():
         except (OSError, PermissionError):
             continue
     return findings[:500]
+
+
+def _post_persistence_cleanup(path):
+    results = []
+    systemctl = shutil.which('systemctl')
+    if not systemctl:
+        return results
+    try:
+        resolved = Path(path).resolve()
+    except Exception:
+        return results
+    systemd_roots = [Path('/etc/systemd'), Path('/lib/systemd')]
+    if not any(str(resolved).startswith(str(root)) for root in systemd_roots):
+        return results
+    if resolved.suffix == '.service':
+        unit = resolved.name
+        for cmd in ([systemctl, 'disable', '--now', unit], [systemctl, 'daemon-reload']):
+            rc, out, err = _run(cmd, timeout=12)
+            results.append({'cmd': ' '.join(cmd), 'returncode': rc, 'stdout': out, 'stderr': err})
+    return results
 
 
 def _scan_immutable_files():
@@ -248,7 +275,35 @@ def _service_active(name):
     if shutil.which('systemctl') is None:
         return {'available': False, 'active': None}
     rc, out, _ = _run(['systemctl', 'is-active', name])
-    return {'available': True, 'active': out or 'unknown', 'ok': rc == 0}
+    return {'available': True, 'name': name, 'active': out or 'unknown', 'ok': rc == 0}
+
+
+def _systemd_unit_exists(name):
+    if shutil.which('systemctl') is None:
+        return False
+    rc, _, _ = _run(['systemctl', 'cat', name], timeout=3)
+    return rc == 0
+
+
+def _first_existing_service(candidates):
+    for name in candidates:
+        if _systemd_unit_exists(name):
+            return name
+    return candidates[0] if candidates else ''
+
+
+def _service_active_any(candidates):
+    if shutil.which('systemctl') is None:
+        return {'available': False, 'active': None, 'checked': candidates}
+    rows = []
+    for name in candidates:
+        info = _service_active(name)
+        info['exists'] = _systemd_unit_exists(name)
+        rows.append(info)
+        if info.get('ok'):
+            return {**info, 'checked': candidates, 'alternatives': rows}
+    existing = next((row for row in rows if row.get('exists')), None)
+    return {**(existing or rows[0]), 'checked': candidates, 'alternatives': rows}
 
 
 def _crowdsec_version():
@@ -650,7 +705,7 @@ def _current_status():
             'crowdsec': _crowdsec_version(),
             'cscli': cscli,
             'crowdsec_service': _service_active('crowdsec.service'),
-            'crowdsec_firewall_bouncer_service': _service_active('crowdsec-firewall-bouncer.service'),
+            'crowdsec_firewall_bouncer_service': _service_active_any(BOUNCER_SERVICE_CANDIDATES),
             'crowdsec_decisions': _cached_crowdsec_decisions(),
             'clamav_freshclam_service': _service_active('clamav-freshclam.service'),
             'clamav_daemon_service': _service_active('clamav-daemon.service'),
@@ -956,7 +1011,18 @@ def api_security_threat_persistence_line_delete():
     data = request.get_json(silent=True) or {}
     path = Path(str(data.get('path') or ''))
     line_no = data.get('line')
-    allowed_roots = [Path('/etc/cron.d'), Path('/var/spool/cron'), Path('/root'), Path('/home'), Path('/etc/systemd'), Path('/lib/systemd')]
+    allowed_roots = [
+        Path('/etc/cron.d'),
+        Path('/etc/cron.daily'),
+        Path('/etc/cron.hourly'),
+        Path('/etc/cron.weekly'),
+        Path('/etc/cron.monthly'),
+        Path('/var/spool/cron'),
+        Path('/root'),
+        Path('/home'),
+        Path('/etc/systemd'),
+        Path('/lib/systemd'),
+    ]
     try:
         resolved = path.resolve()
     except Exception:
@@ -974,8 +1040,9 @@ def api_security_threat_persistence_line_delete():
         removed, backup = _remove_line_from_file(resolved, int(line_no))
     except Exception as exc:
         return jsonify({'error': str(exc)}), 500
-    _audit_log('security.threat_persistence_removed', 'ok', f'Removed suspicious persistence from {resolved}:{line_no}', {'path': str(resolved), 'line': line_no, 'removed': removed, 'backup': backup})
-    return jsonify({'message': 'Persistence line removed.', 'backup': backup, 'removed': removed})
+    cleanup_results = _post_persistence_cleanup(resolved)
+    _audit_log('security.threat_persistence_removed', 'ok', f'Removed suspicious persistence from {resolved}:{line_no}', {'path': str(resolved), 'line': line_no, 'removed': removed, 'backup': backup, 'cleanup_results': cleanup_results})
+    return jsonify({'message': 'Persistence line removed.', 'backup': backup, 'removed': removed, 'cleanup_results': cleanup_results})
 
 
 @bp.route('/api/security/threats/immutable', methods=['DELETE'])
@@ -1007,6 +1074,20 @@ def api_security_repair():
     data = request.get_json(silent=True) or {}
     action = str(data.get('action') or '').strip()
     systemctl = shutil.which('systemctl')
+    apt_get = shutil.which('apt-get')
+    bouncer_unit = _first_existing_service(BOUNCER_SERVICE_CANDIDATES)
+    bouncer_steps = []
+    if apt_get and not any(_systemd_unit_exists(name) for name in BOUNCER_SERVICE_CANDIDATES):
+        bouncer_steps.extend([
+            [apt_get, 'update'],
+            [apt_get, 'install', '-y', 'crowdsec-firewall-bouncer-iptables'],
+        ])
+        bouncer_unit = _first_existing_service(BOUNCER_SERVICE_CANDIDATES)
+    if systemctl:
+        bouncer_steps.extend([
+            [systemctl, 'enable', '--now', bouncer_unit],
+            [systemctl, 'restart', bouncer_unit],
+        ])
     actions = {
         'clamav_restart_updates': {
             'label': 'Restart ClamAV updater',
@@ -1029,8 +1110,8 @@ def api_security_repair():
             'steps': [[systemctl, 'restart', 'crowdsec.service']] if systemctl else [],
         },
         'crowdsec_bouncer_restart': {
-            'label': 'Restart CrowdSec firewall bouncer',
-            'steps': [[systemctl, 'restart', 'crowdsec-firewall-bouncer.service']] if systemctl else [],
+            'label': 'Repair CrowdSec firewall bouncer',
+            'steps': bouncer_steps,
         },
         'crowdsec_collections': {
             'label': 'Install core CrowdSec collections',
