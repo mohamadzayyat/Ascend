@@ -161,11 +161,20 @@ check_ports() {
     [[ $conflict -eq 0 ]] || die "Port conflict detected. Free the port(s) above or edit PANEL_PORT/BACKEND_PORT/FRONTEND_PORT in install.sh."
 }
 
-# Ascend has in-process background tasks (backup scheduler, update state, etc.).
-# Keep one Gunicorn worker and use threads for concurrent requests so those
-# background tasks are not duplicated across worker processes.
+# Detect CPU count for gunicorn worker calculation: (2 * CPU) + 1, capped at 9.
+# Scheduled backups are protected by a cross-process lock, so multiple workers
+# can serve the panel without duplicating backup runs.
 detect_worker_count() {
-    echo "${ASCEND_GUNICORN_WORKERS:-1}"
+    if [[ -n "${ASCEND_GUNICORN_WORKERS:-}" ]]; then
+        echo "$ASCEND_GUNICORN_WORKERS"
+        return
+    fi
+    local cpus
+    cpus=$(nproc 2>/dev/null || echo 1)
+    local workers=$(( cpus * 2 + 1 ))
+    [[ $workers -gt 9 ]] && workers=9
+    [[ $workers -lt 2 ]] && workers=2
+    echo "$workers"
 }
 
 # ── System packages ─────────────────────────────────────────────

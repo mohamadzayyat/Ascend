@@ -27,6 +27,22 @@ _admin_required = None
 _audit_log = None
 _notify_email_async = None
 
+THREAT_RE = re.compile(r'(getxmrig|xmrig|c3pool|stratum|auto\.c3pool\.org|80\.13\.111\.125|/root/\.config/\.logrotate|\.logrotate)', re.IGNORECASE)
+THREAT_SCAN_PATHS = [
+    '/etc/cron.d',
+    '/etc/cron.daily',
+    '/etc/cron.hourly',
+    '/etc/cron.weekly',
+    '/etc/cron.monthly',
+    '/var/spool/cron',
+    '/etc/systemd',
+    '/lib/systemd',
+    '/root',
+    '/home',
+    '/tmp',
+    '/var/tmp',
+]
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -62,6 +78,117 @@ def _run(cmd, timeout=4):
         return proc.returncode, (proc.stdout or '').strip(), (proc.stderr or '').strip()
     except Exception as exc:
         return 1, '', str(exc)
+
+
+def _safe_read_lines(path, max_bytes=1024 * 1024):
+    try:
+        p = Path(path)
+        if not p.is_file() or p.stat().st_size > max_bytes:
+            return []
+        return p.read_text(encoding='utf-8', errors='replace').splitlines()
+    except Exception:
+        return []
+
+
+def _scan_threat_processes():
+    rc, out, err = _run(['ps', 'auxww'], timeout=8)
+    rows = []
+    if rc != 0:
+        return {'items': [], 'error': err or 'Could not list processes.'}
+    for line in out.splitlines()[1:]:
+        if not THREAT_RE.search(line):
+            continue
+        parts = line.split(None, 10)
+        if len(parts) < 11:
+            continue
+        rows.append({
+            'pid': parts[1],
+            'user': parts[0],
+            'cpu': parts[2],
+            'mem': parts[3],
+            'command': parts[10],
+        })
+    return {'items': rows, 'error': ''}
+
+
+def _scan_threat_files():
+    findings = []
+    roots = [Path(p) for p in THREAT_SCAN_PATHS if Path(p).exists()]
+    for root in roots:
+        try:
+            iterator = root.rglob('*') if root.is_dir() else [root]
+            for path in iterator:
+                try:
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    if any(part in {'node_modules', '.git', 'venv', '__pycache__'} for part in path.parts):
+                        continue
+                    lines = _safe_read_lines(path)
+                    if not lines:
+                        continue
+                    for idx, line in enumerate(lines, 1):
+                        if THREAT_RE.search(line):
+                            findings.append({
+                                'path': str(path),
+                                'line': idx,
+                                'match': line.strip()[:1000],
+                                'kind': 'persistence',
+                            })
+                            break
+                except (OSError, PermissionError):
+                    continue
+        except (OSError, PermissionError):
+            continue
+    return findings[:500]
+
+
+def _scan_immutable_files():
+    candidates = [
+        '/var/spool/cron/crontabs/root',
+        '/var/spool/cron/root',
+        '/root/.config/.logrotate',
+    ]
+    rows = []
+    lsattr = shutil.which('lsattr')
+    if not lsattr:
+        return rows
+    for path in candidates:
+        if not Path(path).exists():
+            continue
+        rc, out, _ = _run([lsattr, path], timeout=5)
+        if rc == 0 and out:
+            attrs = out.split()[0]
+            if 'i' in attrs:
+                rows.append({'path': path, 'attrs': attrs, 'reason': 'Immutable flag prevents cleanup or edits.'})
+    return rows
+
+
+def _threat_status():
+    processes = _scan_threat_processes()
+    files = _scan_threat_files()
+    immutable = _scan_immutable_files()
+    return {
+        'processes': processes.get('items') or [],
+        'process_error': processes.get('error') or '',
+        'persistence': files,
+        'immutable': immutable,
+        'checked_at': _now(),
+    }
+
+
+def _remove_line_from_file(path, line_no):
+    path = Path(path)
+    lines = _safe_read_lines(path, max_bytes=5 * 1024 * 1024)
+    if not lines:
+        raise ValueError('File is empty or cannot be read safely.')
+    idx = int(line_no) - 1
+    if idx < 0 or idx >= len(lines):
+        raise ValueError('Line number is out of range.')
+    removed = lines.pop(idx)
+    backup = path.with_suffix(path.suffix + f'.ascend-clean-{int(time.time())}.bak')
+    shutil.copy2(path, backup)
+    path.write_text('\n'.join(lines) + ('\n' if lines else ''), encoding='utf-8')
+    return removed, str(backup)
 
 
 def _run_repair_steps(steps, timeout=45):
@@ -439,6 +566,7 @@ def _current_status():
         },
         'state': state,
         'auto_ssh_block': auto_ssh_block,
+        'threats': _threat_status(),
         'scan_paths': _scan_paths(),
         'logs': {
             'scan': str(SCAN_LOG_PATH),
@@ -668,6 +796,110 @@ def api_security_ssh_failures_block_repeat():
             failed.append({'ip': ip, 'count': row.get('count'), 'error': message})
     _audit_log('security.ssh_repeat_blocked', 'ok' if not failed else 'failed', f'Blocked {len(blocked)} repeat SSH attacker(s)', {'blocked': blocked, 'failed': failed, 'threshold': threshold, 'duration': duration})
     return jsonify({'message': f'Blocked {len(blocked)} repeat SSH attacker(s).', 'blocked': blocked, 'failed': failed, 'threshold': threshold})
+
+
+@bp.route('/api/security/threats')
+@login_required
+def api_security_threats():
+    return jsonify(_threat_status())
+
+
+@bp.route('/api/security/threats/kill', methods=['POST'])
+@login_required
+def api_security_threat_kill():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    pid = str(data.get('pid') or '').strip()
+    if not pid.isdigit():
+        return jsonify({'error': 'PID is required.'}), 400
+    threats = _scan_threat_processes().get('items') or []
+    if not any(str(p.get('pid')) == pid for p in threats):
+        return jsonify({'error': 'PID is not currently recognized as a miner/suspicious process.'}), 400
+    rc, out, err = _run(['kill', '-9', pid], timeout=5)
+    if rc != 0:
+        return jsonify({'error': err or out or 'Could not kill process.'}), 500
+    _audit_log('security.threat_process_killed', 'ok', f'Killed suspicious process {pid}', {'pid': pid})
+    return jsonify({'message': f'Process {pid} killed.'})
+
+
+@bp.route('/api/security/threats/file', methods=['DELETE'])
+@login_required
+def api_security_threat_file_delete():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    path = Path(str(data.get('path') or ''))
+    allowed_roots = [Path('/root'), Path('/tmp'), Path('/var/tmp'), Path('/home')]
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return jsonify({'error': 'Invalid path.'}), 400
+    if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+        return jsonify({'error': 'Only suspicious files under /root, /home, /tmp, or /var/tmp can be deleted here.'}), 400
+    if not resolved.exists() or not resolved.is_file():
+        return jsonify({'error': 'File not found.'}), 404
+    if not THREAT_RE.search(str(resolved)) and not any(THREAT_RE.search(line) for line in _safe_read_lines(resolved)):
+        return jsonify({'error': 'File does not match current threat indicators.'}), 400
+    try:
+        resolved.unlink()
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+    _audit_log('security.threat_file_deleted', 'ok', f'Deleted suspicious file {resolved}', {'path': str(resolved)})
+    return jsonify({'message': f'Deleted {resolved}.'})
+
+
+@bp.route('/api/security/threats/persistence-line', methods=['DELETE'])
+@login_required
+def api_security_threat_persistence_line_delete():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    path = Path(str(data.get('path') or ''))
+    line_no = data.get('line')
+    allowed_roots = [Path('/etc/cron.d'), Path('/var/spool/cron'), Path('/root'), Path('/home'), Path('/etc/systemd'), Path('/lib/systemd')]
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return jsonify({'error': 'Invalid path.'}), 400
+    if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
+        return jsonify({'error': 'This path is not in an allowed persistence location.'}), 400
+    lines = _safe_read_lines(resolved, max_bytes=5 * 1024 * 1024)
+    try:
+        idx = int(line_no) - 1
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Line number is required.'}), 400
+    if idx < 0 or idx >= len(lines) or not THREAT_RE.search(lines[idx]):
+        return jsonify({'error': 'Selected line no longer matches threat indicators.'}), 400
+    try:
+        removed, backup = _remove_line_from_file(resolved, int(line_no))
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+    _audit_log('security.threat_persistence_removed', 'ok', f'Removed suspicious persistence from {resolved}:{line_no}', {'path': str(resolved), 'line': line_no, 'removed': removed, 'backup': backup})
+    return jsonify({'message': 'Persistence line removed.', 'backup': backup, 'removed': removed})
+
+
+@bp.route('/api/security/threats/immutable', methods=['DELETE'])
+@login_required
+def api_security_threat_immutable_remove():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    path = str(data.get('path') or '').strip()
+    if path not in {'/var/spool/cron/crontabs/root', '/var/spool/cron/root', '/root/.config/.logrotate'}:
+        return jsonify({'error': 'This immutable path is not allowed for automatic repair.'}), 400
+    chattr = shutil.which('chattr')
+    if not chattr:
+        return jsonify({'error': 'chattr is not installed.'}), 400
+    rc, out, err = _run([chattr, '-i', path], timeout=8)
+    if rc != 0:
+        return jsonify({'error': err or out or 'Could not remove immutable flag.'}), 500
+    _audit_log('security.immutable_removed', 'ok', f'Removed immutable flag from {path}', {'path': path})
+    return jsonify({'message': f'Immutable flag removed from {path}.'})
 
 
 @bp.route('/api/security/repair', methods=['POST'])

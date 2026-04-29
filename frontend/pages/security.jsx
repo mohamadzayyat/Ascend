@@ -12,12 +12,14 @@ import {
   ShieldCheck,
   Trash2,
   Wrench,
+  Zap,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
 const TABS = [
   ['overview', 'Overview'],
   ['malware', 'Malware'],
+  ['threats', 'Threats'],
   ['ip', 'IP Protection'],
   ['fixes', 'Fixes'],
   ['logs', 'Logs'],
@@ -185,6 +187,7 @@ export default function SecurityPage() {
   const [sshFailures, setSshFailures] = useState({ summary: [], events: [], total: 0, errors: [] })
   const [blocksPage, setBlocksPage] = useState(0)
   const [sshPage, setSshPage] = useState(0)
+  const [threats, setThreats] = useState({ processes: [], persistence: [], immutable: [] })
 
   const state = status?.state || {}
   const tools = status?.tools || {}
@@ -216,6 +219,7 @@ export default function SecurityPage() {
         apiClient.getSecurityLogs(logKind),
       ])
       setStatus(statusData)
+      setThreats(statusData.threats || { processes: [], persistence: [], immutable: [] })
       setLog(logData.log || '')
       setError('')
       setSelectedPaths((current) => {
@@ -246,8 +250,18 @@ export default function SecurityPage() {
     }
   }
 
+  const loadThreats = async () => {
+    try {
+      const { data } = await apiClient.getSecurityThreats()
+      setThreats(data || { processes: [], persistence: [], immutable: [] })
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load threat persistence scan')
+    }
+  }
+
   useEffect(() => { load() }, [logKind])
   useEffect(() => { if (activeTab === 'ip') loadSshFailures() }, [activeTab])
+  useEffect(() => { if (activeTab === 'threats') loadThreats() }, [activeTab])
   useEffect(() => {
     if (!scanRunning && !installRunning && !crowdsecInstallRunning) return undefined
     const timer = setInterval(() => load({ quiet: true }), 2500)
@@ -266,8 +280,11 @@ export default function SecurityPage() {
     if (crowdsecInstalled && !bouncerOk) rows.push({ severity: 'critical', title: 'Firewall bouncer is not enforcing blocks', message: 'CrowdSec may detect attackers, but IPs will not be blocked until the bouncer is running.', fix: 'crowdsec_bouncer_restart', command: 'systemctl restart crowdsec-firewall-bouncer' })
     if (tools.crowdsec_decisions?.error && crowdsecInstalled) rows.push({ severity: 'warning', title: 'Could not read CrowdSec decisions', message: tools.crowdsec_decisions.error, fix: 'crowdsec_restart' })
     if (install.status === 'failed' || crowdsecInstall.status === 'failed') rows.push({ severity: 'warning', title: 'Previous install failed', message: 'A prior security install/repair failed. Check Logs, then clear the failed state when resolved.', fix: 'clear_failed_state' })
+    if ((threats.processes || []).length) rows.push({ severity: 'critical', title: 'Active miner-like process detected', message: `${threats.processes.length} process(es) match miner or stratum indicators. Open Threats and kill them.` })
+    if ((threats.persistence || []).length) rows.push({ severity: 'critical', title: 'Suspicious persistence detected', message: `${threats.persistence.length} cron/system/profile file(s) contain miner indicators. Open Threats and remove them.` })
+    if ((threats.immutable || []).length) rows.push({ severity: 'warning', title: 'Immutable persistence protection found', message: `${threats.immutable.length} suspicious file(s) have immutable flags that can block cleanup.` })
     return rows
-  }, [clamInstalled, freshclamInstalled, definitionsAge, tools, findings.length, crowdsecInstalled, bouncerOk, install.status, crowdsecInstall.status])
+  }, [clamInstalled, freshclamInstalled, definitionsAge, tools, findings.length, crowdsecInstalled, bouncerOk, install.status, crowdsecInstall.status, threats])
 
   const health = useMemo(() => {
     const critical = issues.filter((i) => i.severity === 'critical').length
@@ -362,6 +379,58 @@ export default function SecurityPage() {
       await Promise.all([load({ quiet: true }), loadSshFailures()])
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to block repeat SSH attackers')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const killThreatProcess = async (pid) => {
+    if (!window.confirm(`Kill suspicious process ${pid}?`)) return
+    setBusy(`kill-${pid}`)
+    try {
+      await apiClient.killSecurityThreatProcess(pid)
+      await Promise.all([loadThreats(), load({ quiet: true })])
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to kill process')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const removeThreatLine = async (item) => {
+    if (!window.confirm(`Remove suspicious line from ${item.path}:${item.line}? A backup will be created first.`)) return
+    setBusy(`line-${item.path}-${item.line}`)
+    try {
+      await apiClient.deleteSecurityThreatPersistenceLine(item.path, item.line)
+      await Promise.all([loadThreats(), load({ quiet: true })])
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to remove persistence line')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const removeImmutable = async (path) => {
+    if (!window.confirm(`Remove immutable flag from ${path}?`)) return
+    setBusy(`immutable-${path}`)
+    try {
+      await apiClient.removeSecurityImmutableFlag(path)
+      await Promise.all([loadThreats(), load({ quiet: true })])
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to remove immutable flag')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const deleteThreatFile = async (path) => {
+    if (!window.confirm(`Delete suspicious file ${path}?`)) return
+    setBusy(`file-${path}`)
+    try {
+      await apiClient.deleteSecurityThreatFile(path)
+      await Promise.all([loadThreats(), load({ quiet: true })])
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to delete suspicious file')
     } finally {
       setBusy('')
     }
@@ -516,6 +585,82 @@ export default function SecurityPage() {
                   {quarantineItems.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No files in quarantine.</div> : <div className="max-h-80 overflow-auto divide-y divide-gray-700">{quarantineItems.map((item, idx) => <div key={`${item.quarantine_path}-${idx}`} className="p-4"><div className="text-yellow-200 text-sm">{item.signature}</div><div className="text-gray-400 text-xs font-mono break-all mt-1">{item.original_path}</div><div className="text-gray-500 text-xs font-mono break-all mt-1">{item.quarantine_path}</div></div>)}</div>}
                 </section>
               </div>
+            </div>
+          )}
+
+          {activeTab === 'threats' && (
+            <div className="space-y-6">
+              <section className="rounded-lg border border-red-500/30 bg-red-500/10 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Zap className="w-5 h-5 text-red-300" /> Persistence & Miner Detection</h2>
+                    <p className="text-red-100/80 text-sm mt-1">Detects active stratum/miner processes, malicious cron/systemd/profile entries, and immutable cron protection.</p>
+                  </div>
+                  <button onClick={loadThreats} className="px-3 py-2 rounded border border-red-300/40 text-red-100 text-sm inline-flex items-center gap-2 hover:bg-red-500/10">
+                    <RefreshCw className="w-4 h-4" /> Rescan threats
+                  </button>
+                </div>
+              </section>
+
+              <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-700">
+                  <h2 className="text-white font-semibold">Active Suspicious Processes</h2>
+                  <p className="text-gray-500 text-sm mt-1">Processes matching indicators such as xmrig, stratum, c3pool, or fake /root/.config/.logrotate.</p>
+                </div>
+                {asArray(threats.processes).length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active miner-like processes detected.</div> : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left min-w-[900px]">
+                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">PID</th><th className="px-4 py-3">User</th><th className="px-4 py-3">CPU</th><th className="px-4 py-3">Command</th><th className="px-4 py-3"></th></tr></thead>
+                      <tbody className="divide-y divide-gray-700/70">{asArray(threats.processes).map((p) => <tr key={p.pid}><td className="px-4 py-3 font-mono text-white">{p.pid}</td><td className="px-4 py-3 text-gray-300">{p.user}</td><td className="px-4 py-3"><Badge value={`${p.cpu}%`} tone={Number(p.cpu) > 20 ? 'red' : 'yellow'} /></td><td className="px-4 py-3 text-gray-400 font-mono text-xs break-all">{p.command}</td><td className="px-4 py-3 text-right"><button onClick={() => killThreatProcess(p.pid)} disabled={busy === `kill-${p.pid}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50">Kill</button></td></tr>)}</tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-700">
+                  <h2 className="text-white font-semibold">Suspicious Persistence</h2>
+                  <p className="text-gray-500 text-sm mt-1">Cron, systemd, root/home profile, tmp, and web-root files containing miner downloaders or stratum pool strings.</p>
+                </div>
+                {asArray(threats.persistence).length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No suspicious persistence lines detected.</div> : (
+                  <div className="divide-y divide-gray-700/70">
+                    {asArray(threats.persistence).map((item, idx) => (
+                      <div key={`${item.path}-${item.line}-${idx}`} className="p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-white font-mono text-xs break-all">{item.path}:{item.line}</div>
+                            <div className="mt-2 rounded bg-primary/60 border border-gray-700 p-2 text-red-200 text-xs font-mono break-all">{item.match}</div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button onClick={() => removeThreatLine(item)} disabled={busy === `line-${item.path}-${item.line}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">Remove line</button>
+                            {String(item.path || '').includes('/root/.config/.logrotate') && <button onClick={() => deleteThreatFile(item.path)} disabled={busy === `file-${item.path}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">Delete file</button>}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
+                <div className="px-5 py-4 border-b border-gray-700">
+                  <h2 className="text-white font-semibold">Immutable Flags</h2>
+                  <p className="text-gray-500 text-sm mt-1">Attackers often set chattr +i on root crontabs or miner files to prevent cleanup.</p>
+                </div>
+                {asArray(threats.immutable).length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No suspicious immutable flags detected.</div> : (
+                  <div className="divide-y divide-gray-700/70">
+                    {asArray(threats.immutable).map((item) => (
+                      <div key={item.path} className="p-4 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-white font-mono text-sm break-all">{item.path}</div>
+                          <div className="text-yellow-200 text-xs mt-1">attrs: {item.attrs} - {item.reason}</div>
+                        </div>
+                        <button onClick={() => removeImmutable(item.path)} disabled={busy === `immutable-${item.path}`} className="px-2 py-1 rounded border border-yellow-500/40 text-yellow-200 hover:bg-yellow-500/10 disabled:opacity-50 text-sm">Remove immutable</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
             </div>
           )}
 
