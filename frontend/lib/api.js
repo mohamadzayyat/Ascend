@@ -226,7 +226,7 @@ export const apiClient = {
   getDbRestoreJob: (jobId) => api.get(`/api/databases/restore-jobs/${jobId}`),
   downloadDbBackupUrl: (backupId) =>
     `${API_URL}/api/databases/backups/${backupId}/download`,
-  deleteDbBackup: (backupId, confirmText) => api.delete(`/api/databases/backups/${backupId}`, { data: { confirm_text: confirmText } }),
+  deleteDbBackup: (backupId) => api.delete(`/api/databases/backups/${backupId}`),
   getDbSchedule: (id) => api.get(`/api/databases/connections/${id}/schedule`),
   upsertDbSchedule: (id, data) =>
     api.put(`/api/databases/connections/${id}/schedule`, data),

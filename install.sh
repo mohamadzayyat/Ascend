@@ -161,14 +161,11 @@ check_ports() {
     [[ $conflict -eq 0 ]] || die "Port conflict detected. Free the port(s) above or edit PANEL_PORT/BACKEND_PORT/FRONTEND_PORT in install.sh."
 }
 
-# Detect CPU count for gunicorn worker calculation: (2 * CPU) + 1, capped at 9.
+# Ascend has in-process background tasks (backup scheduler, update state, etc.).
+# Keep one Gunicorn worker and use threads for concurrent requests so those
+# background tasks are not duplicated across worker processes.
 detect_worker_count() {
-    local cpus
-    cpus=$(nproc 2>/dev/null || echo 1)
-    local workers=$(( cpus * 2 + 1 ))
-    [[ $workers -gt 9 ]] && workers=9
-    [[ $workers -lt 2 ]] && workers=2
-    echo "$workers"
+    echo "${ASCEND_GUNICORN_WORKERS:-1}"
 }
 
 # ── System packages ─────────────────────────────────────────────
@@ -849,8 +846,22 @@ start_services() {
 # ── Firewall ─────────────────────────────────────────────────────
 
 open_firewall() {
-    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    local configured=0
+
+    if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
         section "Configuring firewall"
+        # Open the public panel port immediately and persist it across reboots.
+        firewall-cmd --add-port="$PANEL_PORT/tcp" >/dev/null || true
+        firewall-cmd --permanent --add-port="$PANEL_PORT/tcp" >/dev/null || true
+        firewall-cmd --reload >/dev/null || true
+        ok "firewalld allows port $PANEL_PORT/tcp"
+        configured=1
+    fi
+
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        if [[ "$configured" -eq 0 ]]; then
+            section "Configuring firewall"
+        fi
         ufw allow "$PANEL_PORT/tcp" comment "Ascend Panel" >/dev/null
         # Block direct external access to internal ports — all traffic must go through Nginx
         ufw deny "$BACKEND_PORT/tcp"  comment "Ascend internal" >/dev/null

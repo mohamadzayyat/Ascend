@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import Head from 'next/head'
 import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
@@ -7,7 +7,104 @@ import {
   UploadCloud, RotateCcw,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
-import { typedConfirm } from '@/lib/confirm'
+
+const DialogContext = createContext(null)
+
+function useDialog() {
+  return useContext(DialogContext)
+}
+
+function DatabaseDialogProvider({ children }) {
+  const [dialog, setDialog] = useState(null)
+  const [typedValue, setTypedValue] = useState('')
+  const resolverRef = useRef(null)
+
+  const openDialog = useCallback((next) => new Promise((resolve) => {
+    resolverRef.current = resolve
+    setTypedValue('')
+    setDialog(next)
+  }), [])
+
+  const closeDialog = useCallback((result) => {
+    resolverRef.current?.(result)
+    resolverRef.current = null
+    setDialog(null)
+    setTypedValue('')
+  }, [])
+
+  const value = useMemo(() => ({
+    alert: ({ title = 'Notice', message, tone = 'info' }) => openDialog({ mode: 'alert', title, message, tone }),
+    confirm: ({ title = 'Confirm action', message, confirmLabel = 'Confirm', tone = 'danger' }) =>
+      openDialog({ mode: 'confirm', title, message, confirmLabel, tone }),
+    typedConfirm: ({ title = 'Confirm action', message, expected, confirmLabel = 'Confirm', tone = 'danger' }) =>
+      openDialog({ mode: 'typed', title, message, expected, confirmLabel, tone }),
+  }), [openDialog])
+
+  const toneClasses = dialog?.tone === 'danger'
+    ? 'border-red-500/40 bg-red-500/10 text-red-200'
+    : dialog?.tone === 'warning'
+      ? 'border-amber-500/40 bg-amber-500/10 text-amber-100'
+      : 'border-accent/40 bg-accent/10 text-blue-100'
+  const confirmClasses = dialog?.tone === 'danger'
+    ? 'bg-red-500 hover:bg-red-400'
+    : dialog?.tone === 'warning'
+      ? 'bg-amber-500 hover:bg-amber-400 text-gray-950'
+      : 'bg-accent hover:bg-accent/80'
+  const typedOk = dialog?.mode !== 'typed' || typedValue === dialog.expected
+
+  return (
+    <DialogContext.Provider value={value}>
+      {children}
+      {dialog && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-lg border border-gray-700 bg-secondary shadow-2xl">
+            <div className={`m-4 rounded border p-3 ${toneClasses}`}>
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <h2 className="text-white font-semibold">{dialog.title}</h2>
+                  {dialog.message && <p className="mt-1 text-sm opacity-90 whitespace-pre-wrap">{dialog.message}</p>}
+                </div>
+              </div>
+            </div>
+            {dialog.mode === 'typed' && (
+              <div className="px-4 pb-2">
+                <label className="block text-sm text-gray-300 mb-2">
+                  Type <span className="font-mono text-white">{dialog.expected}</span> to continue
+                </label>
+                <input
+                  autoFocus
+                  value={typedValue}
+                  onChange={(e) => setTypedValue(e.target.value)}
+                  className="w-full bg-primary border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+            )}
+            <div className="flex items-center justify-end gap-2 border-t border-gray-700 px-4 py-3">
+              {dialog.mode !== 'alert' && (
+                <button
+                  type="button"
+                  onClick={() => closeDialog(false)}
+                  className="px-3 py-2 rounded border border-gray-600 text-gray-200 hover:bg-primary text-sm"
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={!typedOk}
+                onClick={() => closeDialog(dialog.mode === 'alert' ? undefined : true)}
+                className={`px-3 py-2 rounded text-white text-sm font-semibold disabled:opacity-50 ${dialog.mode === 'alert' ? 'bg-accent hover:bg-accent/80' : confirmClasses}`}
+              >
+                {dialog.mode === 'alert' ? 'OK' : dialog.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </DialogContext.Provider>
+  )
+}
 
 const TABS = [
   { id: 'browse',   label: 'Browse',   icon: TableIcon },
@@ -159,7 +256,7 @@ export default function DatabasesPage() {
   }
 
   return (
-    <>
+    <DatabaseDialogProvider>
       <Head><title>Databases · Ascend</title></Head>
       <div className="px-3 py-2 h-full flex flex-col min-h-0">
         <div className="flex items-center justify-between gap-3 mb-2 shrink-0 border-b border-gray-800/80 pb-2">
@@ -244,7 +341,7 @@ export default function DatabasesPage() {
           </div>
         )}
       </div>
-    </>
+    </DatabaseDialogProvider>
   )
 }
 
@@ -269,6 +366,7 @@ function SchemaNavigator({
   onDeleted,
   onRefresh,
 }) {
+  const dialog = useDialog()
   const [busyId, setBusyId] = useState(null)
   const [testResults, setTestResults] = useState({})
   const [expandedConn, setExpandedConn] = useState(() => new Set())
@@ -356,7 +454,13 @@ function SchemaNavigator({
   }
 
   const onDelete = async (c) => {
-    if (!window.confirm(`Delete connection "${c.name}"? Backups on disk will also be removed.`)) return
+    const ok = await dialog.confirm({
+      title: 'Delete database connection?',
+      message: `Delete "${c.name}"?\n\nBackups on disk for this connection will also be removed.`,
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusyId(c.id)
     try {
       await apiClient.deleteDbConnection(c.id)
@@ -367,7 +471,7 @@ function SchemaNavigator({
         return next
       })
     } catch (err) {
-      alert(err.response?.data?.error || 'Delete failed')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Delete failed', tone: 'danger' })
     } finally {
       setBusyId(null)
     }
@@ -809,6 +913,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
 // ── Browse: pick a DB → pick a table → paginated rows ───────────
 
 function TableViewerEnhanced({ connectionId, database, table, showSearch = false }) {
+  const dialog = useDialog()
   const [view, setView] = useState('data')
   const [data, setData] = useState(null)
   const [design, setDesign] = useState(null)
@@ -910,7 +1015,13 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   const deleteRow = async (rowIndex) => {
     const key = data.row_keys?.[rowIndex]
     if (!key) return setError('This table has no primary key, so Ascend cannot safely delete this row.')
-    if (!typedConfirm(`Delete this row from ${table}?`, JSON.stringify(key))) return
+    const ok = await dialog.confirm({
+      title: 'Delete row?',
+      message: `Delete this row from ${table}?\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete row',
+      tone: 'danger',
+    })
+    if (!ok) return
     await apiClient.deleteTableRow(connectionId, database, table, key)
     setMessage('Row deleted.')
     await loadRows()
@@ -1433,6 +1544,7 @@ function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
 // ── Backups list + run-now ──────────────────────────────────────
 
 function ManageDatabasesTab({ connection }) {
+  const dialog = useDialog()
   const [databases, setDatabases] = useState([])
   const [loading, setLoading] = useState(true)
   const [createForm, setCreateForm] = useState({ name: '', charset: 'utf8mb4', collation: 'utf8mb4_general_ci' })
@@ -1563,7 +1675,15 @@ function ManageDatabasesTab({ connection }) {
       setImportError('Choose or enter a target database.')
       return
     }
-    if (importForm.mode === 'existing' && !window.confirm(`Import ${importFile.name} into existing database "${target}"?`)) return
+    if (importForm.mode === 'existing') {
+      const ok = await dialog.confirm({
+        title: 'Import into existing database?',
+        message: `Import ${importFile.name} into "${target}"?\n\nExisting objects may be changed by the SQL file.`,
+        confirmLabel: 'Import',
+        tone: 'warning',
+      })
+      if (!ok) return
+    }
     setImportBusy(true)
     setImportError('')
     setImportResult(null)
@@ -1632,7 +1752,14 @@ function ManageDatabasesTab({ connection }) {
 
   const deleteMysqlUser = async (row) => {
     const label = `${row.username}@${row.host}`
-    if (!typedConfirm(`Delete MySQL user ${label}?`, label)) return
+    const ok = await dialog.typedConfirm({
+      title: 'Delete MySQL user?',
+      message: `Delete MySQL user ${label}?`,
+      expected: label,
+      confirmLabel: 'Delete user',
+      tone: 'danger',
+    })
+    if (!ok) return
     setUserBusy(true)
     setUsersError('')
     try {
@@ -1892,6 +2019,7 @@ function ManageDatabasesTab({ connection }) {
 }
 
 function BackupsTab({ connection }) {
+  const dialog = useDialog()
   const [backups, setBackups] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -1923,19 +2051,25 @@ function BackupsTab({ connection }) {
       await apiClient.runDbBackup(connection.id)
       setTimeout(refresh, 800)
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to start backup')
+      await dialog.alert({ title: 'Backup failed to start', message: err.response?.data?.error || 'Failed to start backup', tone: 'danger' })
     } finally {
       setRunning(false)
     }
   }
 
   const onDelete = async (b) => {
-    if (!typedConfirm(`Delete backup ${b.filename}?`, b.filename)) return
+    const ok = await dialog.confirm({
+      title: 'Delete backup?',
+      message: `Delete ${b.filename}?\n\nThis cannot be undone.`,
+      confirmLabel: 'Delete backup',
+      tone: 'danger',
+    })
+    if (!ok) return
     try {
-      await apiClient.deleteDbBackup(b.id, b.filename)
+      await apiClient.deleteDbBackup(b.id)
       refresh()
     } catch (err) {
-      alert(err.response?.data?.error || 'Delete failed')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Delete failed', tone: 'danger' })
     }
   }
 
@@ -2135,6 +2269,7 @@ function BackupUploadSettings() {
 }
 
 function RestoreTab({ connection }) {
+  const dialog = useDialog()
   const [backups, setBackups] = useState([])
   const [databases, setDatabases] = useState([])
   const [form, setForm] = useState({ backup_id: '', target_database: '', collation: 'utf8mb4_general_ci', replace_existing: true })
@@ -2185,8 +2320,23 @@ function RestoreTab({ connection }) {
     const msg = targetExists
       ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.`
       : `Create database "${target}" and restore this backup into it?`
-    if (!window.confirm(msg)) return
-    if (form.replace_existing && !typedConfirm(`Restore will replace "${target}" after taking a safety backup.`, target)) return
+    const ok = await dialog.confirm({
+      title: existing ? 'Restore into existing database?' : 'Create and restore database?',
+      message: msg,
+      confirmLabel: 'Start restore',
+      tone: existing ? 'warning' : 'info',
+    })
+    if (!ok) return
+    if (form.replace_existing) {
+      const typedOk = await dialog.typedConfirm({
+        title: 'Confirm replacement',
+        message: `Restore will replace "${target}" after taking a safety backup.`,
+        expected: target,
+        confirmLabel: 'Replace database',
+        tone: 'danger',
+      })
+      if (!typedOk) return
+    }
     setStarting(true)
     setError('')
     try {
@@ -2255,6 +2405,7 @@ function RestoreTab({ connection }) {
 }
 
 function ScheduleTab({ connection }) {
+  const dialog = useDialog()
   const [rows, setRows] = useState([])
   const [dbNames, setDbNames] = useState([])
   const [serverTimezone, setServerTimezone] = useState('UTC')
@@ -2314,7 +2465,7 @@ function ScheduleTab({ connection }) {
   const saveRow = async (r) => {
     const td = (r.target_database || '').trim()
     if (td && !databasePickList.includes(td)) {
-      alert('Choose a database from the dropdown (or All databases). That name is not in the current list — try Refresh DB list.')
+      await dialog.alert({ title: 'Choose a valid database', message: 'Choose a database from the dropdown, or All databases. That name is not in the current list. Try Refresh DB list.', tone: 'warning' })
       return
     }
     setBusyId(r.id)
@@ -2331,7 +2482,7 @@ function ScheduleTab({ connection }) {
       setEditingId(null)
       await load()
     } catch (err) {
-      alert(err.response?.data?.error || 'Save failed')
+      await dialog.alert({ title: 'Save failed', message: err.response?.data?.error || 'Save failed', tone: 'danger' })
     } finally {
       setBusyId(null)
     }
@@ -2350,21 +2501,27 @@ function ScheduleTab({ connection }) {
       })
       await load()
     } catch (err) {
-      alert(err.response?.data?.error || 'Create failed')
+      await dialog.alert({ title: 'Create failed', message: err.response?.data?.error || 'Create failed', tone: 'danger' })
     } finally {
       setBusyId(null)
     }
   }
 
   const deleteRow = async (scheduleId) => {
-    if (!window.confirm('Delete this backup schedule?')) return
+    const ok = await dialog.confirm({
+      title: 'Delete backup schedule?',
+      message: 'Delete this backup schedule? Existing backup files will stay available.',
+      confirmLabel: 'Delete schedule',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusyId(scheduleId)
     try {
       await apiClient.deleteDbBackupSchedule(connection.id, scheduleId)
       setEditingId((eid) => (eid === scheduleId ? null : eid))
       await load()
     } catch (err) {
-      alert(err.response?.data?.error || 'Delete failed')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Delete failed', tone: 'danger' })
     } finally {
       setBusyId(null)
     }

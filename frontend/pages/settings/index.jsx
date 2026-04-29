@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { Archive, Github, Mail, Shield, ShieldCheck, Users } from 'lucide-react'
+import { Archive, Github, Mail, Palette, Shield, ShieldCheck, Users } from 'lucide-react'
 import { useAuth } from '@/lib/hooks/useAuth'
 
 export default function Settings() {
@@ -73,6 +73,20 @@ export default function Settings() {
           </div>
           <p className="text-gray-400 text-sm">
             Enable two-factor authentication for safer admin login.
+          </p>
+        </Link>
+        <Link
+          href="/settings/display"
+          className="bg-secondary rounded-lg border border-gray-700 hover:border-accent p-6 transition group"
+        >
+          <div className="flex items-center gap-3 mb-2">
+            <Palette className="w-6 h-6 text-accent" />
+            <h3 className="text-white font-bold group-hover:text-accent transition">
+              Display Settings
+            </h3>
+          </div>
+          <p className="text-gray-400 text-sm">
+            Choose a panel theme that keeps dashboards, forms, tables, and tools readable.
           </p>
         </Link>
         {user?.is_admin && (

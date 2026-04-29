@@ -1343,6 +1343,46 @@ def _connection_backup_dir(conn):
     return d
 
 
+def _backup_lock_path(conn_id, schedule_id=None, triggered_by='manual'):
+    locks = DB_BACKUPS_ROOT / '.locks'
+    locks.mkdir(parents=True, exist_ok=True)
+    key = f'schedule-{int(schedule_id)}' if schedule_id is not None else f'{triggered_by or "manual"}-conn-{int(conn_id)}'
+    return locks / re.sub(r'[^A-Za-z0-9_.-]', '_', key)
+
+
+def _acquire_backup_lock(conn_id, schedule_id=None, triggered_by='manual', stale_after=6 * 60 * 60):
+    path = _backup_lock_path(conn_id, schedule_id, triggered_by)
+    try:
+        path.mkdir()
+        (path / 'pid').write_text(str(os.getpid()), encoding='utf-8')
+        return path
+    except FileExistsError:
+        try:
+            if time.time() - path.stat().st_mtime > stale_after:
+                shutil.rmtree(path, ignore_errors=True)
+                path.mkdir()
+                (path / 'pid').write_text(str(os.getpid()), encoding='utf-8')
+                return path
+        except OSError:
+            pass
+        return None
+
+
+def _release_backup_lock(path):
+    if path:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _unique_backup_path(backup_dir, base_name, timestamp):
+    stem = f'{base_name}-{timestamp}'
+    candidate = backup_dir / f'{stem}.sql'
+    n = 2
+    while candidate.exists():
+        candidate = backup_dir / f'{stem}-{n}.sql'
+        n += 1
+    return candidate
+
+
 def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_database=None):
     """Synchronously run mysqldump for a connection. Records a BackupArchive
     row in either success or failed state. Used by both the manual endpoint
@@ -1351,10 +1391,14 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         conn = db.session.get(DatabaseConnection, conn_id)
         if conn is None:
             return None
+        lock = _acquire_backup_lock(conn.id, schedule_id, triggered_by)
+        if lock is None:
+            print(f'[backup] skipped duplicate run for connection={conn.id} schedule={schedule_id}', file=sys.stderr)
+            return None
         backup_dir = _connection_backup_dir(conn)
         ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-        filename = f'{_safe_dir_name(conn.name)}-{ts}.sql'
-        filepath = backup_dir / filename
+        filepath = _unique_backup_path(backup_dir, _safe_dir_name(conn.name), ts)
+        filename = filepath.name
 
         archive = BackupArchive(
             connection_id=conn.id,
@@ -1369,7 +1413,16 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
 
         # Build mysqldump argv. --all-databases when no per-schedule filter,
         # otherwise dump only the listed databases.
-        env, base_args = _mysqldump_env(conn)
+        try:
+            env, base_args = _mysqldump_env(conn)
+        except Exception as e:
+            archive.status = 'failed'
+            archive.error_message = str(e)[:1000]
+            archive.completed_at = datetime.now(timezone.utc)
+            archive.duration_seconds = 0
+            db.session.commit()
+            _release_backup_lock(lock)
+            return archive.id
         # --no-defaults must be first: skip ~/.my.cnf / etc. so a [client] or [mysqldump]
         # line like set-gtid-purged=OFF does not break older MariaDB mysqldump builds.
         argv = ['mysqldump', '--no-defaults', *base_args,
@@ -1438,6 +1491,8 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         archive.completed_at = datetime.now(timezone.utc)
         archive.duration_seconds = int(time.time() - started)
         db.session.commit()
+        _release_backup_lock(lock)
+        lock = None
 
         cname = conn.name
         st = archive.status
@@ -1472,7 +1527,9 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
                 sched.last_run_status = archive.status
                 sched.last_run_error = archive.error_message
                 db.session.commit()
-        return archive.id
+        archive_id = archive.id
+        _release_backup_lock(lock)
+        return archive_id
 
 
 
@@ -1556,9 +1613,6 @@ def api_db_backup_delete(backup_id):
     conn = db.session.get(DatabaseConnection, a.connection_id)
     if conn is None or conn.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
-    data = request.get_json(silent=True) or {}
-    if str(data.get('confirm_text') or '').strip() != a.filename:
-        return jsonify({'error': 'Type the backup filename exactly to confirm.', 'confirm_required': True, 'confirm_text': a.filename}), 400
     try:
         p = Path(a.filepath)
         if p.exists():
