@@ -108,6 +108,11 @@ def _safe_read_lines(path, max_bytes=1024 * 1024):
         return []
 
 
+def _is_cleanup_backup(path):
+    name = Path(path).name
+    return '.ascend-clean-' in name and name.endswith('.bak')
+
+
 def _scan_threat_processes():
     rc, out, err = _run(['ps', 'auxww'], timeout=8)
     rows = []
@@ -153,6 +158,7 @@ def _scan_threat_files():
                                 'line': idx,
                                 'match': line.strip()[:1000],
                                 'kind': 'persistence',
+                                'is_cleanup_backup': _is_cleanup_backup(path),
                             })
                             break
                 except (OSError, PermissionError):
@@ -983,15 +989,31 @@ def api_security_threat_file_delete():
         return gate
     data = request.get_json(silent=True) or {}
     path = Path(str(data.get('path') or ''))
-    allowed_roots = [Path('/root'), Path('/tmp'), Path('/var/tmp'), Path('/home')]
+    allowed_roots = [
+        Path('/root'),
+        Path('/tmp'),
+        Path('/var/tmp'),
+        Path('/home'),
+        Path('/etc/cron.d'),
+        Path('/etc/cron.daily'),
+        Path('/etc/cron.hourly'),
+        Path('/etc/cron.weekly'),
+        Path('/etc/cron.monthly'),
+        Path('/var/spool/cron'),
+        Path('/etc/systemd'),
+        Path('/lib/systemd'),
+    ]
     try:
         resolved = path.resolve()
     except Exception:
         return jsonify({'error': 'Invalid path.'}), 400
     if not any(str(resolved).startswith(str(root)) for root in allowed_roots):
-        return jsonify({'error': 'Only suspicious files under /root, /home, /tmp, or /var/tmp can be deleted here.'}), 400
+        return jsonify({'error': 'This path is not in an allowed threat cleanup location.'}), 400
     if not resolved.exists() or not resolved.is_file():
         return jsonify({'error': 'File not found.'}), 404
+    protected_roots = [Path('/etc'), Path('/lib/systemd'), Path('/var/spool/cron')]
+    if any(str(resolved).startswith(str(root)) for root in protected_roots) and not _is_cleanup_backup(resolved):
+        return jsonify({'error': 'System cron/systemd files can only be deleted here when they are Ascend cleanup backups. Remove malicious lines from live files instead.'}), 400
     if not THREAT_RE.search(str(resolved)) and not any(THREAT_RE.search(line) for line in _safe_read_lines(resolved)):
         return jsonify({'error': 'File does not match current threat indicators.'}), 400
     try:

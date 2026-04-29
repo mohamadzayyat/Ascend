@@ -633,8 +633,8 @@ export default function SecurityPage() {
                             <div className="mt-2 rounded bg-primary/60 border border-gray-700 p-2 text-red-200 text-xs font-mono break-all">{item.match}</div>
                           </div>
                           <div className="flex flex-wrap gap-2">
-                            <button onClick={() => removeThreatLine(item)} disabled={busy === `line-${item.path}-${item.line}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">Remove line</button>
-                            {String(item.path || '').includes('/root/.config/.logrotate') && <button onClick={() => deleteThreatFile(item.path)} disabled={busy === `file-${item.path}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">Delete file</button>}
+                            {!item.is_cleanup_backup && <button onClick={() => removeThreatLine(item)} disabled={busy === `line-${item.path}-${item.line}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">Remove line</button>}
+                            {(item.is_cleanup_backup || String(item.path || '').includes('/root/.config/.logrotate')) && <button onClick={() => deleteThreatFile(item.path)} disabled={busy === `file-${item.path}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">{item.is_cleanup_backup ? 'Delete backup' : 'Delete file'}</button>}
                           </div>
                         </div>
                       </div>
