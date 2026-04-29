@@ -5,6 +5,8 @@ import { apiClient } from '@/lib/api'
 import DomainDnsCheck from '@/components/DomainDnsCheck'
 import { useDialog } from '@/lib/dialog'
 
+const PHP_PUBLIC_DIR_PRESETS = ['public', 'web', 'frontend/web', 'backend/web']
+
 export default function AppSettings({ app, onUpdate }) {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
@@ -28,7 +30,7 @@ export default function AppSettings({ app, onUpdate }) {
     name: app?.name || '',
     app_type: app?.app_type || 'website',
     github_url: app?.github_url || '',
-    github_branch: app?.github_branch || 'main',
+    github_branch: app?.github_branch || app?.project?.github_branch || '',
     auto_deploy: app?.auto_deploy === true,
     enable_webhook: app?.enable_webhook !== false,
     subdirectory: app?.subdirectory || '',
@@ -38,7 +40,7 @@ export default function AppSettings({ app, onUpdate }) {
     start_command: app?.start_command || '',
     pm2_name: app?.pm2_name || '',
     php_version: app?.php_version || '',
-    php_public_path: app?.php_public_path || 'public',
+    php_public_path: app?.php_public_path || '',
     composer_install: app?.composer_install !== false,
     composer_command: app?.composer_command || 'composer install --no-dev --optimize-autoloader',
     static_output_path: app?.static_output_path || 'dist',
@@ -61,7 +63,7 @@ export default function AppSettings({ app, onUpdate }) {
         next.start_command = ''
         next.pm2_name = ''
         next.app_port = ''
-        next.php_public_path = next.php_public_path || 'public'
+        next.php_public_path = next.php_public_path || ''
         next.composer_command = next.composer_command || 'composer install --no-dev --optimize-autoloader'
       }
       if (name === 'app_type' && value === 'static') {
@@ -94,6 +96,10 @@ export default function AppSettings({ app, onUpdate }) {
       return undefined
     }
     let cancelled = false
+    if (formData.app_type === 'php' && PHP_PUBLIC_DIR_PRESETS.includes(path)) {
+      setSubdirCheck({ status: 'ok', message: `For PHP apps, "${path}" looks like a public directory. Ascend will use it as Public Directory and keep the app at the repo root.` })
+      return undefined
+    }
     setSubdirCheck({ status: 'checking', message: 'Checking repository path...' })
     const timer = setTimeout(async () => {
       try {
@@ -109,7 +115,7 @@ export default function AppSettings({ app, onUpdate }) {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [app?.id, app?.project_id, app?.subdirectory, formData.subdirectory, formData.github_branch, isMultiRepo])
+  }, [app?.id, app?.project_id, app?.subdirectory, formData.app_type, formData.subdirectory, formData.github_branch, isMultiRepo])
 
   useEffect(() => {
     if (formData.app_type !== 'php') return
@@ -197,10 +203,17 @@ export default function AppSettings({ app, onUpdate }) {
     setSaved(false)
     setWebhookInfo(null)
     try {
+      const payload = { ...formData }
+      const subdirAsPublicDir = payload.app_type === 'php' && PHP_PUBLIC_DIR_PRESETS.includes((payload.subdirectory || '').trim())
+      if (subdirAsPublicDir) {
+        payload.php_public_path = (payload.subdirectory || '').trim()
+        payload.subdirectory = ''
+      }
       const res = await apiClient.updateApp(app.id, {
-        ...formData,
-        app_port: ['php', 'static'].includes(formData.app_type) ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
+        ...payload,
+        app_port: ['php', 'static'].includes(payload.app_type) ? null : (payload.app_port ? parseInt(payload.app_port, 10) : null),
       })
+      setFormData((prev) => subdirAsPublicDir ? { ...prev, subdirectory: '', php_public_path: payload.php_public_path } : prev)
       setSaved(true)
       if (res.data.github_webhook) setWebhookInfo(res.data.github_webhook)
       if (onUpdate) onUpdate(res.data)
@@ -366,8 +379,18 @@ export default function AppSettings({ app, onUpdate }) {
             ['website', 'Website'], ['static', 'Static site'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
           ])}
           {isMultiRepo && input('GitHub URL', 'github_url', 'url', 'https://github.com/user/backend')}
-          {isMultiRepo && input('Branch', 'github_branch', 'text', 'main')}
-          {input(isMultiRepo ? 'Subdirectory' : 'Subdirectory (monorepo)', 'subdirectory', 'text', isMultiRepo ? '' : 'api/ or cms/', isMultiRepo ? 'Relative path inside this app repository. Leave empty if the app is the repo root.' : 'Leave empty if the project root is this app.')}
+          {isMultiRepo && input('Branch', 'github_branch', 'text', 'master', 'Leave empty to use the repository default branch.')}
+          {input(
+            isMultiRepo ? 'App Subdirectory' : 'App Subdirectory (monorepo)',
+            'subdirectory',
+            'text',
+            isMultiRepo ? '' : 'api/ or cms/',
+            formData.app_type === 'php'
+              ? 'Leave empty when composer.json is at the repo root. Yii Basic should use Public Directory = web below.'
+              : isMultiRepo
+                ? 'Relative path inside this app repository. Leave empty if the app is the repo root.'
+                : 'Leave empty if the project root is this app.'
+          )}
           {subdirCheck.status !== 'idle' && (
             <p className={`text-xs ${subdirCheck.status === 'ok' ? 'text-green-400' : subdirCheck.status === 'checking' ? 'text-yellow-400' : 'text-red-400'}`}>
               {subdirCheck.message}
@@ -409,7 +432,7 @@ export default function AppSettings({ app, onUpdate }) {
         {formData.app_type === 'php' ? (
           <div className="space-y-4">
             {phpVersionSelect()}
-            {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
+            {input('Public Directory', 'php_public_path', 'text', 'web', 'Relative to the app directory. Yii Basic uses web, Laravel uses public, Yii Advanced uses frontend/web or backend/web. Leave empty for repo root.')}
             {check('Run Composer during deploy', 'composer_install')}
             {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
           </div>

@@ -52,7 +52,8 @@ export default function AppDetail() {
       .then((res) => {
         if (cancelled) return
         const names = res.data?.branches || []
-        const defaultBranch = res.data?.default_branch || names[0] || app?.github_branch || project?.github_branch || ''
+        const preferredBranch = app?.github_branch || project?.github_branch || res.data?.default_branch || names[0] || ''
+        const defaultBranch = names.includes(preferredBranch) ? preferredBranch : (res.data?.default_branch || names[0] || preferredBranch)
         setBranches(names)
         setSelectedBranch((current) => (current && names.includes(current) ? current : defaultBranch))
       })

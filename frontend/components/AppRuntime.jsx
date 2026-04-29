@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { Copy, Check, RefreshCw, RotateCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
+import DomainLink from '@/components/DomainLink'
 
 function formatUptime(ms) {
   if (!ms || ms <= 0) return '—'
@@ -186,7 +187,7 @@ export default function AppRuntime({ appId }) {
         {domain && (
           <div className="col-span-2">
             <p className="text-gray-400 text-sm">Domain</p>
-            <p className="text-white">{domain}</p>
+            <DomainLink domain={domain} className="text-white hover:text-accent" />
           </div>
         )}
       </div>

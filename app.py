@@ -70,6 +70,7 @@ BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
 ACME_WEBROOT = Path("/var/www/letsencrypt")
 STATIC_SITES_DIR = Path("/var/www/ascend-sites")
+PHP_SITES_DIR = Path("/var/www/ascend-php-sites")
 
 # On Linux as root: deploy to /root; otherwise local deployments dir
 try:
@@ -84,6 +85,7 @@ DEPLOYMENTS_DIR.mkdir(exist_ok=True)
 ASCEND_BACKUPS_DIR.mkdir(exist_ok=True)
 if os.name != 'nt':
     STATIC_SITES_DIR.mkdir(parents=True, exist_ok=True)
+    PHP_SITES_DIR.mkdir(parents=True, exist_ok=True)
 
 dotenv.load_dotenv(BASE_DIR / '.env')
 
@@ -2299,6 +2301,7 @@ def api_deploy_app(app_id):
         triggered_by='manual',
     )
     db.session.add(deployment)
+    a.github_branch = branch
     a.status = 'deploying'
     db.session.commit()
     _audit_log('deployment.started', 'ok', f'Deployment started: {a.project.name} / {a.name}', {'deployment_id': deployment.id, 'app_id': a.id, 'branch': branch})
@@ -2549,7 +2552,7 @@ def _app_repo_url(app_row):
 
 
 def _app_repo_branch(app_row, branch=None):
-    source_branch = app_row.github_branch if _project_is_multi_repo(app_row.project) else app_row.project.github_branch
+    source_branch = app_row.github_branch or app_row.project.github_branch
     return _normalize_deploy_branch({'github_branch': source_branch or 'main'}, branch)
 
 
@@ -2568,7 +2571,7 @@ def _repo_subject_branch(subject):
 
 
 def app_row_branch(app_row):
-    return app_row.github_branch if _project_is_multi_repo(app_row.project) else app_row.project.github_branch
+    return app_row.github_branch or app_row.project.github_branch
 
 
 def _github_api(method, path, token, body=None, timeout=10):
@@ -2994,9 +2997,9 @@ def _write_app_env(app_row, deploy_dir, log):
 
 def _run_php_build(app_row, deploy_dir, log):
     version = (app_row.php_version or '').strip() or 'system default'
-    public_dir = _php_public_dir(app_row)
+    public_dir = _php_source_public_dir(app_row)
     log.write(f"\nStep 3: Preparing PHP app (PHP-FPM {version})...\n")
-    log.write(f"  Web root: {public_dir}\n")
+    log.write(f"  Source web root: {public_dir}\n")
     log.write(f"  PHP-FPM socket: {_php_fpm_socket(app_row)}\n")
     composer_enabled = app_row.composer_install is not False
     if composer_enabled and (deploy_dir / 'composer.json').exists():
@@ -3006,6 +3009,7 @@ def _run_php_build(app_row, deploy_dir, log):
             raise RuntimeError("Composer install failed")
     elif composer_enabled:
         log.write("  composer.json not found; skipping Composer.\n")
+    _publish_php_app(app_row, log)
 
 
 def _pm2_start_command(app_row):
@@ -3548,13 +3552,69 @@ def _is_static_app(app_row):
     return (app_row.app_type or '').lower() == 'static'
 
 
-def _php_public_dir(app_row):
+def _php_public_path(app_row):
+    return (app_row.php_public_path or '').strip().strip('/\\')
+
+
+def _php_source_public_dir(app_row):
     deploy_dir = _app_deploy_dir(app_row)
-    public_path = (app_row.php_public_path or 'public').strip().strip('/\\')
+    public_path = _php_public_path(app_row)
     public_dir = deploy_dir / public_path if public_path else deploy_dir
     if public_path == 'public' and not public_dir.exists():
         return deploy_dir
     return public_dir
+
+
+def _safe_php_site_name(app_row):
+    raw = app_row.domain or f'{app_row.project.folder_name}-{app_row.name}'
+    safe = re.sub(r'[^A-Za-z0-9_.-]+', '-', raw).strip('.-') or f'php-app-{app_row.id}'
+    return safe[:120]
+
+
+def _php_runtime_root(app_row):
+    if os.name == 'nt':
+        return _app_deploy_dir(app_row)
+    return PHP_SITES_DIR / _safe_php_site_name(app_row)
+
+
+def _php_public_dir(app_row):
+    root = _php_runtime_root(app_row)
+    public_path = _php_public_path(app_row)
+    public_dir = root / public_path if public_path else root
+    if public_path == 'public' and not public_dir.exists():
+        return root
+    return public_dir
+
+
+def _publish_php_app(app_row, log):
+    source = _app_deploy_dir(app_row)
+    source_public = _php_source_public_dir(app_row)
+    if not source_public.exists() or not source_public.is_dir():
+        raise RuntimeError(f"PHP public directory not found: {app_row.php_public_path or '(repo root)'}")
+    target = _php_runtime_root(app_row)
+    if os.name == 'nt':
+        return source
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        source,
+        target,
+        ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
+    )
+    try:
+        subprocess.run(['chmod', '-R', 'a+rX', str(target)], capture_output=True, timeout=30)
+        for writable in ('runtime', 'web/assets', 'frontend/runtime', 'frontend/web/assets', 'backend/runtime', 'backend/web/assets'):
+            writable_path = target / writable
+            if writable_path.exists():
+                subprocess.run(['chmod', '-R', 'a+rwX', str(writable_path)], capture_output=True, timeout=15)
+        subprocess.run(['chown', '-R', 'www-data:www-data', str(target)], capture_output=True, timeout=60)
+        subprocess.run(['chmod', 'a+x', str(target.parent)], capture_output=True, timeout=15)
+    except Exception as exc:
+        log.write(f"  Warning: could not adjust PHP publish permissions: {exc}\n")
+    log.write(f"  Published PHP app to {target}\n")
+    log.write(f"  Nginx web root: {_php_public_dir(app_row)}\n")
+    return target
 
 
 def _static_public_dir(app_row):

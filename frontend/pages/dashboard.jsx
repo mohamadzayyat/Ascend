@@ -5,6 +5,7 @@ import { apiClient } from '@/lib/api'
 import StatCard from '@/components/StatCard'
 import ProjectCard from '@/components/ProjectCard'
 import ServerStats from '@/components/ServerStats'
+import DomainLink from '@/components/DomainLink'
 import { Activity, AlertCircle, CheckCircle, Boxes, Database, ShieldCheck } from 'lucide-react'
 import { absoluteLocalTime, localDate, parseApiTime } from '@/lib/time'
 
@@ -202,7 +203,9 @@ export default function Dashboard() {
               {riskyCertificates.map((cert) => (
                 <tr key={cert.name} className="border-t border-gray-700">
                   <td className="px-6 py-3">
-                    <div className="text-white font-medium">{cert.primary_domain}</div>
+                    <div className="font-medium">
+                      <DomainLink domain={cert.primary_domain} className="text-white hover:text-accent" />
+                    </div>
                     <div className="text-xs text-gray-500">{cert.name}</div>
                   </td>
                   <td className="px-6 py-3">

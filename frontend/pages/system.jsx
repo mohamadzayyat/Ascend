@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSystem, useProjects } from '@/lib/hooks/useAuth'
 import { apiClient } from '@/lib/api'
 import { absoluteLocalTime } from '@/lib/time'
+import DomainLink from '@/components/DomainLink'
 
 function formatUptime(ms) {
   if (!ms || ms <= 0) return '-'
@@ -441,7 +442,11 @@ export default function System() {
                       <div className="mt-2"><CertBadge status={cert.status} /></div>
                     </td>
                     <td className="px-4 py-3 text-gray-300">
-                      {cert.domains?.length ? cert.domains.join(', ') : cert.primary_domain}
+                      <div className="flex flex-wrap gap-x-2 gap-y-1">
+                        {(cert.domains?.length ? cert.domains : [cert.primary_domain]).filter(Boolean).map((domain) => (
+                          <DomainLink key={domain} domain={domain} className="text-gray-300 hover:text-accent" />
+                        ))}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="text-gray-200">{absoluteLocalTime(cert.expires_at)}</div>

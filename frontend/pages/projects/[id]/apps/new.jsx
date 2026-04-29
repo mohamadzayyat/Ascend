@@ -6,6 +6,8 @@ import { apiClient } from '@/lib/api'
 import { useProject } from '@/lib/hooks/useAuth'
 import DomainDnsCheck from '@/components/DomainDnsCheck'
 
+const PHP_PUBLIC_DIR_PRESETS = ['public', 'web', 'frontend/web', 'backend/web']
+
 export default function NewApp() {
   const router = useRouter()
   const { id: projectId } = router.query
@@ -25,7 +27,7 @@ export default function NewApp() {
     start_command: 'npm start',
     pm2_name: '',
     php_version: '',
-    php_public_path: 'public',
+    php_public_path: '',
     composer_install: true,
     composer_command: 'composer install --no-dev --optimize-autoloader',
     static_output_path: 'dist',
@@ -61,7 +63,7 @@ export default function NewApp() {
         next.start_command = ''
         next.pm2_name = ''
         next.app_port = ''
-        next.php_public_path = next.php_public_path || 'public'
+        next.php_public_path = next.php_public_path || ''
         next.composer_command = next.composer_command || 'composer install --no-dev --optimize-autoloader'
         setPortTouched(true)
       }
@@ -116,6 +118,10 @@ export default function NewApp() {
       setSubdirCheck({ status: 'idle', message: '' })
       return undefined
     }
+    if (formData.app_type === 'php' && PHP_PUBLIC_DIR_PRESETS.includes(path)) {
+      setSubdirCheck({ status: 'ok', message: `For PHP apps, "${path}" looks like a public directory. Ascend will use it as Public Directory and keep the app at the repo root.` })
+      return undefined
+    }
     let cancelled = false
     setSubdirCheck({ status: 'checking', message: 'Checking repository path...' })
     const timer = setTimeout(async () => {
@@ -130,7 +136,7 @@ export default function NewApp() {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [projectId, project?.github_branch, formData.subdirectory, isMultiRepo])
+  }, [projectId, project?.github_branch, formData.app_type, formData.subdirectory, isMultiRepo])
 
   useEffect(() => {
     if (formData.app_type !== 'php') return
@@ -216,9 +222,14 @@ export default function NewApp() {
     setLoading(true)
     setError('')
     try {
+      const payload = { ...formData }
+      if (payload.app_type === 'php' && PHP_PUBLIC_DIR_PRESETS.includes((payload.subdirectory || '').trim())) {
+        payload.php_public_path = (payload.subdirectory || '').trim()
+        payload.subdirectory = ''
+      }
       const res = await apiClient.createApp(projectId, {
-        ...formData,
-        app_port: ['php', 'static'].includes(formData.app_type) ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
+        ...payload,
+        app_port: ['php', 'static'].includes(payload.app_type) ? null : (payload.app_port ? parseInt(payload.app_port, 10) : null),
       })
       router.push(`/app/${res.data.id}`)
     } catch (err) {
@@ -351,8 +362,18 @@ export default function NewApp() {
               </div>
             )}
             {isMultiRepo && input('GitHub URL *', 'github_url', 'url', 'https://github.com/user/backend')}
-            {isMultiRepo && input('Branch', 'github_branch', 'text', 'main')}
-            {input('Subdirectory', 'subdirectory', 'text', isMultiRepo ? '' : 'apps/api', isMultiRepo ? 'Relative path inside this app repository. Leave empty for root.' : 'Relative path inside the repo. Leave empty for root.')}
+            {isMultiRepo && input('Branch', 'github_branch', 'text', 'master', 'Leave empty to use main, or set master/ddl/etc.')}
+            {input(
+              'App Subdirectory',
+              'subdirectory',
+              'text',
+              isMultiRepo ? '' : 'apps/api',
+              formData.app_type === 'php'
+                ? 'Leave empty when composer.json is at the repo root. Yii Basic should use Public Directory = web below.'
+                : isMultiRepo
+                  ? 'Relative path inside this app repository. Leave empty for root.'
+                  : 'Relative path inside the repo. Leave empty for root.'
+            )}
             {subdirCheck.status !== 'idle' && (
               <p className={`text-xs ${subdirCheck.status === 'ok' ? 'text-green-400' : subdirCheck.status === 'checking' ? 'text-yellow-400' : 'text-red-400'}`}>
                 {subdirCheck.message}
@@ -368,7 +389,7 @@ export default function NewApp() {
           {formData.app_type === 'php' ? (
             <div className="space-y-4">
               {phpVersionSelect()}
-              {input('Public Directory', 'php_public_path', 'text', 'public', 'Relative to the app directory. Laravel usually uses public.')}
+              {input('Public Directory', 'php_public_path', 'text', 'web', 'Relative to the app directory. Yii Basic uses web, Laravel uses public, Yii Advanced uses frontend/web or backend/web. Leave empty for repo root.')}
               {check('Run Composer during deploy', 'composer_install')}
               {formData.composer_install && input('Composer Command', 'composer_command', 'text', 'composer install --no-dev --optimize-autoloader')}
             </div>

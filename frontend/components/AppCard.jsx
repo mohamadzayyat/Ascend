@@ -4,6 +4,7 @@ import { Settings } from 'lucide-react'
 import { useAppRuntime } from '@/lib/hooks/useAuth'
 import { relativeLocalTime } from '@/lib/time'
 import DiskUsage from '@/components/DiskUsage'
+import DomainLink from '@/components/DomainLink'
 
 const STATUS_CLASS = {
   deployed: 'bg-green-500/10 text-green-400',
@@ -76,7 +77,9 @@ export default function AppCard({ app }) {
       </div>
 
       {app.domain && (
-        <p className="text-xs text-gray-400 mb-1 truncate">{app.domain}</p>
+        <p className="text-xs mb-1 truncate">
+          <DomainLink domain={app.domain} className="text-gray-400 hover:text-accent" />
+        </p>
       )}
       {app.last_deployment && (
         <p className="text-xs text-gray-500">
