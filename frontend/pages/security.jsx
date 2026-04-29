@@ -152,6 +152,14 @@ function asArray(value) {
   return Array.isArray(value) ? value : []
 }
 
+function threatPersistenceKey(item) {
+  return `${item?.path || ''}:${item?.line || ''}`
+}
+
+function canDeleteThreatPersistenceFile(item) {
+  return !!item?.is_cleanup_backup || String(item?.path || '').includes('/root/.config/.logrotate')
+}
+
 function formatMaybeDate(value) {
   if (!value) return '-'
   const d = new Date(value)
@@ -188,6 +196,7 @@ export default function SecurityPage() {
   const [blocksPage, setBlocksPage] = useState(0)
   const [sshPage, setSshPage] = useState(0)
   const [threats, setThreats] = useState({ processes: [], persistence: [], immutable: [] })
+  const [selectedPersistence, setSelectedPersistence] = useState({})
 
   const state = status?.state || {}
   const tools = status?.tools || {}
@@ -211,6 +220,9 @@ export default function SecurityPage() {
   const pagedDecisions = crowdsecDecisions.slice(blocksPage * PAGE_SIZE, (blocksPage + 1) * PAGE_SIZE)
   const sshSummary = asArray(sshFailures.summary)
   const pagedSshSummary = sshSummary.slice(sshPage * PAGE_SIZE, (sshPage + 1) * PAGE_SIZE)
+  const persistenceItems = asArray(threats.persistence)
+  const selectedPersistenceKeys = Object.keys(selectedPersistence).filter((key) => selectedPersistence[key])
+  const allPersistenceSelected = persistenceItems.length > 0 && persistenceItems.every((item) => selectedPersistence[threatPersistenceKey(item)])
 
   const load = async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true)
@@ -263,6 +275,16 @@ export default function SecurityPage() {
   useEffect(() => { load() }, [logKind])
   useEffect(() => { if (activeTab === 'ip') loadSshFailures() }, [activeTab])
   useEffect(() => { if (activeTab === 'threats') loadThreats() }, [activeTab])
+  useEffect(() => {
+    setSelectedPersistence((current) => {
+      const valid = new Set(persistenceItems.map(threatPersistenceKey))
+      const next = {}
+      for (const [key, value] of Object.entries(current)) {
+        if (value && valid.has(key)) next[key] = true
+      }
+      return next
+    })
+  }, [threats.persistence])
   useEffect(() => {
     if (!scanRunning && !installRunning && !crowdsecInstallRunning && !securityStatusRefreshing) return undefined
     const timer = setInterval(() => load({ quiet: true }), 2500)
@@ -398,12 +420,37 @@ export default function SecurityPage() {
     }
   }
 
+  const removePersistenceFromUi = (item) => {
+    const key = threatPersistenceKey(item)
+    setThreats((current) => ({
+      ...current,
+      persistence: asArray(current.persistence).filter((row) => threatPersistenceKey(row) !== key),
+    }))
+    setSelectedPersistence((current) => {
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+  }
+
+  const cleanupPersistenceItem = async (item) => {
+    if (canDeleteThreatPersistenceFile(item)) {
+      await apiClient.deleteSecurityThreatFile(item.path)
+    } else {
+      await apiClient.deleteSecurityThreatPersistenceLine(item.path, item.line)
+    }
+    removePersistenceFromUi(item)
+  }
+
   const removeThreatLine = async (item) => {
     if (!window.confirm(`Remove suspicious line from ${item.path}:${item.line}? A backup will be created first.`)) return
     setBusy(`line-${item.path}-${item.line}`)
     try {
       await apiClient.deleteSecurityThreatPersistenceLine(item.path, item.line)
-      await Promise.all([loadThreats(), load({ quiet: true })])
+      removePersistenceFromUi(item)
+      setMessage('Persistence line removed.')
+      loadThreats()
+      load({ quiet: true })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to remove persistence line')
     } finally {
@@ -429,12 +476,51 @@ export default function SecurityPage() {
     setBusy(`file-${path}`)
     try {
       await apiClient.deleteSecurityThreatFile(path)
-      await Promise.all([loadThreats(), load({ quiet: true })])
+      setThreats((current) => ({
+        ...current,
+        persistence: asArray(current.persistence).filter((row) => row.path !== path),
+      }))
+      setSelectedPersistence((current) => {
+        const next = { ...current }
+        for (const key of Object.keys(next)) {
+          if (key.startsWith(`${path}:`)) delete next[key]
+        }
+        return next
+      })
+      setMessage('Suspicious file deleted.')
+      loadThreats()
+      load({ quiet: true })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to delete suspicious file')
     } finally {
       setBusy('')
     }
+  }
+
+  const cleanupSelectedPersistence = async () => {
+    const selected = persistenceItems.filter((item) => selectedPersistence[threatPersistenceKey(item)])
+    if (!selected.length) return
+    const backups = selected.filter((item) => item.is_cleanup_backup).length
+    const lines = selected.length - selected.filter(canDeleteThreatPersistenceFile).length
+    if (!window.confirm(`Clean ${selected.length} selected threat item(s)? This will remove ${lines} live line(s) and delete ${backups} cleanup backup file(s) when selected.`)) return
+    setBusy('bulk-persistence')
+    setError('')
+    setMessage('')
+    const failed = []
+    let cleaned = 0
+    for (const item of selected) {
+      try {
+        await cleanupPersistenceItem(item)
+        cleaned += 1
+      } catch (e) {
+        failed.push(`${item.path}:${item.line} - ${e.response?.data?.error || e.message || 'failed'}`)
+      }
+    }
+    if (cleaned) setMessage(`Cleaned ${cleaned} selected threat item(s).`)
+    if (failed.length) setError(`Some items could not be cleaned:\n${failed.slice(0, 5).join('\n')}`)
+    setBusy('')
+    loadThreats()
+    load({ quiet: true })
   }
 
   const clearFindings = async () => {
@@ -619,18 +705,55 @@ export default function SecurityPage() {
               </section>
 
               <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
-                <div className="px-5 py-4 border-b border-gray-700">
-                  <h2 className="text-white font-semibold">Suspicious Persistence</h2>
-                  <p className="text-gray-500 text-sm mt-1">Cron, systemd, root/home profile, tmp, and web-root files containing miner downloaders or mining pool URLs.</p>
+                <div className="px-5 py-4 border-b border-gray-700 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-white font-semibold">Suspicious Persistence</h2>
+                    <p className="text-gray-500 text-sm mt-1">Cron, systemd, root/home profile, tmp, and web-root files containing miner downloaders or mining pool URLs.</p>
+                  </div>
+                  {persistenceItems.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={allPersistenceSelected}
+                          onChange={(e) => {
+                            const next = {}
+                            if (e.target.checked) {
+                              for (const item of persistenceItems) next[threatPersistenceKey(item)] = true
+                            }
+                            setSelectedPersistence(next)
+                          }}
+                        />
+                        Select all
+                      </label>
+                      <button
+                        onClick={cleanupSelectedPersistence}
+                        disabled={!selectedPersistenceKeys.length || busy === 'bulk-persistence'}
+                        className="px-3 py-2 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm"
+                      >
+                        {busy === 'bulk-persistence' ? 'Cleaning...' : `Clean selected (${selectedPersistenceKeys.length})`}
+                      </button>
+                    </div>
+                  )}
                 </div>
-                {asArray(threats.persistence).length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No suspicious persistence lines detected.</div> : (
+                {persistenceItems.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No suspicious persistence lines detected.</div> : (
                   <div className="divide-y divide-gray-700/70">
-                    {asArray(threats.persistence).map((item, idx) => (
+                    {persistenceItems.map((item, idx) => (
                       <div key={`${item.path}-${item.line}-${idx}`} className="p-4">
                         <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="text-white font-mono text-xs break-all">{item.path}:{item.line}</div>
-                            <div className="mt-2 rounded bg-primary/60 border border-gray-700 p-2 text-red-200 text-xs font-mono break-all">{item.match}</div>
+                          <div className="min-w-0 flex-1">
+                            <label className="inline-flex items-start gap-3">
+                              <input
+                                type="checkbox"
+                                checked={!!selectedPersistence[threatPersistenceKey(item)]}
+                                onChange={(e) => setSelectedPersistence((current) => ({ ...current, [threatPersistenceKey(item)]: e.target.checked }))}
+                                className="mt-0.5"
+                              />
+                              <span className="min-w-0">
+                                <span className="block text-white font-mono text-xs break-all">{item.path}:{item.line}</span>
+                                <span className="mt-2 block rounded bg-primary/60 border border-gray-700 p-2 text-red-200 text-xs font-mono break-all">{item.match}</span>
+                              </span>
+                            </label>
                           </div>
                           <div className="flex flex-wrap gap-2">
                             {!item.is_cleanup_backup && <button onClick={() => removeThreatLine(item)} disabled={busy === `line-${item.path}-${item.line}`} className="px-2 py-1 rounded border border-red-500/40 text-red-200 hover:bg-red-500/10 disabled:opacity-50 text-sm">Remove line</button>}
