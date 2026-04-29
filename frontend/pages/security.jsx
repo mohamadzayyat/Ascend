@@ -201,6 +201,7 @@ export default function SecurityPage() {
   const scanRunning = ['starting', 'running'].includes(scan.status)
   const installRunning = ['starting', 'running'].includes(install.status)
   const crowdsecInstallRunning = ['starting', 'running'].includes(crowdsecInstall.status)
+  const securityStatusRefreshing = !!tools.crowdsec_decisions?.refreshing || !!autoSshBlock?.scheduled
   const clamInstalled = !!tools.clamscan?.installed
   const freshclamInstalled = !!tools.freshclam?.installed
   const crowdsecInstalled = !!tools.cscli?.installed
@@ -263,10 +264,10 @@ export default function SecurityPage() {
   useEffect(() => { if (activeTab === 'ip') loadSshFailures() }, [activeTab])
   useEffect(() => { if (activeTab === 'threats') loadThreats() }, [activeTab])
   useEffect(() => {
-    if (!scanRunning && !installRunning && !crowdsecInstallRunning) return undefined
+    if (!scanRunning && !installRunning && !crowdsecInstallRunning && !securityStatusRefreshing) return undefined
     const timer = setInterval(() => load({ quiet: true }), 2500)
     return () => clearInterval(timer)
-  }, [scanRunning, installRunning, crowdsecInstallRunning, logKind])
+  }, [scanRunning, installRunning, crowdsecInstallRunning, securityStatusRefreshing, logKind])
 
   const issues = useMemo(() => {
     const rows = []

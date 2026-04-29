@@ -6,6 +6,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +28,14 @@ QUARANTINE_DIR = None
 _admin_required = None
 _audit_log = None
 _notify_email_async = None
+_CROWDSEC_DECISIONS_CACHE = {'at': 0.0, 'data': None}
+_CROWDSEC_DECISIONS_LOCK = threading.Lock()
+_CROWDSEC_DECISIONS_RUNNING = False
+_AUTO_SSH_BLOCK_LOCK = threading.Lock()
+_AUTO_SSH_BLOCK_RUNNING = False
+
+STATUS_CROWDSEC_CACHE_SECONDS = 20
+AUTO_SSH_BLOCK_INTERVAL_SECONDS = 300
 
 THREAT_RE = re.compile(r'(getxmrig|xmrig|c3pool|stratum|auto\.c3pool\.org|80\.13\.111\.125|/root/\.config/\.logrotate|\.logrotate)', re.IGNORECASE)
 THREAT_SCAN_PATHS = [
@@ -252,7 +262,7 @@ def _crowdsec_decisions():
     cscli = shutil.which('cscli')
     if not cscli:
         return {'available': False, 'items': [], 'error': 'cscli is not installed.'}
-    rc, out, err = _run([cscli, 'decisions', 'list', '-o', 'json'], timeout=8)
+    rc, out, err = _run([cscli, 'decisions', 'list', '-o', 'json'], timeout=5)
     if rc != 0:
         return {'available': True, 'items': [], 'error': err or out or 'Could not list CrowdSec decisions.'}
     try:
@@ -265,7 +275,7 @@ def _crowdsec_decisions():
         raw_items = parsed
     text_by_id = {}
     text_by_reason = {}
-    rc_text, out_text, _ = _run([cscli, 'decisions', 'list'], timeout=8)
+    rc_text, out_text, _ = _run([cscli, 'decisions', 'list'], timeout=2)
     if rc_text == 0 and out_text:
         ip_re = re.compile(r'(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])')
         for line in out_text.splitlines():
@@ -357,6 +367,33 @@ def _crowdsec_decisions():
             'raw': item,
         })
     return {'available': True, 'items': items, 'error': ''}
+
+
+def _cached_crowdsec_decisions():
+    global _CROWDSEC_DECISIONS_RUNNING
+    if not shutil.which('cscli'):
+        return {'available': False, 'items': [], 'error': 'cscli is not installed.'}
+    now_ts = time.monotonic()
+    cached = _CROWDSEC_DECISIONS_CACHE.get('data')
+    if cached is not None and now_ts - float(_CROWDSEC_DECISIONS_CACHE.get('at') or 0) < STATUS_CROWDSEC_CACHE_SECONDS:
+        return cached
+    with _CROWDSEC_DECISIONS_LOCK:
+        if not _CROWDSEC_DECISIONS_RUNNING:
+            _CROWDSEC_DECISIONS_RUNNING = True
+
+            def worker():
+                global _CROWDSEC_DECISIONS_RUNNING
+                try:
+                    data = _crowdsec_decisions()
+                    _CROWDSEC_DECISIONS_CACHE['at'] = time.monotonic()
+                    _CROWDSEC_DECISIONS_CACHE['data'] = data
+                finally:
+                    with _CROWDSEC_DECISIONS_LOCK:
+                        _CROWDSEC_DECISIONS_RUNNING = False
+
+            threading.Thread(target=worker, daemon=True, name='ascend-crowdsec-decisions').start()
+    fallback = cached or {'available': True, 'items': [], 'error': ''}
+    return {**fallback, 'refreshing': True}
 
 
 def _valid_public_ip(value):
@@ -528,6 +565,49 @@ def _auto_block_ssh_repeat_attackers():
     return result
 
 
+def _parse_iso(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _auto_block_ssh_repeat_attackers_async():
+    global _AUTO_SSH_BLOCK_RUNNING
+    state = _load_json(STATE_PATH, {})
+    last = state.get('auto_ssh_block_last') if isinstance(state.get('auto_ssh_block_last'), dict) else {}
+    checked_at = _parse_iso(last.get('checked_at'))
+    if checked_at:
+        age = (datetime.now(timezone.utc) - checked_at).total_seconds()
+        if age < AUTO_SSH_BLOCK_INTERVAL_SECONDS:
+            return {**last, 'scheduled': False}
+    with _AUTO_SSH_BLOCK_LOCK:
+        if _AUTO_SSH_BLOCK_RUNNING:
+            return {**last, 'scheduled': True, 'message': 'Automatic SSH blocker is already checking in the background.'}
+        _AUTO_SSH_BLOCK_RUNNING = True
+
+    def worker():
+        global _AUTO_SSH_BLOCK_RUNNING
+        try:
+            _auto_block_ssh_repeat_attackers()
+        finally:
+            with _AUTO_SSH_BLOCK_LOCK:
+                _AUTO_SSH_BLOCK_RUNNING = False
+
+    threading.Thread(target=worker, daemon=True, name='ascend-auto-ssh-block').start()
+    return {**last, 'scheduled': True, 'message': 'Automatic SSH blocker is checking in the background.'}
+
+
+def _cached_threat_status():
+    state = _load_json(STATE_PATH, {})
+    cached = state.get('threat_status') if isinstance(state.get('threat_status'), dict) else None
+    if cached:
+        return {**cached, 'cached': True}
+    return {'processes': [], 'process_error': '', 'persistence': [], 'immutable': [], 'checked_at': None, 'cached': True}
+
+
 def _scan_paths():
     candidates = [
         {'key': 'web_roots', 'label': 'Web roots', 'path': '/var/www'},
@@ -541,7 +621,7 @@ def _scan_paths():
 
 def _current_status():
     state = _load_json(STATE_PATH, {})
-    auto_ssh_block = _auto_block_ssh_repeat_attackers()
+    auto_ssh_block = _auto_block_ssh_repeat_attackers_async()
     state = _load_json(STATE_PATH, {})
     clamscan = _tool_version('clamscan', ['--version'])
     freshclam = _tool_version('freshclam', ['--version'])
@@ -559,14 +639,14 @@ def _current_status():
             'cscli': cscli,
             'crowdsec_service': _service_active('crowdsec.service'),
             'crowdsec_firewall_bouncer_service': _service_active('crowdsec-firewall-bouncer.service'),
-            'crowdsec_decisions': _crowdsec_decisions(),
+            'crowdsec_decisions': _cached_crowdsec_decisions(),
             'clamav_freshclam_service': _service_active('clamav-freshclam.service'),
             'clamav_daemon_service': _service_active('clamav-daemon.service'),
             'definitions': _freshclam_status(),
         },
         'state': state,
         'auto_ssh_block': auto_ssh_block,
-        'threats': _threat_status(),
+        'threats': _cached_threat_status(),
         'scan_paths': _scan_paths(),
         'logs': {
             'scan': str(SCAN_LOG_PATH),
@@ -801,7 +881,11 @@ def api_security_ssh_failures_block_repeat():
 @bp.route('/api/security/threats')
 @login_required
 def api_security_threats():
-    return jsonify(_threat_status())
+    status = _threat_status()
+    state = _load_json(STATE_PATH, {})
+    state['threat_status'] = status
+    _write_json(STATE_PATH, state)
+    return jsonify(status)
 
 
 @bp.route('/api/security/threats/kill', methods=['POST'])
