@@ -28,6 +28,13 @@ canvas {
   max-width: 100%;
 }
 
+@media (min-width: 768px) {
+  .app-main .max-w-7xl,
+  .app-main .max-w-6xl {
+    max-width: none;
+  }
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;
@@ -169,5 +176,13 @@ canvas {
   textarea,
   button {
     font-size: 16px;
+  }
+}
+
+@supports (padding: max(0px)) {
+  @media (max-width: 767px) {
+    .app-main {
+      padding-bottom: max(5rem, env(safe-area-inset-bottom));
+    }
   }
 }
