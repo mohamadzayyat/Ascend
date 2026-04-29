@@ -136,6 +136,22 @@ def _crowdsec_decisions():
         raw_items = parsed.get('decisions') or parsed.get('items') or parsed.get('data') or []
     else:
         raw_items = parsed
+    text_by_id = {}
+    text_by_reason = {}
+    rc_text, out_text, _ = _run([cscli, 'decisions', 'list'], timeout=8)
+    if rc_text == 0 and out_text:
+        ip_re = re.compile(r'(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])')
+        for line in out_text.splitlines():
+            ips = [ip for ip in ip_re.findall(line) if _valid_public_ip(ip)]
+            if not ips:
+                continue
+            cols = [c.strip() for c in re.split(r'\s{2,}|\|', line) if c.strip()]
+            for col in cols:
+                if col.isdigit():
+                    text_by_id.setdefault(col, ips[0])
+            for marker in ('crowdsecurity/', 'manual ', 'automatic '):
+                if marker in line:
+                    text_by_reason.setdefault(marker, ips[0])
 
     def pick(obj, *keys):
         for key in keys:
@@ -158,6 +174,29 @@ def _crowdsec_decisions():
         except Exception:
             return str(value)
 
+    def find_ip_deep(value):
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            for key in ('value', 'Value', 'scope_value', 'ScopeValue', 'ip', 'IP', 'source_ip', 'SourceIP'):
+                if key in value and _valid_public_ip(value.get(key)):
+                    return str(value.get(key))
+            for nested in value.values():
+                found = find_ip_deep(nested)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = find_ip_deep(nested)
+                if found:
+                    return found
+        else:
+            text = str(value)
+            for ip in re.findall(r'(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])', text):
+                if _valid_public_ip(ip):
+                    return ip
+        return None
+
     state = _load_json(STATE_PATH, {})
     block_history = state.get('crowdsec_block_history') if isinstance(state.get('crowdsec_block_history'), dict) else {}
     items = []
@@ -171,15 +210,17 @@ def _crowdsec_decisions():
             left, _, right = scope_and_value.partition(':')
             scope = scope or left.strip()
             scope_value = right.strip()
-        value_text = scalar(scope_value)
+        item_id = scalar(pick(item, 'id', 'ID'))
+        reason_text = scalar(pick(item, 'reason', 'Reason'))
+        value_text = scalar(scope_value) or find_ip_deep(item) or text_by_id.get(item_id or '') or text_by_reason.get(reason_text or '')
         history = block_history.get(value_text or '') if value_text else None
         items.append({
-            'id': scalar(pick(item, 'id', 'ID')),
+            'id': item_id,
             'value': value_text,
             'scope': scalar(scope),
             'type': scalar(pick(item, 'type', 'Type')),
             'origin': scalar(pick(item, 'origin', 'Origin', 'source', 'Source')),
-            'reason': scalar(pick(item, 'reason', 'Reason')),
+            'reason': reason_text,
             'duration': scalar(pick(item, 'duration', 'Duration')),
             'until': scalar(pick(item, 'until', 'Until', 'expiration', 'Expiration')),
             'created_at': scalar(pick(item, 'created_at', 'CreatedAt', 'created', 'Created', 'start_at', 'StartAt')),
