@@ -21,6 +21,8 @@ export const useStore = create((set) => ({
     notifications: state.notifications.filter((n) => n.id !== id),
   })),
 
-  sidebarOpen: true,
+  sidebarOpen: false,
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
+  sidebarCollapsed: false,
+  toggleSidebarCollapsed: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 }))

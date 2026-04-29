@@ -14,6 +14,18 @@ html {
 
 body {
   @apply bg-primary text-gray-100 font-sans;
+  overflow-x: hidden;
+}
+
+#__next {
+  min-height: 100dvh;
+}
+
+img,
+svg,
+video,
+canvas {
+  max-width: 100%;
 }
 
 /* Scrollbar styling */
@@ -96,4 +108,66 @@ body {
 
 .fm-prop {
   color: #fbbf24;
+}
+
+@media (max-width: 640px) {
+  .p-8 {
+    padding: 1rem !important;
+  }
+
+  .p-6 {
+    padding: 1rem !important;
+  }
+
+  .px-8 {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+
+  .py-8 {
+    padding-top: 1rem !important;
+    padding-bottom: 1rem !important;
+  }
+
+  .text-4xl {
+    font-size: 1.875rem !important;
+    line-height: 2.25rem !important;
+  }
+
+  .text-3xl {
+    font-size: 1.5rem !important;
+    line-height: 2rem !important;
+  }
+
+  .text-2xl {
+    font-size: 1.25rem !important;
+    line-height: 1.75rem !important;
+  }
+
+  .gap-6 {
+    gap: 1rem !important;
+  }
+
+  .mb-8 {
+    margin-bottom: 1.25rem !important;
+  }
+
+  .min-w-\[900px\],
+  .min-w-\[920px\],
+  .min-w-\[860px\],
+  .min-w-\[840px\],
+  .min-w-\[760px\] {
+    min-width: 680px !important;
+  }
+
+  table {
+    font-size: 0.8125rem;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font-size: 16px;
+  }
 }

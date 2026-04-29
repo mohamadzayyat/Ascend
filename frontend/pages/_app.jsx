@@ -36,9 +36,9 @@ export default function App({ Component, pageProps }) {
 
   if (user && !isPublic) {
     return (
-      <div className="flex h-screen bg-primary">
+      <div className="flex h-dvh min-h-screen bg-primary overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-auto">
+        <main className="flex-1 min-w-0 overflow-auto pt-14 md:pt-0">
           <Component {...pageProps} />
         </main>
       </div>
