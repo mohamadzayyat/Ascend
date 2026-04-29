@@ -424,6 +424,7 @@ def migrate_schema():
         add_col('app', 'webhook_secret VARCHAR(255)')
         add_col('app', 'auto_deploy BOOLEAN DEFAULT 0')
         add_col('app', 'github_hook_id INTEGER')
+        add_col('app', 'install_command VARCHAR(500)')
         add_col('app', 'disk_size_bytes BIGINT')
         add_col('app', 'disk_size_computed_at DATETIME')
         add_col('app', 'php_version VARCHAR(20)')
@@ -466,6 +467,7 @@ def migrate_schema():
                 app_type=p.project_type or 'website',
                 subdirectory=p.subdirectory,
                 package_manager=p.package_manager or 'npm',
+                install_command=None,
                 build_command=p.build_command,
                 start_command=p.start_command,
                 app_port=p.app_port,
@@ -1993,7 +1995,7 @@ def _app_fields_from_dict(data, allow_all=True):
     """Extract App fields from request JSON, validated/cleaned."""
     out = {}
     for field in ['name', 'app_type', 'subdirectory', 'package_manager',
-                  'build_command', 'start_command', 'pm2_name',
+                  'install_command', 'build_command', 'start_command', 'pm2_name',
                   'php_version', 'php_public_path', 'composer_command',
                   'static_output_path', 'env_content', 'domain', 'client_max_body',
                   'github_url', 'github_branch']:
@@ -2019,6 +2021,8 @@ def _app_fields_from_dict(data, allow_all=True):
     if app_type == 'static':
         out['start_command'] = None
         out['pm2_name'] = None
+    if app_type == 'php':
+        out['install_command'] = None
     if out.get('php_version') and not re.match(r'^\d+(?:\.\d+)?$', out['php_version']):
         raise ValueError('PHP version must look like 8.3 or 8.2')
     if out.get('php_public_path'):
@@ -3094,9 +3098,12 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                     _run_php_build(app_row, deploy_dir, log)
                 elif (deploy_dir / 'package.json').exists():
                     pm = app_row.package_manager or 'npm'
-                    log.write(f"\nStep 3: Installing dependencies ({pm} install)...\n")
-                    if not run_cmd([pm, 'install'], log, cwd=deploy_dir):
-                        raise RuntimeError(f"{pm} install failed")
+                    install_command = (app_row.install_command or '').strip()
+                    if not install_command:
+                        install_command = f'{pm} install'
+                    log.write(f"\nStep 3: Installing dependencies ({install_command})...\n")
+                    if not run_cmd(install_command, log, cwd=deploy_dir, shell=True):
+                        raise RuntimeError(f"{install_command} failed")
 
                     if app_row.build_command:
                         log.write(f"\nStep 4: Building ({app_row.build_command})...\n")

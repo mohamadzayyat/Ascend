@@ -144,6 +144,7 @@ class App(db.Model):
     github_hook_id = db.Column(db.Integer)
 
     package_manager = db.Column(db.String(20), default='npm')
+    install_command = db.Column(db.String(500))
     build_command = db.Column(db.String(500))
     start_command = db.Column(db.String(500))
     app_port = db.Column(db.Integer)
@@ -188,6 +189,7 @@ class App(db.Model):
             'auto_deploy': self.auto_deploy,
             'github_hook_id': self.github_hook_id,
             'package_manager': self.package_manager,
+            'install_command': self.install_command,
             'build_command': self.build_command,
             'start_command': self.start_command,
             'app_port': self.app_port,

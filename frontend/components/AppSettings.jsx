@@ -33,6 +33,7 @@ export default function AppSettings({ app, onUpdate }) {
     enable_webhook: app?.enable_webhook !== false,
     subdirectory: app?.subdirectory || '',
     package_manager: app?.package_manager || 'npm',
+    install_command: app?.install_command || '',
     build_command: app?.build_command || '',
     start_command: app?.start_command || '',
     pm2_name: app?.pm2_name || '',
@@ -55,6 +56,7 @@ export default function AppSettings({ app, onUpdate }) {
       const next = { ...prev, [name]: type === 'checkbox' ? checked : value }
       if (name === 'app_type' && value === 'php') {
         next.package_manager = ''
+        next.install_command = ''
         next.build_command = ''
         next.start_command = ''
         next.pm2_name = ''
@@ -64,6 +66,7 @@ export default function AppSettings({ app, onUpdate }) {
       }
       if (name === 'app_type' && value === 'static') {
         next.package_manager = next.package_manager || 'npm'
+        next.install_command = next.install_command || ''
         next.build_command = next.build_command || 'npm run build'
         next.start_command = ''
         next.pm2_name = ''
@@ -72,6 +75,7 @@ export default function AppSettings({ app, onUpdate }) {
       }
       if (name === 'app_type' && value !== 'php' && value !== 'static' && (prev.app_type === 'php' || prev.app_type === 'static')) {
         next.package_manager = 'npm'
+        next.install_command = ''
         next.build_command = 'npm run build'
         next.start_command = 'npm start'
       }
@@ -414,6 +418,7 @@ export default function AppSettings({ app, onUpdate }) {
             {select('Package Manager', 'package_manager', [
               ['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM'],
             ])}
+            {input('Install Command', 'install_command', 'text', 'npm install --legacy-peer-deps', 'Optional. Leave blank to run the package manager default, for example npm install.')}
             {input('Build Command', 'build_command', 'text', 'npm run build')}
             {input('Static Output Directory', 'static_output_path', 'text', 'dist', 'Relative to the app directory. Vite usually outputs dist.')}
           </div>
@@ -422,6 +427,7 @@ export default function AppSettings({ app, onUpdate }) {
             {select('Package Manager', 'package_manager', [
               ['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM'],
             ])}
+            {input('Install Command', 'install_command', 'text', 'npm install --legacy-peer-deps', 'Optional. Leave blank to run the package manager default, for example npm install.')}
             {input('Build Command', 'build_command', 'text', 'npm run build')}
             {input('Start Command', 'start_command', 'text', 'npm start')}
             {input('PM2 App Name', 'pm2_name', 'text', 'myproject-api')}

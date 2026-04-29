@@ -201,12 +201,14 @@ export default function AppDetail() {
               ) : app.app_type === 'static' ? (
                 <>
                   <Row label="Runtime" value="Static Nginx site" />
+                  <Row label="Install command" value={app.install_command || `${app.package_manager || 'npm'} install`} mono />
                   <Row label="Build command" value={app.build_command || 'npm run build'} mono />
                   <Row label="Output directory" value={app.static_output_path || 'dist'} mono />
                 </>
               ) : (
                 <>
                   <Row label="Package manager" value={app.package_manager} />
+                  <Row label="Install command" value={app.install_command || `${app.package_manager || 'npm'} install`} mono />
                   <Row label="Build command" value={app.build_command} mono />
                   <Row label="Start command" value={app.start_command} mono />
                   <Row label="PM2 name" value={app.pm2_name} mono />

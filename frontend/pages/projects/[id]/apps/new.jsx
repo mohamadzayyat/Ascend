@@ -20,6 +20,7 @@ export default function NewApp() {
     enable_webhook: true,
     subdirectory: '',
     package_manager: 'npm',
+    install_command: '',
     build_command: 'npm run build',
     start_command: 'npm start',
     pm2_name: '',
@@ -55,6 +56,7 @@ export default function NewApp() {
       const next = { ...prev, [name]: type === 'checkbox' ? checked : value }
       if (name === 'app_type' && value === 'php') {
         next.package_manager = ''
+        next.install_command = ''
         next.build_command = ''
         next.start_command = ''
         next.pm2_name = ''
@@ -65,6 +67,7 @@ export default function NewApp() {
       }
       if (name === 'app_type' && value === 'static') {
         next.package_manager = next.package_manager || 'npm'
+        next.install_command = next.install_command || ''
         next.build_command = next.build_command || 'npm run build'
         next.start_command = ''
         next.pm2_name = ''
@@ -74,6 +77,7 @@ export default function NewApp() {
       }
       if (name === 'app_type' && value !== 'php' && value !== 'static' && (prev.app_type === 'php' || prev.app_type === 'static')) {
         next.package_manager = 'npm'
+        next.install_command = ''
         next.build_command = 'npm run build'
         next.start_command = 'npm start'
         setPortTouched(false)
@@ -371,12 +375,14 @@ export default function NewApp() {
           ) : formData.app_type === 'static' ? (
             <div className="space-y-4">
               {select('Package Manager', 'package_manager', [['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM']])}
+              {input('Install Command', 'install_command', 'text', 'npm install --legacy-peer-deps', 'Optional. Leave blank to run the package manager default, for example npm install.')}
               {input('Build Command', 'build_command', 'text', 'npm run build')}
               {input('Static Output Directory', 'static_output_path', 'text', 'dist', 'Relative to the app directory. Vite usually outputs dist.')}
             </div>
           ) : (
             <div className="space-y-4">
               {select('Package Manager', 'package_manager', [['npm', 'NPM'], ['yarn', 'Yarn'], ['pnpm', 'PNPM']])}
+              {input('Install Command', 'install_command', 'text', 'npm install --legacy-peer-deps', 'Optional. Leave blank to run the package manager default, for example npm install.')}
               {input('Build Command', 'build_command', 'text', 'npm run build')}
               {input('Start Command', 'start_command', 'text', 'npm start')}
               {input('PM2 Name', 'pm2_name', 'text', '', 'Leave empty to auto-generate from project + app name.')}
