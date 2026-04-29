@@ -148,6 +148,16 @@ def _crowdsec_decisions():
                 return lowered.get(normalized)
         return None
 
+    def scalar(value):
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return str(value)
+        try:
+            return json.dumps(value, sort_keys=True)
+        except Exception:
+            return str(value)
+
     items = []
     for item in raw_items if isinstance(raw_items, list) else []:
         if not isinstance(item, dict):
@@ -160,15 +170,15 @@ def _crowdsec_decisions():
             scope = scope or left.strip()
             scope_value = right.strip()
         items.append({
-            'id': pick(item, 'id', 'ID'),
-            'value': scope_value,
-            'scope': scope,
-            'type': pick(item, 'type', 'Type'),
-            'origin': pick(item, 'origin', 'Origin', 'source', 'Source'),
-            'reason': pick(item, 'reason', 'Reason'),
-            'duration': pick(item, 'duration', 'Duration'),
-            'until': pick(item, 'until', 'Until', 'expiration', 'Expiration'),
-            'scenario': pick(item, 'scenario', 'Scenario'),
+            'id': scalar(pick(item, 'id', 'ID')),
+            'value': scalar(scope_value),
+            'scope': scalar(scope),
+            'type': scalar(pick(item, 'type', 'Type')),
+            'origin': scalar(pick(item, 'origin', 'Origin', 'source', 'Source')),
+            'reason': scalar(pick(item, 'reason', 'Reason')),
+            'duration': scalar(pick(item, 'duration', 'Duration')),
+            'until': scalar(pick(item, 'until', 'Until', 'expiration', 'Expiration')),
+            'scenario': scalar(pick(item, 'scenario', 'Scenario')),
             'raw': item,
         })
     return {'available': True, 'items': items, 'error': ''}

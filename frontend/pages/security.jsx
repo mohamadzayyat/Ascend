@@ -133,6 +133,21 @@ function daysSince(iso) {
   return ms / 86400000
 }
 
+function asText(value, fallback = '-') {
+  if (value === null || value === undefined || value === '') return fallback
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) return value.map((v) => asText(v, '')).filter(Boolean).join(', ') || fallback
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return fallback
+  }
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
 export default function SecurityPage() {
   const [activeTab, setActiveTab] = useState('overview')
   const [status, setStatus] = useState(null)
@@ -153,7 +168,7 @@ export default function SecurityPage() {
   const crowdsecInstall = state.crowdsec_install || {}
   const findings = state.findings || scan.findings || []
   const quarantineItems = state.quarantine || []
-  const crowdsecDecisions = tools.crowdsec_decisions?.items || []
+  const crowdsecDecisions = asArray(tools.crowdsec_decisions?.items)
   const autoSshBlock = status?.auto_ssh_block || state.auto_ssh_block_last || {}
   const scanRunning = ['starting', 'running'].includes(scan.status)
   const installRunning = ['starting', 'running'].includes(install.status)
@@ -191,7 +206,12 @@ export default function SecurityPage() {
   const loadSshFailures = async () => {
     try {
       const { data } = await apiClient.getSshFailures(500)
-      setSshFailures(data || { summary: [], events: [], total: 0, errors: [] })
+      setSshFailures({
+        summary: asArray(data?.summary),
+        events: asArray(data?.events),
+        total: Number(data?.total || 0),
+        errors: asArray(data?.errors),
+      })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load SSH failures')
     }
@@ -484,7 +504,7 @@ export default function SecurityPage() {
                     <p className="text-gray-400 text-sm mt-1">
                       Public IPs with {autoSshBlock.threshold || 5}+ failed SSH logins in 24 hours are blocked for {autoSshBlock.duration || '24h'}.
                     </p>
-                    {autoSshBlock.skipped && <p className="text-yellow-200 text-sm mt-2">{autoSshBlock.skipped}</p>}
+                    {autoSshBlock.skipped && <p className="text-yellow-200 text-sm mt-2">{asText(autoSshBlock.skipped)}</p>}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Badge value={autoSshBlock.enabled === false ? 'disabled' : 'enabled'} tone={autoSshBlock.enabled === false ? 'yellow' : 'green'} />
@@ -503,7 +523,7 @@ export default function SecurityPage() {
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left min-w-[900px]">
                       <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked value</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Origin</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
-                      <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${item.id || item.value}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value || <span className="text-yellow-200">Decision #{item.id}</span>}</td><td className="px-4 py-3 text-gray-300">{item.scope || item.type || '-'}</td><td className="px-4 py-3 text-gray-300">{item.reason || item.scenario || '-'}</td><td className="px-4 py-3 text-gray-400">{item.origin || '-'}</td><td className="px-4 py-3 text-gray-400">{item.until || item.duration || '-'}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${item.value || item.id}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
+                      <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${asText(item.id || item.value, idx)}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value ? asText(item.value) : <span className="text-yellow-200">Decision #{asText(item.id)}</span>}</td><td className="px-4 py-3 text-gray-300">{asText(item.scope || item.type)}</td><td className="px-4 py-3 text-gray-300">{asText(item.reason || item.scenario)}</td><td className="px-4 py-3 text-gray-400">{asText(item.origin)}</td><td className="px-4 py-3 text-gray-400">{asText(item.until || item.duration)}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${asText(item.value || item.id)}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
                     </table>
                   </div>
                 )}
@@ -524,25 +544,26 @@ export default function SecurityPage() {
                     </button>
                   </div>
                 </div>
-                {sshFailures.errors?.length > 0 && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{sshFailures.errors.join(' | ')}</div>}
+                {sshFailures.errors?.length > 0 && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{sshFailures.errors.map((e) => asText(e)).join(' | ')}</div>}
                 <div className="px-5 py-3 text-sm text-gray-400 border-b border-gray-700">{sshFailures.total || 0} failed SSH login event(s), {sshFailures.summary?.length || 0} public source IP(s)</div>
                 {!sshFailures.summary?.length ? <div className="p-8 text-center text-gray-500 text-sm">No failed SSH logins found in the current window.</div> : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left min-w-[900px]">
                       <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Source IP</th><th className="px-4 py-3">Failures</th><th className="px-4 py-3">Top users</th><th className="px-4 py-3">Last seen</th><th className="px-4 py-3">Latest log</th><th className="px-4 py-3"></th></tr></thead>
                       <tbody className="divide-y divide-gray-700/70">{sshFailures.summary.map((row) => {
-                        const alreadyBlocked = crowdsecDecisions.some((d) => d.value === row.ip)
+                        const rowIp = asText(row.ip, '')
+                        const alreadyBlocked = crowdsecDecisions.some((d) => asText(d.value, '') === rowIp)
                         return (
-                          <tr key={row.ip}>
-                            <td className="px-4 py-3 text-white font-mono">{row.ip}</td>
-                            <td className="px-4 py-3"><Badge value={row.count} tone={row.count >= 5 ? 'red' : 'yellow'} /></td>
-                            <td className="px-4 py-3 text-gray-300">{(row.users || []).slice(0, 3).map((u) => `${u.user} (${u.count})`).join(', ') || '-'}</td>
-                            <td className="px-4 py-3 text-gray-400">{row.last_seen || '-'}</td>
-                            <td className="px-4 py-3 text-gray-500 font-mono text-xs max-w-md truncate">{row.latest_raw || '-'}</td>
+                          <tr key={rowIp}>
+                            <td className="px-4 py-3 text-white font-mono">{rowIp}</td>
+                            <td className="px-4 py-3"><Badge value={asText(row.count, '0')} tone={Number(row.count || 0) >= 5 ? 'red' : 'yellow'} /></td>
+                            <td className="px-4 py-3 text-gray-300">{asArray(row.users).slice(0, 3).map((u) => `${asText(u.user, 'unknown')} (${asText(u.count, '0')})`).join(', ') || '-'}</td>
+                            <td className="px-4 py-3 text-gray-400">{asText(row.last_seen)}</td>
+                            <td className="px-4 py-3 text-gray-500 font-mono text-xs max-w-md truncate">{asText(row.latest_raw)}</td>
                             <td className="px-4 py-3 text-right">
                               {alreadyBlocked ? <Badge value="blocked" tone="green" /> : (
-                                <button onClick={() => blockIp(row.ip, row.count)} disabled={busy === `block-${row.ip}` || !crowdsecInstalled} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">
-                                  {busy === `block-${row.ip}` ? 'Blocking...' : 'Block'}
+                                <button onClick={() => blockIp(rowIp, row.count)} disabled={busy === `block-${rowIp}` || !crowdsecInstalled} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">
+                                  {busy === `block-${rowIp}` ? 'Blocking...' : 'Block'}
                                 </button>
                               )}
                             </td>
