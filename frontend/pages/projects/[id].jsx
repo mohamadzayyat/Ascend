@@ -27,6 +27,13 @@ export default function ProjectDetail() {
 
   useEffect(() => {
     if (!project?.id) return
+    if (project.repo_mode === 'multi') {
+      setBranches([])
+      setSelectedBranch('')
+      setBranchesError('')
+      setBranchesLoading(false)
+      return
+    }
     let cancelled = false
     setBranchesLoading(true)
     setBranchesError('')
@@ -50,7 +57,7 @@ export default function ProjectDetail() {
     return () => {
       cancelled = true
     }
-  }, [project?.id, project?.github_branch])
+  }, [project?.id, project?.github_branch, project?.repo_mode])
 
   if (!id) return null
   if (isLoading) {
@@ -109,7 +116,7 @@ export default function ProjectDetail() {
             >
               <Plus className="w-4 h-4" /> Add App
             </Link>
-            {apps.length > 0 && (
+            {project.repo_mode !== 'multi' && apps.length > 0 && (
               <label className="flex items-center gap-2 px-3 py-2 bg-primary border border-gray-700 rounded-lg text-sm text-gray-200">
                 <GitBranch className="w-4 h-4 text-accent" />
                 <select
@@ -128,7 +135,7 @@ export default function ProjectDetail() {
                 </select>
               </label>
             )}
-            {apps.length > 0 && (
+            {project.repo_mode !== 'multi' && apps.length > 0 && (
               <button
                 onClick={deployAll}
                 disabled={deployingAll || branchesLoading || !selectedBranch}

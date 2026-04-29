@@ -15,6 +15,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
+import { useDialog } from '@/lib/dialog'
 
 const TABS = [
   ['overview', 'Overview'],
@@ -182,6 +183,7 @@ function Pager({ page, total, onPage }) {
 }
 
 export default function SecurityPage() {
+  const dialog = useDialog()
   const [activeTab, setActiveTab] = useState('overview')
   const [status, setStatus] = useState(null)
   const [logKind, setLogKind] = useState('scan')
@@ -363,7 +365,13 @@ export default function SecurityPage() {
 
   const unblockDecision = async (item) => {
     const label = item.value || `decision #${item.id}`
-    if (!window.confirm(`Remove CrowdSec block for ${label}?`)) return
+    const ok = await dialog.confirm({
+      title: 'Remove IP block?',
+      message: `Remove CrowdSec block for ${label}? This will unblock the source.`,
+      confirmLabel: 'Unblock',
+      tone: 'warning',
+    })
+    if (!ok) return
     setBusy(`unblock-${label}`)
     try {
       await apiClient.deleteCrowdSecDecision({ id: item.id, value: item.value })
@@ -376,7 +384,13 @@ export default function SecurityPage() {
   }
 
   const blockIp = async (ip, count = 0) => {
-    if (!window.confirm(`Block ${ip} with CrowdSec for 24 hours?`)) return
+    const ok = await dialog.confirm({
+      title: 'Block IP address?',
+      message: `Block ${ip} with CrowdSec for 24 hours?`,
+      confirmLabel: 'Block IP',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy(`block-${ip}`)
     setError('')
     setMessage('')
@@ -392,7 +406,13 @@ export default function SecurityPage() {
   }
 
   const blockRepeatAttackers = async () => {
-    if (!window.confirm('Block all public IPs with 5 or more failed SSH logins in the last 24 hours?')) return
+    const ok = await dialog.confirm({
+      title: 'Block repeat SSH attackers?',
+      message: 'Block all public IPs with 5 or more failed SSH logins in the last 24 hours?',
+      confirmLabel: 'Block attackers',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy('block-repeat-ssh')
     setError('')
     setMessage('')
@@ -408,7 +428,13 @@ export default function SecurityPage() {
   }
 
   const killThreatProcess = async (pid) => {
-    if (!window.confirm(`Kill suspicious process ${pid}?`)) return
+    const ok = await dialog.confirm({
+      title: 'Kill suspicious process?',
+      message: `Kill suspicious process ${pid}?`,
+      confirmLabel: 'Kill process',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy(`kill-${pid}`)
     try {
       await apiClient.killSecurityThreatProcess(pid)
@@ -443,7 +469,13 @@ export default function SecurityPage() {
   }
 
   const removeThreatLine = async (item) => {
-    if (!window.confirm(`Remove suspicious line from ${item.path}:${item.line}? A safety copy will be stored outside the scanned cron/systemd paths.`)) return
+    const ok = await dialog.confirm({
+      title: 'Remove persistence line?',
+      message: `Remove suspicious line from ${item.path}:${item.line}? A safety copy will be stored outside the scanned cron/systemd paths.`,
+      confirmLabel: 'Remove line',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy(`line-${item.path}-${item.line}`)
     try {
       await apiClient.deleteSecurityThreatPersistenceLine(item.path, item.line)
@@ -459,7 +491,13 @@ export default function SecurityPage() {
   }
 
   const removeImmutable = async (path) => {
-    if (!window.confirm(`Remove immutable flag from ${path}?`)) return
+    const ok = await dialog.confirm({
+      title: 'Remove immutable flag?',
+      message: `Remove immutable flag from ${path}?`,
+      confirmLabel: 'Remove flag',
+      tone: 'warning',
+    })
+    if (!ok) return
     setBusy(`immutable-${path}`)
     try {
       await apiClient.removeSecurityImmutableFlag(path)
@@ -472,7 +510,13 @@ export default function SecurityPage() {
   }
 
   const deleteThreatFile = async (path) => {
-    if (!window.confirm(`Delete suspicious file ${path}?`)) return
+    const ok = await dialog.confirm({
+      title: 'Delete suspicious file?',
+      message: `Delete suspicious file ${path}? This cannot be undone.`,
+      confirmLabel: 'Delete file',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy(`file-${path}`)
     try {
       await apiClient.deleteSecurityThreatFile(path)
@@ -502,7 +546,13 @@ export default function SecurityPage() {
     if (!selected.length) return
     const backups = selected.filter((item) => item.is_cleanup_backup).length
     const lines = selected.length - selected.filter(canDeleteThreatPersistenceFile).length
-    if (!window.confirm(`Clean ${selected.length} selected threat item(s)? This will remove ${lines} live line(s) and delete ${backups} cleanup backup file(s) when selected.`)) return
+    const ok = await dialog.confirm({
+      title: 'Clean selected threats?',
+      message: `Clean ${selected.length} selected threat item(s)? This will remove ${lines} live line(s) and delete ${backups} cleanup backup file(s) when selected.`,
+      confirmLabel: 'Clean selected',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy('bulk-persistence')
     setError('')
     setMessage('')
@@ -524,7 +574,13 @@ export default function SecurityPage() {
   }
 
   const clearFindings = async () => {
-    if (!window.confirm('Clear security findings from Ascend? Quarantined files will remain.')) return
+    const ok = await dialog.confirm({
+      title: 'Clear security findings?',
+      message: 'Clear security findings from Ascend? Quarantined files will remain.',
+      confirmLabel: 'Clear findings',
+      tone: 'warning',
+    })
+    if (!ok) return
     setBusy('clear-findings')
     try {
       await apiClient.clearSecurityFindings()
@@ -537,7 +593,13 @@ export default function SecurityPage() {
   }
 
   const clearQuarantine = async () => {
-    if (!window.confirm('Delete all quarantined files permanently?')) return
+    const ok = await dialog.confirm({
+      title: 'Delete quarantine?',
+      message: 'Delete all quarantined files permanently? This cannot be undone.',
+      confirmLabel: 'Delete quarantine',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy('clear-quarantine')
     try {
       await apiClient.clearSecurityQuarantine()

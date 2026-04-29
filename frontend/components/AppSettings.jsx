@@ -3,7 +3,7 @@ import { useRouter } from 'next/router'
 import { RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import DomainDnsCheck from '@/components/DomainDnsCheck'
-import { typedConfirm } from '@/lib/confirm'
+import { useDialog } from '@/lib/dialog'
 
 export default function AppSettings({ app, onUpdate }) {
   const router = useRouter()
@@ -11,6 +11,9 @@ export default function AppSettings({ app, onUpdate }) {
   const [deleting, setDeleting] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  const [webhookInfo, setWebhookInfo] = useState(null)
+  const [syncingWebhook, setSyncingWebhook] = useState(false)
+  const dialog = useDialog()
   const [dnsStatus, setDnsStatus] = useState('idle')
   const [portLoading, setPortLoading] = useState(false)
   const [portHint, setPortHint] = useState('')
@@ -24,6 +27,10 @@ export default function AppSettings({ app, onUpdate }) {
   const [formData, setFormData] = useState({
     name: app?.name || '',
     app_type: app?.app_type || 'website',
+    github_url: app?.github_url || '',
+    github_branch: app?.github_branch || 'main',
+    auto_deploy: app?.auto_deploy === true,
+    enable_webhook: app?.enable_webhook !== false,
     subdirectory: app?.subdirectory || '',
     package_manager: app?.package_manager || 'npm',
     build_command: app?.build_command || '',
@@ -40,6 +47,7 @@ export default function AppSettings({ app, onUpdate }) {
     client_max_body: app?.client_max_body || '6G',
     env_content: app?.env_content || '',
   })
+  const isMultiRepo = app?.project?.repo_mode === 'multi'
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target
@@ -85,7 +93,9 @@ export default function AppSettings({ app, onUpdate }) {
     setSubdirCheck({ status: 'checking', message: 'Checking repository path...' })
     const timer = setTimeout(async () => {
       try {
-        const res = await apiClient.checkProjectSubdirectory(app.project_id, path)
+        const res = isMultiRepo
+          ? await apiClient.checkAppSubdirectory(app.id, path, formData.github_branch)
+          : await apiClient.checkProjectSubdirectory(app.project_id, path)
         if (!cancelled) setSubdirCheck({ status: 'ok', message: `Found ${res.data.path} on ${res.data.source}.` })
       } catch (err) {
         if (!cancelled) setSubdirCheck({ status: 'error', message: err.response?.data?.error || 'Subdirectory was not found.' })
@@ -95,7 +105,7 @@ export default function AppSettings({ app, onUpdate }) {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [app?.project_id, app?.subdirectory, formData.subdirectory])
+  }, [app?.id, app?.project_id, app?.subdirectory, formData.subdirectory, formData.github_branch, isMultiRepo])
 
   useEffect(() => {
     if (formData.app_type !== 'php') return
@@ -181,12 +191,14 @@ export default function AppSettings({ app, onUpdate }) {
     setLoading(true)
     setError('')
     setSaved(false)
+    setWebhookInfo(null)
     try {
       const res = await apiClient.updateApp(app.id, {
         ...formData,
         app_port: ['php', 'static'].includes(formData.app_type) ? null : (formData.app_port ? parseInt(formData.app_port, 10) : null),
       })
       setSaved(true)
+      if (res.data.github_webhook) setWebhookInfo(res.data.github_webhook)
       if (onUpdate) onUpdate(res.data)
       setTimeout(() => setSaved(false), 3000)
     } catch (err) {
@@ -196,14 +208,35 @@ export default function AppSettings({ app, onUpdate }) {
     }
   }
 
+  const handleSyncWebhook = async () => {
+    setSyncingWebhook(true)
+    setError('')
+    setWebhookInfo(null)
+    try {
+      const res = await apiClient.syncAppWebhook(app.id)
+      setWebhookInfo(res.data)
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to sync GitHub webhook')
+    } finally {
+      setSyncingWebhook(false)
+    }
+  }
+
   const handleDelete = async () => {
-    if (!typedConfirm(`Delete app "${app.name}"? This stops the PM2 process but keeps the repo.`, app.name)) return
+    const ok = await dialog.typedConfirm({
+      title: 'Delete app?',
+      message: `Delete app "${app.name}"? This stops the PM2 process but keeps the repo.`,
+      expected: app.name,
+      confirmLabel: 'Delete app',
+      tone: 'danger',
+    })
+    if (!ok) return
     setDeleting(true)
     try {
       await apiClient.deleteApp(app.id, app.name)
       router.push(`/projects/${app.project_id}`)
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to delete app')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Failed to delete app', tone: 'danger' })
       setDeleting(false)
     }
   }
@@ -328,11 +361,41 @@ export default function AppSettings({ app, onUpdate }) {
           {select('Type', 'app_type', [
             ['website', 'Website'], ['static', 'Static site'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
           ])}
-          {input('Subdirectory (monorepo)', 'subdirectory', 'text', 'api/ or cms/', 'Leave empty if the project root is this app.')}
+          {isMultiRepo && input('GitHub URL', 'github_url', 'url', 'https://github.com/user/backend')}
+          {isMultiRepo && input('Branch', 'github_branch', 'text', 'main')}
+          {input(isMultiRepo ? 'Subdirectory' : 'Subdirectory (monorepo)', 'subdirectory', 'text', isMultiRepo ? '' : 'api/ or cms/', isMultiRepo ? 'Relative path inside this app repository. Leave empty if the app is the repo root.' : 'Leave empty if the project root is this app.')}
           {subdirCheck.status !== 'idle' && (
             <p className={`text-xs ${subdirCheck.status === 'ok' ? 'text-green-400' : subdirCheck.status === 'checking' ? 'text-yellow-400' : 'text-red-400'}`}>
               {subdirCheck.message}
             </p>
+          )}
+          {isMultiRepo && check('Auto-deploy this app on GitHub push', 'auto_deploy')}
+          {isMultiRepo && check('Enable webhook endpoint for this app', 'enable_webhook')}
+          {isMultiRepo && app?.webhook_secret && (
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Webhook URL for this app</p>
+              <p className="text-xs font-mono text-gray-400 break-all bg-primary p-3 rounded">
+                {typeof window !== 'undefined' ? window.location.origin : ''}/webhook/github/{app.webhook_secret}
+              </p>
+              {webhookInfo && (
+                <div className="text-xs mt-2">
+                  <p className="text-green-400">
+                    GitHub webhook: <span className="font-mono">{webhookInfo.status}</span>
+                  </p>
+                  {webhookInfo.url && <p className="text-gray-400 font-mono break-all mt-1">{webhookInfo.url}</p>}
+                  {webhookInfo.reason && <p className="text-yellow-400 mt-1">{webhookInfo.reason}</p>}
+                  {webhookInfo.message && <p className="text-red-400 mt-1">{webhookInfo.message}</p>}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={handleSyncWebhook}
+                disabled={syncingWebhook || !formData.auto_deploy || !formData.enable_webhook}
+                className="mt-3 px-3 py-2 bg-primary hover:bg-gray-700 border border-gray-600 text-white text-sm rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {syncingWebhook ? 'Syncing...' : 'Sync App Webhook'}
+              </button>
+            </div>
           )}
         </div>
       </div>

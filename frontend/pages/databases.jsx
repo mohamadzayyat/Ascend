@@ -2276,6 +2276,10 @@ function RestoreTab({ connection }) {
   const [job, setJob] = useState(null)
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [downloadUrl, setDownloadUrl] = useState('')
+  const [downloadFilename, setDownloadFilename] = useState('')
+  const [downloadBusy, setDownloadBusy] = useState(false)
+  const [downloadResult, setDownloadResult] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -2310,6 +2314,35 @@ function RestoreTab({ connection }) {
     return () => clearInterval(t)
   }, [job])
 
+  const downloadBackup = async () => {
+    const url = downloadUrl.trim()
+    if (!url) {
+      setError('Paste a public .sql file URL first.')
+      return
+    }
+    setDownloadBusy(true)
+    setError('')
+    setDownloadResult('')
+    try {
+      const res = await apiClient.downloadDbBackupFromUrl(connection.id, {
+        url,
+        filename: downloadFilename.trim(),
+      })
+      const backup = res.data.backup
+      await load()
+      setForm((f) => ({ ...f, backup_id: String(backup?.id || f.backup_id) }))
+      setDownloadResult(`Downloaded ${backup?.filename || 'SQL backup'} and selected it for restore.`)
+      setDownloadUrl('')
+      setDownloadFilename('')
+    } catch (err) {
+      const backup = err.response?.data?.backup
+      const suffix = backup?.filename ? ` (${backup.filename})` : ''
+      setError((err.response?.data?.error || 'Failed to download SQL backup from URL') + suffix)
+    } finally {
+      setDownloadBusy(false)
+    }
+  }
+
   const start = async () => {
     if (!form.backup_id || !form.target_database.trim()) {
       setError('Choose a backup and target database.')
@@ -2321,13 +2354,13 @@ function RestoreTab({ connection }) {
       ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.`
       : `Create database "${target}" and restore this backup into it?`
     const ok = await dialog.confirm({
-      title: existing ? 'Restore into existing database?' : 'Create and restore database?',
+      title: targetExists ? 'Restore into existing database?' : 'Create and restore database?',
       message: msg,
       confirmLabel: 'Start restore',
-      tone: existing ? 'warning' : 'info',
+      tone: targetExists ? 'warning' : 'info',
     })
     if (!ok) return
-    if (form.replace_existing) {
+    if (targetExists && form.replace_existing) {
       const typedOk = await dialog.typedConfirm({
         title: 'Confirm replacement',
         message: `Restore will replace "${target}" after taking a safety backup.`,
@@ -2337,6 +2370,7 @@ function RestoreTab({ connection }) {
       })
       if (!typedOk) return
     }
+    const shouldReplace = targetExists && !!form.replace_existing
     setStarting(true)
     setError('')
     try {
@@ -2344,8 +2378,8 @@ function RestoreTab({ connection }) {
         backup_id: Number(form.backup_id),
         target_database: target,
         collation: form.collation.trim() || 'utf8mb4_general_ci',
-        replace_existing: !!form.replace_existing,
-        confirm_text: form.replace_existing ? target : '',
+        replace_existing: shouldReplace,
+        confirm_text: shouldReplace ? target : '',
       })
       setJob(res.data.job)
     } catch (err) {
@@ -2361,6 +2395,38 @@ function RestoreTab({ connection }) {
         Restoring to an existing database first creates a safety backup. New databases default to utf8mb4_general_ci.
       </div>
       {error && <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>}
+      {downloadResult && <div className="rounded border border-green-500/30 bg-green-500/10 p-3 text-green-300 text-sm">{downloadResult}</div>}
+      <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-4xl">
+        <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+          <div>
+            <h3 className="text-white font-semibold">Download SQL backup from URL</h3>
+            <p className="text-xs text-gray-400 mt-1">Download a public .sql file, then select it below and restore it into any database.</p>
+          </div>
+          <button
+            type="button"
+            onClick={downloadBackup}
+            disabled={downloadBusy || !downloadUrl.trim()}
+            className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm inline-flex items-center gap-2 disabled:opacity-50"
+          >
+            {downloadBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            Download backup
+          </button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_240px] gap-3">
+          <input
+            value={downloadUrl}
+            onChange={(e) => setDownloadUrl(e.target.value)}
+            placeholder="https://example.com/backup.sql"
+            className="w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white placeholder-gray-500 text-sm"
+          />
+          <input
+            value={downloadFilename}
+            onChange={(e) => setDownloadFilename(e.target.value)}
+            placeholder="Optional filename.sql"
+            className="w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white placeholder-gray-500 text-sm"
+          />
+        </div>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-3xl">
         <label className="md:col-span-2 text-sm text-gray-300">
           Backup

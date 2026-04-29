@@ -46,8 +46,11 @@ export const apiClient = {
   deleteProject: (id, confirmText) => api.delete(`/api/project/${id}`, { data: { confirm_text: confirmText } }),
   syncProjectWebhook: (id) => api.post(`/api/project/${id}/github-webhook/sync`),
   listProjectBranches: (id) => api.get(`/api/project/${id}/branches`),
+  listAppBranches: (id) => api.get(`/api/app/${id}/branches`),
   checkProjectSubdirectory: (id, path, branch) =>
     api.get(`/api/project/${id}/subdirectory-check`, { params: { path, ...(branch ? { branch } : {}) } }),
+  checkAppSubdirectory: (id, path, branch) =>
+    api.get(`/api/app/${id}/subdirectory-check`, { params: { path, ...(branch ? { branch } : {}) } }),
 
   // Apps (deployment units inside a project)
   listApps: (projectId) => api.get(`/api/project/${projectId}/apps`),
@@ -55,6 +58,7 @@ export const apiClient = {
   getApp: (id) => api.get(`/api/app/${id}`),
   updateApp: (id, data) => api.put(`/api/app/${id}`, data),
   deleteApp: (id, confirmText) => api.delete(`/api/app/${id}`, { data: { confirm_text: confirmText } }),
+  syncAppWebhook: (id) => api.post(`/api/app/${id}/github-webhook/sync`),
   deployApp: (id, branch) => api.post(`/api/app/${id}/deploy`, { branch }),
   restartApp: (id) => api.post(`/api/app/${id}/restart`),
   retryAppSsl: (id) => api.post(`/api/app/${id}/ssl/retry`),
@@ -228,6 +232,8 @@ export const apiClient = {
     }),
   listDbBackups: (id) => api.get(`/api/databases/connections/${id}/backups`),
   runDbBackup: (id) => api.post(`/api/databases/connections/${id}/backups/run`),
+  downloadDbBackupFromUrl: (id, data) =>
+    api.post(`/api/databases/connections/${id}/backups/download-url`, data, { timeout: 1900000 }),
   startDbRestore: (id, data) => api.post(`/api/databases/connections/${id}/restore-jobs`, data, { timeout: 120000 }),
   getDbRestoreJob: (jobId) => api.get(`/api/databases/restore-jobs/${jobId}`),
   downloadDbBackupUrl: (backupId) =>
@@ -271,6 +277,8 @@ export function makeFileApi(prefix) {
     write: (path, content) => api.post(`${prefix}/files/write`, { path, content }),
     downloadUrl: (path) => `${API_URL}${prefix}/files/download?path=${encodeURIComponent(path)}`,
     fetchBlob: (path) => api.get(`${prefix}/files/download`, { params: { path }, responseType: 'blob' }),
+    downloadFromUrl: (path, url, filename = '') =>
+      api.post(`${prefix}/files/download-url`, { path, url, filename }, { timeout: 1900000 }),
     upload: (path, files, { unzip = false, onProgress } = {}) => {
       const form = new FormData()
       form.append('path', path || '')

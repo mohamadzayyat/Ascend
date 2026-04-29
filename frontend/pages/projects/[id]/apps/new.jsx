@@ -14,6 +14,10 @@ export default function NewApp() {
   const [formData, setFormData] = useState({
     name: '',
     app_type: 'website',
+    github_url: '',
+    github_branch: 'main',
+    auto_deploy: false,
+    enable_webhook: true,
     subdirectory: '',
     package_manager: 'npm',
     build_command: 'npm run build',
@@ -42,6 +46,7 @@ export default function NewApp() {
   const [phpInstallError, setPhpInstallError] = useState('')
   const [phpInstalling, setPhpInstalling] = useState(false)
   const [subdirCheck, setSubdirCheck] = useState({ status: 'idle', message: '' })
+  const isMultiRepo = project?.repo_mode === 'multi'
 
   const onChange = (e) => {
     const { name, value, type, checked } = e.target
@@ -103,7 +108,7 @@ export default function NewApp() {
 
   useEffect(() => {
     const path = formData.subdirectory.trim()
-    if (!projectId || !path) {
+    if (!projectId || !path || isMultiRepo) {
       setSubdirCheck({ status: 'idle', message: '' })
       return undefined
     }
@@ -121,7 +126,7 @@ export default function NewApp() {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [projectId, project?.github_branch, formData.subdirectory])
+  }, [projectId, project?.github_branch, formData.subdirectory, isMultiRepo])
 
   useEffect(() => {
     if (formData.app_type !== 'php') return
@@ -336,12 +341,21 @@ export default function NewApp() {
             {select('Type', 'app_type', [
               ['website', 'Website'], ['static', 'Static site'], ['api', 'API'], ['cms', 'CMS'], ['php', 'PHP'], ['custom', 'Custom'],
             ])}
-            {input('Subdirectory', 'subdirectory', 'text', 'apps/api', 'Relative path inside the repo. Leave empty for root.')}
+            {isMultiRepo && (
+              <div className="rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-blue-100">
+                This project uses separate repositories, so this app needs its own GitHub source and webhook settings.
+              </div>
+            )}
+            {isMultiRepo && input('GitHub URL *', 'github_url', 'url', 'https://github.com/user/backend')}
+            {isMultiRepo && input('Branch', 'github_branch', 'text', 'main')}
+            {input('Subdirectory', 'subdirectory', 'text', isMultiRepo ? '' : 'apps/api', isMultiRepo ? 'Relative path inside this app repository. Leave empty for root.' : 'Relative path inside the repo. Leave empty for root.')}
             {subdirCheck.status !== 'idle' && (
               <p className={`text-xs ${subdirCheck.status === 'ok' ? 'text-green-400' : subdirCheck.status === 'checking' ? 'text-yellow-400' : 'text-red-400'}`}>
                 {subdirCheck.message}
               </p>
             )}
+            {isMultiRepo && check('Auto-deploy this app on GitHub push', 'auto_deploy')}
+            {isMultiRepo && check('Enable webhook endpoint for this app', 'enable_webhook')}
           </div>
         </div>
 
@@ -427,7 +441,7 @@ export default function NewApp() {
         <div className="flex gap-3">
           <button
             type="submit"
-            disabled={loading || !formData.name || dnsStatus === 'checking' || dnsStatus === 'error' || subdirCheck.status === 'checking' || subdirCheck.status === 'error'}
+            disabled={loading || !formData.name || (isMultiRepo && !formData.github_url) || dnsStatus === 'checking' || dnsStatus === 'error' || subdirCheck.status === 'checking' || subdirCheck.status === 'error'}
             className="px-6 py-2 bg-accent hover:bg-blue-600 text-white font-semibold rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Creating…' : 'Create App'}

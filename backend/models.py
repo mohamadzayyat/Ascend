@@ -63,7 +63,8 @@ class Project(db.Model):
 
     name = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text)
-    github_url = db.Column(db.String(500), nullable=False)
+    repo_mode = db.Column(db.String(20), default='monorepo')  # monorepo / multi
+    github_url = db.Column(db.String(500))
     github_branch = db.Column(db.String(120), default='main')
     folder_name = db.Column(db.String(255), nullable=False)
 
@@ -107,6 +108,7 @@ class Project(db.Model):
             'id': self.id,
             'name': self.name,
             'description': self.description,
+            'repo_mode': self.repo_mode or 'monorepo',
             'github_url': self.github_url,
             'github_branch': self.github_branch,
             'folder_name': self.folder_name,
@@ -134,6 +136,12 @@ class App(db.Model):
     name = db.Column(db.String(255), nullable=False)
     app_type = db.Column(db.String(50), default='website')  # website / api / cms / custom
     subdirectory = db.Column(db.String(255))
+    github_url = db.Column(db.String(500))
+    github_branch = db.Column(db.String(120))
+    enable_webhook = db.Column(db.Boolean, default=True)
+    webhook_secret = db.Column(db.String(255), default=lambda: secrets.token_hex(32))
+    auto_deploy = db.Column(db.Boolean, default=False)
+    github_hook_id = db.Column(db.Integer)
 
     package_manager = db.Column(db.String(20), default='npm')
     build_command = db.Column(db.String(500))
@@ -173,6 +181,12 @@ class App(db.Model):
             'name': self.name,
             'app_type': self.app_type,
             'subdirectory': self.subdirectory,
+            'github_url': self.github_url,
+            'github_branch': self.github_branch,
+            'enable_webhook': self.enable_webhook,
+            'webhook_secret': self.webhook_secret,
+            'auto_deploy': self.auto_deploy,
+            'github_hook_id': self.github_hook_id,
             'package_manager': self.package_manager,
             'build_command': self.build_command,
             'start_command': self.start_command,

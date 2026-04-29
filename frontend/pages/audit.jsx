@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { FileText, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
+import { useDialog } from '@/lib/dialog'
 
 export default function AuditPage() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [clearing, setClearing] = useState(false)
   const [error, setError] = useState('')
+  const dialog = useDialog()
 
   const load = async () => {
     setLoading(true)
@@ -24,7 +26,8 @@ export default function AuditPage() {
   useEffect(() => { load() }, [])
 
   const clear = async () => {
-    if (!window.confirm('Clear the audit log?')) return
+    const ok = await dialog.confirm({ title: 'Clear audit log?', message: 'This removes the stored audit log entries from Ascend.', confirmLabel: 'Clear log', tone: 'warning' })
+    if (!ok) return
     setClearing(true)
     try {
       await apiClient.clearAuditLog()

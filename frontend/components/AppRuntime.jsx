@@ -38,7 +38,7 @@ export default function AppRuntime({ appId }) {
   }
   if (!runtime) return null
 
-  const { app_type, pm2, port, port_listening, webhook_path, domain, php_version, php_fpm_socket, php_public_path, static_output_path } = runtime
+  const { app_type, pm2, port, port_listening, webhook_path, webhook_scope, domain, php_version, php_fpm_socket, php_public_path, static_output_path } = runtime
   const isPhp = app_type === 'php'
   const isStatic = app_type === 'static'
   const webhookUrl =
@@ -266,7 +266,7 @@ export default function AppRuntime({ appId }) {
 
       {webhookUrl && (
         <div className="pt-4 border-t border-gray-700">
-          <p className="text-gray-400 text-sm mb-2">GitHub webhook URL (project-level)</p>
+          <p className="text-gray-400 text-sm mb-2">GitHub webhook URL ({webhook_scope === 'app' ? 'app-level' : 'project-level'})</p>
           <div className="flex items-center gap-2">
             <code className="flex-1 bg-primary px-3 py-2 rounded text-white text-xs font-mono truncate">
               {webhookUrl}
@@ -281,8 +281,9 @@ export default function AppRuntime({ appId }) {
             </button>
           </div>
           <p className="text-gray-500 text-xs mt-2">
-            Same webhook for every app in the project. Auto-deploy on push installs this into
-            GitHub automatically when enabled in project settings.
+            {webhook_scope === 'app'
+              ? 'This webhook deploys only this app because it has its own repository.'
+              : 'Same webhook for every app in the project. Auto-deploy on push installs this into GitHub automatically when enabled in project settings.'}
           </p>
         </div>
       )}

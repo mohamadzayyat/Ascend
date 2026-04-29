@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Archive, ArrowLeft, Download, Loader2, RotateCcw, Upload } from 'lucide-react'
 import { apiClient } from '@/lib/api'
-import { typedConfirm } from '@/lib/confirm'
+import { useDialog } from '@/lib/dialog'
 
 function formatSize(bytes) {
   if (!bytes && bytes !== 0) return '-'
@@ -30,6 +30,7 @@ export default function AscendBackupSettings() {
   const [restoring, setRestoring] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const dialog = useDialog()
 
   const load = async () => {
     setLoading(true)
@@ -83,7 +84,14 @@ export default function AscendBackupSettings() {
   }
 
   const restore = async (backup) => {
-    if (!typedConfirm(`Restore Ascend from "${backup.filename}"? A safety backup will be created first, then the panel services will restart.`, backup.filename)) return
+    const ok = await dialog.typedConfirm({
+      title: 'Restore Ascend backup?',
+      message: `Restore Ascend from "${backup.filename}"? A safety backup will be created first, then the panel services will restart.`,
+      expected: backup.filename,
+      confirmLabel: 'Restore backup',
+      tone: 'danger',
+    })
+    if (!ok) return
     setRestoring(backup.filename)
     setMessage('')
     setError('')

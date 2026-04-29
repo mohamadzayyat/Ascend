@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { ArrowLeft, Loader2, Save, Trash2, Users } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAuth } from '@/lib/hooks/useAuth'
-import { typedConfirm } from '@/lib/confirm'
+import { useDialog } from '@/lib/dialog'
 
 const ROLES = [
   ['admin', 'Admin'],
@@ -22,6 +22,7 @@ export default function UsersSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const dialog = useDialog()
 
   const load = async () => {
     setLoading(true)
@@ -70,7 +71,8 @@ export default function UsersSettingsPage() {
   }
 
   const remove = async (row) => {
-    if (!typedConfirm(`Delete user "${row.username}"?`, row.username)) return
+    const ok = await dialog.typedConfirm({ title: 'Delete user?', message: `Delete user "${row.username}"?`, expected: row.username, confirmLabel: 'Delete user', tone: 'danger' })
+    if (!ok) return
     setBusy(true); setMessage('')
     try {
       await apiClient.deleteUser(row.id, row.username)

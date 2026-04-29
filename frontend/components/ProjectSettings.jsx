@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/router'
 import { apiClient } from '@/lib/api'
 import { useProjects } from '@/lib/hooks/useAuth'
-import { typedConfirm } from '@/lib/confirm'
+import { useDialog } from '@/lib/dialog'
 
 export default function ProjectSettings({ project, onUpdate }) {
   const router = useRouter()
@@ -13,10 +13,12 @@ export default function ProjectSettings({ project, onUpdate }) {
   const [error, setError] = useState('')
   const [webhookInfo, setWebhookInfo] = useState(null)
   const [syncingWebhook, setSyncingWebhook] = useState(false)
+  const dialog = useDialog()
 
   const [formData, setFormData] = useState({
     name: project?.name || '',
     description: project?.description || '',
+    repo_mode: project?.repo_mode || 'monorepo',
     github_url: project?.github_url || '',
     github_branch: project?.github_branch || 'main',
     folder_name: project?.folder_name || '',
@@ -26,7 +28,14 @@ export default function ProjectSettings({ project, onUpdate }) {
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target
-    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }))
+    setFormData((prev) => {
+      const next = { ...prev, [name]: type === 'checkbox' ? checked : value }
+      if (name === 'repo_mode' && value === 'multi') {
+        next.auto_deploy = false
+        next.enable_webhook = false
+      }
+      return next
+    })
   }
 
   const handleSubmit = async (e) => {
@@ -50,14 +59,21 @@ export default function ProjectSettings({ project, onUpdate }) {
   }
 
   const handleDelete = async () => {
-    if (!typedConfirm(`Delete "${project.name}" and all its apps? This cannot be undone.`, project.name)) return
+    const ok = await dialog.typedConfirm({
+      title: 'Delete project?',
+      message: `Delete "${project.name}" and all its apps? This cannot be undone.`,
+      expected: project.name,
+      confirmLabel: 'Delete project',
+      tone: 'danger',
+    })
+    if (!ok) return
     setDeleting(true)
     try {
       await apiClient.deleteProject(project.id, project.name)
       mutateProjects()
       router.push('/projects')
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to delete project')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Failed to delete project', tone: 'danger' })
       setDeleting(false)
     }
   }
@@ -106,6 +122,7 @@ export default function ProjectSettings({ project, onUpdate }) {
       {hint && <p className="text-xs text-gray-500 mt-1 ml-6">{hint}</p>}
     </div>
   )
+  const isMultiRepo = formData.repo_mode === 'multi'
 
   return (
     <form onSubmit={handleSubmit} className="max-w-3xl space-y-6">
@@ -145,13 +162,30 @@ export default function ProjectSettings({ project, onUpdate }) {
       </div>
 
       <div className="bg-secondary rounded-lg border border-gray-700 p-6">
-        <h3 className="text-lg font-bold text-white mb-4">GitHub</h3>
+        <h3 className="text-lg font-bold text-white mb-4">Repository Model</h3>
         <div className="space-y-4">
-          {input('GitHub URL', 'github_url', 'url', 'https://github.com/user/repo')}
-          {input('Branch', 'github_branch', 'text', 'main')}
-          {check('Auto-deploy on push', 'auto_deploy', 'When enabled, Ascend creates a webhook in your GitHub repo automatically (requires PAT with repo scope).')}
-          {check('Enable webhook endpoint', 'enable_webhook')}
-          {project?.webhook_secret && (
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Mode</label>
+            <select
+              name="repo_mode"
+              value={formData.repo_mode}
+              onChange={handleChange}
+              className="w-full px-4 py-2 rounded-lg bg-primary border border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <option value="monorepo">Monorepo - all apps share one GitHub repo</option>
+              <option value="multi">Separate app repositories - each app has its own GitHub repo</option>
+            </select>
+          </div>
+          {!isMultiRepo && input('GitHub URL', 'github_url', 'url', 'https://github.com/user/repo')}
+          {!isMultiRepo && input('Branch', 'github_branch', 'text', 'main')}
+          {!isMultiRepo && check('Auto-deploy on push', 'auto_deploy', 'When enabled, Ascend creates a webhook in your GitHub repo automatically (requires PAT with repo scope).')}
+          {!isMultiRepo && check('Enable webhook endpoint', 'enable_webhook')}
+          {isMultiRepo && (
+            <div className="rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-blue-100">
+              GitHub URL, branch, and webhook controls live on each app in this project.
+            </div>
+          )}
+          {!isMultiRepo && project?.webhook_secret && (
             <div>
               <p className="text-xs text-gray-500 mb-1">Webhook URL (paste into GitHub Settings Webhooks)</p>
               <p className="text-xs font-mono text-gray-400 break-all bg-primary p-3 rounded">

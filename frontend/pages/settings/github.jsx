@@ -4,6 +4,7 @@ import { apiClient } from '@/lib/api'
 import useSWR from 'swr'
 import { API_URL } from '@/lib/api'
 import { localDate } from '@/lib/time'
+import { useDialog } from '@/lib/dialog'
 
 const fetchWithCreds = (url) =>
   fetch(url, { credentials: 'include' }).then((r) => r.json())
@@ -19,6 +20,7 @@ export default function GitHubSettings() {
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const dialog = useDialog()
 
   const handleAdd = async (e) => {
     e.preventDefault()
@@ -41,12 +43,13 @@ export default function GitHubSettings() {
   }
 
   const handleDelete = async (id, name) => {
-    if (!confirm(`Remove credentials for "${name}"?`)) return
+    const ok = await dialog.confirm({ title: 'Remove GitHub credentials?', message: `Remove credentials for "${name}"?`, confirmLabel: 'Remove', tone: 'danger' })
+    if (!ok) return
     try {
       await apiClient.deleteGitHubCredential(id)
       mutate()
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to delete credentials')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Failed to delete credentials', tone: 'danger' })
     }
   }
 

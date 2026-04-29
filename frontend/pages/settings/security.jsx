@@ -4,9 +4,11 @@ import QRCode from 'qrcode'
 import { ArrowLeft, Copy, Loader2, ShieldCheck } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAuth } from '@/lib/hooks/useAuth'
+import { useDialog } from '@/lib/dialog'
 
 export default function SecuritySettingsPage() {
   const { user, setUser } = useAuth()
+  const dialog = useDialog()
   const [settings, setSettings] = useState(null)
   const [setup, setSetup] = useState(null)
   const [qrDataUrl, setQrDataUrl] = useState('')
@@ -58,7 +60,13 @@ export default function SecuritySettingsPage() {
   }
 
   const disable = async () => {
-    if (!window.confirm('Disable two-factor authentication?')) return
+    const ok = await dialog.confirm({
+      title: 'Disable 2FA?',
+      message: 'Disable two-factor authentication for this account?',
+      confirmLabel: 'Disable 2FA',
+      tone: 'danger',
+    })
+    if (!ok) return
     setBusy(true); setMessage('')
     try {
       await apiClient.disableTwoFactor(password, code)

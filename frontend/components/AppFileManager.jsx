@@ -31,6 +31,7 @@ import {
   Upload,
   X,
 } from 'lucide-react'
+import { useDialog } from '@/lib/dialog'
 
 const TEXT_EXT = new Set([
   'txt', 'md', 'json', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'css', 'scss',
@@ -259,12 +260,14 @@ export default function AppFileManager({
   const [editorMinimized, setEditorMinimized] = useState(false)
   const [preview, setPreview] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [urlDownloading, setUrlDownloading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(null) // { percent, loaded, total, count }
   const [dragOver, setDragOver] = useState(false)
   const [status, setStatus] = useState('')
   const uploadRef = useRef(null)
   const zipRef = useRef(null)
   const editorStorageKey = `ascend:file-editor:${scopeKey}`
+  const dialog = useDialog()
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -517,8 +520,40 @@ export default function AppFileManager({
     if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files)
   }
 
+  const downloadFromUrl = async () => {
+    const url = await dialog.prompt({
+      title: 'Download from URL',
+      message: 'Download a public file URL into the current folder.',
+      label: 'File URL',
+      placeholder: 'https://example.com/file.zip',
+      confirmLabel: 'Continue',
+      required: true,
+    })
+    if (!url || !url.trim()) return
+    const filename = await dialog.prompt({
+      title: 'Save as',
+      message: 'Optional filename. Leave blank to use the URL filename.',
+      label: 'Filename',
+      placeholder: 'file.zip',
+      defaultValue: '',
+      confirmLabel: 'Download',
+    })
+    if (filename === null) return
+    setUrlDownloading(true)
+    setError('')
+    try {
+      const res = await api.downloadFromUrl(path, url.trim(), (filename || '').trim())
+      flash(`Downloaded ${res.data.name || 'file'}`)
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'URL download failed')
+    } finally {
+      setUrlDownloading(false)
+    }
+  }
+
   const newFolder = async () => {
-    const name = window.prompt('New folder name')
+    const name = await dialog.prompt({ title: 'New folder', label: 'Folder name', confirmLabel: 'Create folder', required: true })
     if (!name) return
     try {
       await api.mkdir(joinPath(path, name))
@@ -530,7 +565,7 @@ export default function AppFileManager({
   }
 
   const newFile = async () => {
-    const name = window.prompt('New file name')
+    const name = await dialog.prompt({ title: 'New file', label: 'File name', confirmLabel: 'Create file', required: true })
     if (!name) return
     const target = joinPath(path, name)
     try {
@@ -544,7 +579,7 @@ export default function AppFileManager({
   }
 
   const renameEntry = async (entry) => {
-    const next = window.prompt(`Rename "${entry.name}" to:`, entry.name)
+    const next = await dialog.prompt({ title: 'Rename item', message: `Rename "${entry.name}" to:`, label: 'New name', defaultValue: entry.name, confirmLabel: 'Rename', required: true })
     if (!next || next === entry.name) return
     const target = joinPath(parentPath(entry.path), next)
     setError('')
@@ -558,7 +593,7 @@ export default function AppFileManager({
   }
 
   const moveEntry = async (entry) => {
-    const next = window.prompt(`Move "${entry.name}" to path:`, joinPath(path, entry.name))
+    const next = await dialog.prompt({ title: 'Move item', message: `Move "${entry.name}" to path:`, label: 'Destination path', defaultValue: joinPath(path, entry.name), confirmLabel: 'Move', required: true })
     if (!next || next === entry.path) return
     try {
       await api.rename(entry.path, next)
@@ -603,7 +638,8 @@ export default function AppFileManager({
 
   const deleteEntry = async (entry) => {
     const label = entry.is_dir ? `folder "${entry.name}" and everything in it` : `"${entry.name}"`
-    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return
+    const ok = await dialog.confirm({ title: 'Delete item?', message: `Delete ${label}? This cannot be undone.`, confirmLabel: 'Delete', tone: 'danger' })
+    if (!ok) return
     try {
       await api.delete(entry.path)
       flash(`Deleted ${entry.name}`)
@@ -665,7 +701,8 @@ export default function AppFileManager({
 
   const bulkDelete = async () => {
     if (!selectedEntries.length) return
-    if (!window.confirm(`Delete ${selectedEntries.length} selected item(s)? This cannot be undone.`)) return
+    const ok = await dialog.confirm({ title: 'Delete selected items?', message: `Delete ${selectedEntries.length} selected item(s)? This cannot be undone.`, confirmLabel: 'Delete selected', tone: 'danger' })
+    if (!ok) return
     try {
       await api.deleteMany(selectedEntries.map((entry) => entry.path))
       flash(`Deleted ${selectedEntries.length} item(s)`)
@@ -691,7 +728,7 @@ export default function AppFileManager({
   const bulkCreateZip = async () => {
     if (!selectedEntries.length) return
     const suggested = `${path ? baseName(path) || 'selection' : 'selection'}-${Date.now()}.zip`
-    const outputName = window.prompt('Zip file name', suggested)
+    const outputName = await dialog.prompt({ title: 'Create zip', label: 'Zip file name', defaultValue: suggested, confirmLabel: 'Create zip', required: true })
     if (!outputName) return
     try {
       await api.archiveCreate(selectedEntries.map((entry) => entry.path), path, outputName)
@@ -807,15 +844,25 @@ export default function AppFileManager({
           <button
             type="button"
             onClick={() => uploadRef.current?.click()}
-            disabled={uploading}
+            disabled={uploading || urlDownloading}
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
           >
             <Upload className="w-4 h-4" /> Upload
           </button>
           <button
             type="button"
+            onClick={downloadFromUrl}
+            disabled={uploading || urlDownloading}
+            className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
+            title="Download a public file URL into this folder"
+          >
+            {urlDownloading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            Download URL
+          </button>
+          <button
+            type="button"
             onClick={() => zipRef.current?.click()}
-            disabled={uploading}
+            disabled={uploading || urlDownloading}
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
             title="Upload a .zip and extract it here"
           >

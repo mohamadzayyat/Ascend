@@ -415,8 +415,15 @@ def migrate_schema():
             name = col_def.split()[0].strip('"')
             if name not in _sqlite_columns(table):
                 db.session.execute(db.text(f'ALTER TABLE "{table}" ADD COLUMN {col_def}'))
+        add_col('project', "repo_mode VARCHAR(20) DEFAULT 'monorepo'")
         add_col('project', 'github_hook_id INTEGER')
         add_col('deployment', 'app_id INTEGER REFERENCES app(id)')
+        add_col('app', 'github_url VARCHAR(500)')
+        add_col('app', 'github_branch VARCHAR(120)')
+        add_col('app', 'enable_webhook BOOLEAN DEFAULT 1')
+        add_col('app', 'webhook_secret VARCHAR(255)')
+        add_col('app', 'auto_deploy BOOLEAN DEFAULT 0')
+        add_col('app', 'github_hook_id INTEGER')
         add_col('app', 'disk_size_bytes BIGINT')
         add_col('app', 'disk_size_computed_at DATETIME')
         add_col('app', 'php_version VARCHAR(20)')
@@ -436,6 +443,17 @@ def migrate_schema():
                 u.role = 'admin' if u.is_admin else 'viewer'
         db.session.commit()
         _migrate_backup_schedule_targets()
+        for p in Project.query.all():
+            if not getattr(p, 'repo_mode', None):
+                p.repo_mode = 'monorepo'
+        for a in App.query.all():
+            if not getattr(a, 'webhook_secret', None):
+                a.webhook_secret = secrets.token_hex(32)
+            if getattr(a, 'enable_webhook', None) is None:
+                a.enable_webhook = True
+            if getattr(a, 'auto_deploy', None) is None:
+                a.auto_deploy = False
+        db.session.commit()
 
         # 2. Backfill Apps for legacy Projects
         legacy_projects = [p for p in Project.query.all() if not p.apps]
@@ -1564,23 +1582,27 @@ def api_create_project():
     name = data.get('name', '').strip()
     folder_name = data.get('folder_name', '').strip()
     github_url = data.get('github_url', '').strip()
+    repo_mode = (data.get('repo_mode') or 'monorepo').strip().lower()
 
     if not name:
         return jsonify({'error': 'Project name is required'}), 400
     if not folder_name:
         return jsonify({'error': 'Folder name is required'}), 400
-    if not github_url:
+    if repo_mode not in ('monorepo', 'multi'):
+        return jsonify({'error': 'Repository mode must be monorepo or multi.'}), 400
+    if repo_mode == 'monorepo' and not github_url:
         return jsonify({'error': 'GitHub URL is required'}), 400
 
     project = Project(
         user_id=current_user.id,
         name=name,
         description=data.get('description', ''),
+        repo_mode=repo_mode,
         github_url=github_url,
         github_branch=data.get('github_branch', 'main') or 'main',
         folder_name=folder_name,
-        auto_deploy=bool(data.get('auto_deploy', False)),
-        enable_webhook=bool(data.get('enable_webhook', True)),
+        auto_deploy=bool(data.get('auto_deploy', False)) if repo_mode == 'monorepo' else False,
+        enable_webhook=bool(data.get('enable_webhook', True)) if repo_mode == 'monorepo' else False,
     )
     db.session.add(project)
     db.session.commit()
@@ -1595,7 +1617,7 @@ def api_create_project():
 
     # If auto_deploy was enabled, try to install the webhook in GitHub now.
     webhook_result = None
-    if project.auto_deploy and project.enable_webhook:
+    if project.repo_mode != 'multi' and project.auto_deploy and project.enable_webhook:
         webhook_result = _sync_github_webhook(project)
 
     body = project.to_dict()
@@ -1627,9 +1649,18 @@ def api_update_project(project_id):
     data = request.get_json(silent=True) or {}
     prev_auto_deploy = project.auto_deploy
 
+    if 'repo_mode' in data:
+        mode = (data.get('repo_mode') or 'monorepo').strip().lower()
+        if mode not in ('monorepo', 'multi'):
+            return jsonify({'error': 'Repository mode must be monorepo or multi.'}), 400
+        project.repo_mode = mode
+        if mode == 'multi' and project.github_hook_id:
+            _delete_github_webhook(project)
     for field in ['name', 'description', 'github_url', 'github_branch', 'folder_name']:
         if field in data:
             setattr(project, field, data[field])
+    if (project.repo_mode or 'monorepo') == 'monorepo' and not (project.github_url or '').strip():
+        return jsonify({'error': 'GitHub URL is required for monorepo projects.'}), 400
 
     if 'enable_webhook' in data:
         project.enable_webhook = bool(data['enable_webhook'])
@@ -1641,7 +1672,7 @@ def api_update_project(project_id):
     _audit_log('project.updated', 'ok', f'Project updated: {project.name}', {'project_id': project.id})
 
     webhook_result = None
-    if project.auto_deploy or prev_auto_deploy or 'enable_webhook' in data:
+    if project.repo_mode != 'multi' and (project.auto_deploy or prev_auto_deploy or 'enable_webhook' in data):
         webhook_result = _sync_github_webhook(project)
 
     body = project.to_dict()
@@ -1670,6 +1701,9 @@ def api_delete_project(project_id):
     # Best-effort cleanup of the GitHub webhook before we delete the row
     if project.github_hook_id:
         _delete_github_webhook(project)
+    for app_row in list(project.apps):
+        if app_row.github_hook_id:
+            _delete_github_webhook(app_row)
 
     db.session.delete(project)
     db.session.commit()
@@ -1700,6 +1734,22 @@ def api_sync_project_github_webhook(project_id):
 # ═══════════════════════════════════════════
 # App API (the actual deployable units)
 # ═══════════════════════════════════════════
+
+@app.route('/api/app/<int:app_id>/github-webhook/sync', methods=['POST'])
+@csrf.exempt
+@login_required
+def api_sync_app_github_webhook(app_id):
+    err = _role_required('admin', 'deployer')
+    if err:
+        return err
+    a = App.query.get_or_404(app_id)
+    if a.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if not _project_is_multi_repo(a.project):
+        return jsonify({'status': 'skipped', 'reason': 'monorepo projects use the project-level webhook'})
+    result = _sync_github_webhook(a)
+    return jsonify(result)
+
 
 def _parse_port(v):
     try:
@@ -1945,7 +1995,8 @@ def _app_fields_from_dict(data, allow_all=True):
     for field in ['name', 'app_type', 'subdirectory', 'package_manager',
                   'build_command', 'start_command', 'pm2_name',
                   'php_version', 'php_public_path', 'composer_command',
-                  'static_output_path', 'env_content', 'domain', 'client_max_body']:
+                  'static_output_path', 'env_content', 'domain', 'client_max_body',
+                  'github_url', 'github_branch']:
         if field in data:
             val = data[field]
             val = (val.strip() if isinstance(val, str) else val) or None
@@ -1954,8 +2005,14 @@ def _app_fields_from_dict(data, allow_all=True):
         out['enable_ssl'] = bool(data['enable_ssl'])
     if 'composer_install' in data:
         out['composer_install'] = bool(data['composer_install'])
+    if 'enable_webhook' in data:
+        out['enable_webhook'] = bool(data['enable_webhook'])
+    if 'auto_deploy' in data:
+        out['auto_deploy'] = bool(data['auto_deploy'])
     if 'app_port' in data and allow_all:
         out['app_port'] = _parse_port(data['app_port'])
+    if out.get('github_branch'):
+        _normalize_deploy_branch(out, out['github_branch'])
     app_type = (out.get('app_type') or data.get('app_type') or '').strip().lower()
     if app_type in ('php', 'static'):
         out['app_port'] = None
@@ -1984,6 +2041,16 @@ def _app_fields_from_dict(data, allow_all=True):
 
 
 def _check_project_subdirectory(project, subdirectory, branch=None):
+    local_base = DEPLOYMENTS_DIR / project.folder_name
+    return _check_repo_subdirectory(project.user_id, project.github_url, branch or project.github_branch, subdirectory, local_base, 'project')
+
+
+def _check_app_subdirectory(app_row, subdirectory, branch=None):
+    local_base = _app_clone_dir(app_row)
+    return _check_repo_subdirectory(app_row.project.user_id, _app_repo_url(app_row), branch or app_row_branch(app_row), subdirectory, local_base, 'app')
+
+
+def _check_repo_subdirectory(user_id, github_url, branch, subdirectory, local_base=None, label='repository'):
     subdirectory = (subdirectory or '').strip().strip('/\\')
     if not subdirectory:
         return {'ok': True, 'path': '', 'source': 'root'}
@@ -1992,17 +2059,17 @@ def _check_project_subdirectory(project, subdirectory, branch=None):
     except ValueError as exc:
         return {'ok': False, 'path': subdirectory, 'error': str(exc)}
 
-    local = DEPLOYMENTS_DIR / project.folder_name / normalized
-    if local.exists() and local.is_dir():
+    local = (local_base / normalized) if local_base else None
+    if local and local.exists() and local.is_dir():
         return {'ok': True, 'path': normalized, 'source': 'local'}
 
-    cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
+    cred = GitHubCredential.query.filter_by(user_id=user_id).first()
     if not cred:
         return {'ok': False, 'path': normalized, 'error': 'No GitHub credentials configured to verify this subdirectory.'}
-    owner, repo = _parse_github_repo(project.github_url)
+    owner, repo = _parse_github_repo(github_url)
     if not owner or not repo:
-        return {'ok': False, 'path': normalized, 'error': 'Could not parse the project GitHub URL.'}
-    ref = _normalize_deploy_branch(project, branch)
+        return {'ok': False, 'path': normalized, 'error': f'Could not parse the {label} GitHub URL.'}
+    ref = _normalize_deploy_branch({'github_branch': branch or 'main'}, branch)
     encoded_path = '/'.join(_urlquote(part, safe='') for part in normalized.split('/'))
     status, resp = _github_api('GET', f'/repos/{owner}/{repo}/contents/{encoded_path}?ref={_urlquote(ref, safe="")}', cred.token, timeout=15)
     if status == 200 and isinstance(resp, dict) and resp.get('type') == 'dir':
@@ -2041,6 +2108,16 @@ def api_create_app(project_id):
         fields = _app_fields_from_dict(data)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+    project_multi = _project_is_multi_repo(project)
+    if project_multi:
+        if not fields.get('github_url'):
+            return jsonify({'error': 'GitHub URL is required for apps in a multi-repo project.'}), 400
+        fields['github_branch'] = fields.get('github_branch') or 'main'
+    else:
+        fields['github_url'] = None
+        fields['github_branch'] = None
+        fields['auto_deploy'] = False
+        fields['enable_webhook'] = True
     port = fields.get('app_port')
     if port:
         conflict = _check_port_conflict(port)
@@ -2050,21 +2127,27 @@ def api_create_app(project_id):
         dns_error = _domain_validation_response(fields['domain'])
         if dns_error:
             return dns_error
-    if fields.get('subdirectory'):
-        subdir_check = _check_project_subdirectory(project, fields.get('subdirectory'))
-        if not subdir_check.get('ok'):
-            return jsonify({'error': subdir_check.get('error') or 'Subdirectory does not exist.', 'subdirectory_check': subdir_check}), 400
-
     new_app = App(project_id=project.id, name=name)
+    new_app.project = project
     for k, v in fields.items():
         setattr(new_app, k, v)
     # Auto-generate a pm2_name for process-based apps if not provided.
     if not _is_php_app(new_app) and not _is_static_app(new_app) and not new_app.pm2_name:
         new_app.pm2_name = f"{project.folder_name}-{re.sub(r'[^a-zA-Z0-9_-]+', '-', name.lower())}"
+    if fields.get('subdirectory'):
+        subdir_check = _check_app_subdirectory(new_app, fields.get('subdirectory')) if project_multi else _check_project_subdirectory(project, fields.get('subdirectory'))
+        if not subdir_check.get('ok'):
+            return jsonify({'error': subdir_check.get('error') or 'Subdirectory does not exist.', 'subdirectory_check': subdir_check}), 400
     db.session.add(new_app)
     db.session.commit()
+    webhook_result = None
+    if project_multi and new_app.auto_deploy and new_app.enable_webhook:
+        webhook_result = _sync_github_webhook(new_app)
     _audit_log('app.created', 'ok', f'App created: {project.name} / {new_app.name}', {'project_id': project.id, 'app_id': new_app.id})
-    return jsonify(new_app.to_dict()), 201
+    body = new_app.to_dict()
+    if webhook_result:
+        body['github_webhook'] = webhook_result
+    return jsonify(body), 201
 
 
 @app.route('/api/app/<int:app_id>', methods=['GET'])
@@ -2092,6 +2175,14 @@ def api_update_app(app_id):
         fields = _app_fields_from_dict(data)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+    project_multi = _project_is_multi_repo(a.project)
+    if project_multi and 'github_url' in fields and not fields.get('github_url'):
+        return jsonify({'error': 'GitHub URL is required for apps in a multi-repo project.'}), 400
+    if not project_multi:
+        fields.pop('github_url', None)
+        fields.pop('github_branch', None)
+        fields.pop('auto_deploy', None)
+        fields.pop('enable_webhook', None)
 
     if 'app_port' in fields and fields['app_port'] and fields['app_port'] != a.app_port:
         conflict = _check_port_conflict(fields['app_port'], exclude_app_id=a.id)
@@ -2104,11 +2195,18 @@ def api_update_app(app_id):
         if dns_error:
             return dns_error
     if 'subdirectory' in fields and fields.get('subdirectory'):
-        subdir_check = _check_project_subdirectory(a.project, fields.get('subdirectory'))
+        preview = App(project=a.project)
+        for attr in ['github_url', 'github_branch', 'subdirectory']:
+            setattr(preview, attr, getattr(a, attr, None))
+        for k, v in fields.items():
+            if k in ('github_url', 'github_branch', 'subdirectory'):
+                setattr(preview, k, v)
+        subdir_check = _check_app_subdirectory(preview, fields.get('subdirectory')) if project_multi else _check_project_subdirectory(a.project, fields.get('subdirectory'))
         if not subdir_check.get('ok'):
             return jsonify({'error': subdir_check.get('error') or 'Subdirectory does not exist.', 'subdirectory_check': subdir_check}), 400
 
     old_pm2_name = a.pm2_name
+    prev_auto_deploy = a.auto_deploy
     for k, v in fields.items():
         setattr(a, k, v)
     if not _is_php_app(a) and not _is_static_app(a) and not a.pm2_name:
@@ -2119,7 +2217,13 @@ def api_update_app(app_id):
         subprocess.run(['pm2', 'delete', old_pm2_name], capture_output=True, timeout=10)
         subprocess.run(['pm2', 'save'], capture_output=True, timeout=10)
     _audit_log('app.updated', 'ok', f'App updated: {a.project.name} / {a.name}', {'project_id': a.project_id, 'app_id': a.id})
-    return jsonify(a.to_dict())
+    webhook_result = None
+    if project_multi and (a.auto_deploy or prev_auto_deploy or 'enable_webhook' in fields or 'github_url' in fields):
+        webhook_result = _sync_github_webhook(a)
+    body = a.to_dict()
+    if webhook_result:
+        body['github_webhook'] = webhook_result
+    return jsonify(body)
 
 
 @app.route('/api/app/<int:app_id>', methods=['DELETE'])
@@ -2138,6 +2242,9 @@ def api_delete_app(app_id):
 
     proj_name = a.project.name
     app_name = a.name
+
+    if a.github_hook_id:
+        _delete_github_webhook(a)
 
     # Best-effort: stop the pm2 process so the port is freed
     if a.pm2_name:
@@ -2176,7 +2283,7 @@ def api_deploy_app(app_id):
         return jsonify({'error': 'A deployment is already in progress for this app'}), 409
     data = request.get_json(silent=True) or {}
     try:
-        branch = _normalize_deploy_branch(a.project, data.get('branch'))
+        branch = _app_repo_branch(a, data.get('branch'))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
 
@@ -2320,6 +2427,8 @@ def api_deploy(project_id):
         return jsonify({'error': 'Project has no apps yet — add one before deploying'}), 400
 
     data = request.get_json(silent=True) or {}
+    if _project_is_multi_repo(project):
+        return jsonify({'error': 'This project uses separate app repositories. Deploy each app with its own branch.'}), 400
     try:
         branch = _normalize_deploy_branch(project, data.get('branch'))
     except ValueError as e:
@@ -2402,7 +2511,11 @@ _GIT_BRANCH_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$')
 
 
 def _normalize_deploy_branch(project, branch_value=None):
-    branch = (branch_value or project.github_branch or 'main').strip()
+    if isinstance(project, dict):
+        default_branch = project.get('github_branch')
+    else:
+        default_branch = getattr(project, 'github_branch', None)
+    branch = (branch_value or default_branch or 'main').strip()
     if (
         not _GIT_BRANCH_RE.match(branch)
         or '..' in branch
@@ -2413,6 +2526,45 @@ def _normalize_deploy_branch(project, branch_value=None):
     ):
         raise ValueError('Invalid branch name')
     return branch
+
+
+def _project_is_multi_repo(project):
+    return (getattr(project, 'repo_mode', None) or 'monorepo') == 'multi'
+
+
+def _safe_app_repo_dir_name(app_row):
+    base = app_row.pm2_name or app_row.name or f'app-{app_row.id}'
+    safe = re.sub(r'[^A-Za-z0-9._-]+', '-', str(base).strip().lower()).strip('-._')
+    return safe or f'app-{app_row.id}'
+
+
+def _app_repo_url(app_row):
+    if _project_is_multi_repo(app_row.project):
+        return (app_row.github_url or '').strip()
+    return (app_row.project.github_url or '').strip()
+
+
+def _app_repo_branch(app_row, branch=None):
+    source_branch = app_row.github_branch if _project_is_multi_repo(app_row.project) else app_row.project.github_branch
+    return _normalize_deploy_branch({'github_branch': source_branch or 'main'}, branch)
+
+
+def _repo_subject_user_id(subject):
+    return subject.project.user_id if isinstance(subject, App) else subject.user_id
+
+
+def _repo_subject_url(subject):
+    return _app_repo_url(subject) if isinstance(subject, App) else (subject.github_url or '').strip()
+
+
+def _repo_subject_branch(subject):
+    if isinstance(subject, App):
+        return app_row_branch(subject)
+    return subject.github_branch or 'main'
+
+
+def app_row_branch(app_row):
+    return app_row.github_branch if _project_is_multi_repo(app_row.project) else app_row.project.github_branch
 
 
 def _github_api(method, path, token, body=None, timeout=10):
@@ -2450,14 +2602,29 @@ def api_project_branches(project_id):
     project = Project.query.get_or_404(project_id)
     if project.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
+    if _project_is_multi_repo(project):
+        return jsonify({'error': 'This project uses per-app repositories. Load branches from an app instead.'}), 400
 
+    return _repo_branches_response(project.github_url, project.github_branch, project.user_id)
+
+
+@app.route('/api/app/<int:app_id>/branches', methods=['GET'])
+@login_required
+def api_app_branches(app_id):
+    app_row = App.query.get_or_404(app_id)
+    if app_row.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    return _repo_branches_response(_app_repo_url(app_row), app_row_branch(app_row), app_row.project.user_id)
+
+
+def _repo_branches_response(github_url, saved_branch, user_id):
     cred = GitHubCredential.query.filter_by(user_id=current_user.id).first()
     if not cred:
         return jsonify({'error': 'No GitHub credentials configured. Add credentials in Settings.'}), 400
 
-    owner, repo = _parse_github_repo(project.github_url)
+    owner, repo = _parse_github_repo(github_url)
     if not owner or not repo:
-        return jsonify({'error': 'Could not parse the project GitHub URL'}), 400
+        return jsonify({'error': 'Could not parse the GitHub URL'}), 400
 
     repo_default_branch = None
     repo_status, repo_resp = _github_api(
@@ -2489,11 +2656,8 @@ def api_project_branches(project_id):
             break
 
     branches = list(dict.fromkeys(branches))
-    default_branch = repo_default_branch or (project.github_branch if project.github_branch in branches else None) or (branches[0] if branches else project.github_branch or 'main')
-    saved_branch_available = bool(project.github_branch and project.github_branch in branches)
-    if repo_default_branch and project.github_branch and project.github_branch not in branches:
-        project.github_branch = repo_default_branch
-        db.session.commit()
+    default_branch = repo_default_branch or (saved_branch if saved_branch in branches else None) or (branches[0] if branches else saved_branch or 'main')
+    saved_branch_available = bool(saved_branch and saved_branch in branches)
     return jsonify({
         'branches': branches,
         'default_branch': default_branch,
@@ -2513,18 +2677,30 @@ def api_project_subdirectory_check(project_id):
     return jsonify(result), (200 if result.get('ok') else 404)
 
 
+@app.route('/api/app/<int:app_id>/subdirectory-check', methods=['GET'])
+@login_required
+def api_app_subdirectory_check(app_id):
+    app_row = App.query.get_or_404(app_id)
+    if app_row.project.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    subdirectory = (request.args.get('path') or '').strip()
+    branch = (request.args.get('branch') or app_row_branch(app_row) or 'main').strip()
+    result = _check_app_subdirectory(app_row, subdirectory, branch) if _project_is_multi_repo(app_row.project) else _check_project_subdirectory(app_row.project, subdirectory, branch)
+    return jsonify(result), (200 if result.get('ok') else 404)
+
+
 def _sync_github_webhook(project):
-    """Ensure GitHub has a webhook matching this project's auto_deploy state.
+    """Ensure GitHub has a webhook matching this project/app auto_deploy state.
 
     - If auto_deploy=True and enable_webhook=True: create or update a GitHub
       webhook that points at /webhook/github/<secret>.
     - If auto_deploy=False or enable_webhook=False: delete the stored webhook.
     Returns a dict describing the outcome — never raises."""
-    cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
+    cred = GitHubCredential.query.filter_by(user_id=_repo_subject_user_id(project)).first()
     if not cred:
         return {'status': 'skipped', 'reason': 'no GitHub credentials on file'}
 
-    owner, repo = _parse_github_repo(project.github_url)
+    owner, repo = _parse_github_repo(_repo_subject_url(project))
     if not owner or not repo:
         return {'status': 'skipped', 'reason': 'could not parse github_url'}
 
@@ -2599,10 +2775,10 @@ def _sync_github_webhook(project):
 
 
 def _delete_github_webhook(project):
-    cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
+    cred = GitHubCredential.query.filter_by(user_id=_repo_subject_user_id(project)).first()
     if not cred or not project.github_hook_id:
         return
-    owner, repo = _parse_github_repo(project.github_url)
+    owner, repo = _parse_github_repo(_repo_subject_url(project))
     if not owner or not repo:
         return
     _github_api('DELETE', f'/repos/{owner}/{repo}/hooks/{project.github_hook_id}', cred.token)
@@ -2639,7 +2815,16 @@ def _public_panel_url():
 @csrf.exempt
 def github_webhook(webhook_secret):
     project = Project.query.filter_by(webhook_secret=webhook_secret).first()
-    if not project or not project.enable_webhook or not project.auto_deploy:
+    app_hook = None
+    if not project:
+        app_hook = App.query.filter_by(webhook_secret=webhook_secret).first()
+        project = app_hook.project if app_hook else None
+    if not project:
+        return jsonify({'error': 'Not found'}), 404
+    if app_hook:
+        if not app_hook.enable_webhook or not app_hook.auto_deploy:
+            return jsonify({'error': 'Not found'}), 404
+    elif not project.enable_webhook or not project.auto_deploy:
         return jsonify({'error': 'Not found'}), 404
 
     # Verify GitHub signature — required, never optional.
@@ -2656,26 +2841,28 @@ def github_webhook(webhook_secret):
 
     # Only deploy on push to the configured branch
     pushed_branch = data.get('ref', '').replace('refs/heads/', '')
-    if pushed_branch and pushed_branch != project.github_branch:
+    expected_branch = app_row_branch(app_hook) if app_hook else project.github_branch
+    if pushed_branch and pushed_branch != expected_branch:
         return jsonify({'status': 'skipped', 'reason': 'branch mismatch'})
 
     cred = GitHubCredential.query.filter_by(user_id=project.user_id).first()
     if not cred:
         return jsonify({'error': 'No GitHub credentials for project owner'}), 500
 
-    if not project.apps:
+    target_apps = [app_hook] if app_hook else list(project.apps)
+    if not target_apps:
         return jsonify({'status': 'skipped', 'reason': 'project has no apps'}), 200
 
     commit = data.get('after', '')[:40]
     deployment_ids = []
-    for a in project.apps:
+    for a in target_apps:
         if a.status == 'deploying':
             continue
         dep = Deployment(
             project_id=project.id,
             app_id=a.id,
             status='pending',
-            branch=pushed_branch or project.github_branch,
+            branch=pushed_branch or expected_branch,
             commit_hash=commit,
             triggered_by='webhook',
         )
@@ -2743,10 +2930,20 @@ def api_delete_github_credential(cred_id):
 # Background Deployment Process
 # ═══════════════════════════════════════════
 
-def _ensure_repo_cloned(project, github_username, github_token, log, branch=None):
-    """Clone or fast-forward the project's repo. Returns the clone dir path."""
-    clone_dir = DEPLOYMENTS_DIR / project.folder_name
-    branch = _normalize_deploy_branch(project, branch)
+def _app_clone_dir(app_row):
+    if _project_is_multi_repo(app_row.project):
+        return DEPLOYMENTS_DIR / app_row.project.folder_name / _safe_app_repo_dir_name(app_row)
+    return DEPLOYMENTS_DIR / app_row.project.folder_name
+
+
+def _ensure_repo_cloned(app_row, github_username, github_token, log, branch=None):
+    """Clone or fast-forward the app's source repo. Returns the clone dir path."""
+    project = app_row.project
+    clone_dir = _app_clone_dir(app_row)
+    branch = _app_repo_branch(app_row, branch)
+    github_url = _app_repo_url(app_row)
+    if not github_url:
+        raise RuntimeError("GitHub URL is not configured for this app")
     log.write("Step 1: Cloning/updating repository...\n")
     if clone_dir.exists():
         log.write("  Repository exists, fetching latest...\n")
@@ -2755,7 +2952,8 @@ def _ensure_repo_cloned(project, github_username, github_token, log, branch=None
                           f'origin/{branch}'], log)
     else:
         log.write(f"  Cloning to {clone_dir}...\n")
-        repo_url = project.github_url.replace('https://',
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        repo_url = github_url.replace('https://',
                                               f'https://{github_username}:{github_token}@')
         ok = run_cmd(['git', 'clone', '--branch', branch, repo_url, str(clone_dir)], log, redact=repo_url)
     if not ok:
@@ -2764,7 +2962,7 @@ def _ensure_repo_cloned(project, github_username, github_token, log, branch=None
 
 
 def _app_deploy_dir(app_row):
-    deploy_dir = DEPLOYMENTS_DIR / app_row.project.folder_name
+    deploy_dir = _app_clone_dir(app_row)
     if app_row.subdirectory:
         deploy_dir = deploy_dir / app_row.subdirectory.strip('/')
     return deploy_dir
@@ -2861,21 +3059,23 @@ def deploy_app_bg(deployment_id, github_username, github_token):
         db.session.commit()
 
         start_time = time.time()
-        deploy_branch = deployment.branch or project.github_branch or 'main'
+        deploy_branch = deployment.branch or _app_repo_branch(app_row)
 
         try:
             with open(log_file, 'w', encoding='utf-8') as log:
                 log.write(f"=== Deployment Started: {datetime.now(timezone.utc).isoformat()} ===\n")
                 log.write(f"Project: {project.name}\n")
                 log.write(f"App: {app_row.name} ({app_row.app_type})\n")
-                log.write(f"GitHub URL: {project.github_url}\n")
+                log.write(f"GitHub URL: {_app_repo_url(app_row)}\n")
                 log.write(f"Branch: {deploy_branch}\n")
+                if _project_is_multi_repo(project):
+                    log.write("Repository mode: app repository\n")
                 if app_row.subdirectory:
                     log.write(f"Subdirectory: {app_row.subdirectory}\n")
                 log.write("\n")
 
-                with _repo_lock(project.id):
-                    clone_dir = _ensure_repo_cloned(project, github_username, github_token, log, deploy_branch)
+                with _repo_lock(_repo_lock_key(app_row)):
+                    clone_dir = _ensure_repo_cloned(app_row, github_username, github_token, log, deploy_branch)
 
                 deploy_dir = _app_deploy_dir(app_row)
                 if app_row.subdirectory:
@@ -3666,11 +3866,17 @@ _repo_locks = {}
 _setup_lock = threading.Lock()
 
 
-def _repo_lock(project_id):
-    lock = _repo_locks.get(project_id)
+def _repo_lock_key(app_row):
+    if _project_is_multi_repo(app_row.project):
+        return f'app:{app_row.id}'
+    return f'project:{app_row.project_id}'
+
+
+def _repo_lock(key):
+    lock = _repo_locks.get(key)
     if lock is None:
         lock = threading.Lock()
-        _repo_locks[project_id] = lock
+        _repo_locks[key] = lock
     return lock
 
 
@@ -4496,7 +4702,10 @@ def api_app_runtime(app_id):
 
     project = a.project
     webhook_path = None
-    if project.enable_webhook and project.webhook_secret:
+    if _project_is_multi_repo(project):
+        if a.enable_webhook and a.webhook_secret:
+            webhook_path = f'/webhook/github/{a.webhook_secret}'
+    elif project.enable_webhook and project.webhook_secret:
         webhook_path = f'/webhook/github/{project.webhook_secret}'
 
     return jsonify({
@@ -4509,6 +4718,7 @@ def api_app_runtime(app_id):
         'php_public_path': str(_php_public_dir(a)) if _is_php_app(a) else None,
         'static_output_path': str(_static_nginx_root(a)) if _is_static_app(a) else None,
         'webhook_path': webhook_path,
+        'webhook_scope': 'app' if _project_is_multi_repo(project) else 'project',
         'domain': a.domain,
         'status': a.status,
     })

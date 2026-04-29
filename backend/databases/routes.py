@@ -1,11 +1,15 @@
 import json
+import ipaddress
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +34,7 @@ _encrypt_password = None
 _decrypt_password = None
 iso_utc = None
 DB_BACKUPS_ROOT = None
+MAX_SQL_URL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 
 
 def register_database_feature(*, flask_app, db_instance, csrf_protect, base_dir, database_connection_model, backup_schedule_model, backup_archive_model, encrypt_password, decrypt_password, iso_utc_func):
@@ -1383,6 +1388,63 @@ def _unique_backup_path(backup_dir, base_name, timestamp):
     return candidate
 
 
+def _public_download_url(raw_url):
+    url = str(raw_url or '').strip()
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        raise ValueError('Only http:// and https:// URLs are supported.')
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f'Could not resolve URL host: {exc}') from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            raise ValueError('URL host resolves to a private or unsafe address.')
+    return url, parsed
+
+
+def _download_sql_backup_from_url(url, dest):
+    request_obj = urllib.request.Request(url, headers={'User-Agent': 'AscendDatabaseRestore/1.0'})
+    tmp = dest.with_name(f'.{dest.name}.download-{os.getpid()}')
+    total = 0
+    try:
+        with urllib.request.urlopen(request_obj, timeout=30) as res, open(tmp, 'wb') as out:
+            length = res.headers.get('Content-Length')
+            if length and int(length) > MAX_SQL_URL_DOWNLOAD_BYTES:
+                raise ValueError('Remote SQL file is larger than the 1GB download limit.')
+            while True:
+                chunk = res.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_SQL_URL_DOWNLOAD_BYTES:
+                    raise ValueError('Remote SQL file is larger than the 1GB download limit.')
+                out.write(chunk)
+        tmp.replace(dest)
+        return total
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _downloaded_backup_filename(conn, parsed, explicit_name):
+    raw = str(explicit_name or '').strip()
+    if raw:
+        name = secure_filename(Path(raw.replace('\\', '/')).name)
+    else:
+        name = secure_filename(Path(urllib.parse.unquote(parsed.path or '').replace('\\', '/')).name)
+    if not name:
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+        name = f'{_safe_dir_name(conn.name)}-download-{ts}.sql'
+    if not name.lower().endswith('.sql'):
+        raise ValueError('Only .sql files can be restored from URL right now.')
+    return name
+
+
 def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_database=None):
     """Synchronously run mysqldump for a connection. Records a BackupArchive
     row in either success or failed state. Used by both the manual endpoint
@@ -1581,6 +1643,66 @@ def api_db_backups_run(conn_id):
         _run_backup(conn.id, schedule_id=None, triggered_by='manual')
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({'started': True})
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/backups/download-url', methods=['POST'])
+@login_required
+def api_db_backup_download_url(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    started = datetime.now(timezone.utc)
+    started_ts = time.time()
+    try:
+        url, parsed = _public_download_url(data.get('url'))
+        filename = _downloaded_backup_filename(conn, parsed, data.get('filename'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    backup_dir = _connection_backup_dir(conn)
+    dest = (backup_dir / filename).resolve()
+    if dest.exists():
+        stem = dest.stem
+        suffix = dest.suffix or '.sql'
+        n = 2
+        while dest.exists():
+            dest = (backup_dir / f'{stem}-{n}{suffix}').resolve()
+            n += 1
+    try:
+        dest.relative_to(backup_dir.resolve())
+    except ValueError:
+        return jsonify({'error': 'Invalid backup filename.'}), 400
+
+    archive = BackupArchive(
+        connection_id=conn.id,
+        schedule_id=None,
+        filename=dest.name,
+        filepath=str(dest),
+        triggered_by='url',
+        status='pending',
+        started_at=started,
+    )
+    db.session.add(archive)
+    db.session.commit()
+    try:
+        size = _download_sql_backup_from_url(url, dest)
+        archive.size_bytes = size
+        archive.status = 'success'
+        archive.completed_at = datetime.now(timezone.utc)
+        archive.duration_seconds = max(0, int(time.time() - started_ts))
+        db.session.commit()
+        return jsonify({'ok': True, 'backup': archive.to_dict()}), 201
+    except Exception as exc:
+        archive.status = 'failed'
+        archive.error_message = str(exc)[:1000]
+        archive.completed_at = datetime.now(timezone.utc)
+        archive.duration_seconds = max(0, int(time.time() - started_ts))
+        db.session.commit()
+        return jsonify({'error': f'Download failed: {str(exc)[:300]}', 'backup': archive.to_dict()}), 400
 
 
 @bp.route('/api/databases/backups/<int:backup_id>/download')

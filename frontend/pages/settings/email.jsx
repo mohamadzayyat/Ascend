@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, Loader2, Mail, RefreshCw, Send, Settings, Trash2 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 import { useAuth } from '@/lib/hooks/useAuth'
+import { useDialog } from '@/lib/dialog'
 
 const EVENT_OPTIONS = [
   { key: 'backup_success', label: 'Database backup succeeded' },
@@ -55,6 +56,7 @@ export default function EmailSettingsPage() {
   const [clearingLog, setClearingLog] = useState(false)
   const [message, setMessage] = useState('')
   const [testTo, setTestTo] = useState('')
+  const dialog = useDialog()
 
   const mergeEvents = useCallback((ev) => {
     const o = {}
@@ -146,7 +148,13 @@ export default function EmailSettingsPage() {
   }
 
   const clearPassword = async () => {
-    if (!window.confirm('Remove stored SMTP password?')) return
+    const ok = await dialog.confirm({
+      title: 'Remove SMTP password?',
+      message: 'Remove the stored SMTP password? Email sending will fail until a new password is saved.',
+      confirmLabel: 'Remove password',
+      tone: 'warning',
+    })
+    if (!ok) return
     setSaving(true)
     setMessage('')
     try {
@@ -197,7 +205,13 @@ export default function EmailSettingsPage() {
 
   const eventLabel = (key) => (key === 'test' ? 'Test email' : EVENT_OPTIONS.find((ev) => ev.key === key)?.label || key)
   const clearLog = async () => {
-    if (!window.confirm('Clear the email delivery log?')) return
+    const ok = await dialog.confirm({
+      title: 'Clear email log?',
+      message: 'Clear the email delivery log? This removes the stored history only.',
+      confirmLabel: 'Clear log',
+      tone: 'warning',
+    })
+    if (!ok) return
     setClearingLog(true)
     setMessage('')
     try {

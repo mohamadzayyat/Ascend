@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, CheckCircle2, DownloadCloud, Loader2, RefreshCw } from 'lucide-react'
 import { apiClient } from '@/lib/api'
+import { useDialog } from '@/lib/dialog'
 
 function shortSha(s) {
   return s ? String(s).slice(0, 12) : '-'
@@ -12,6 +13,7 @@ export default function UpdateCenterPage() {
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
   const [message, setMessage] = useState('')
+  const dialog = useDialog()
 
   const load = async () => {
     setLoading(true)
@@ -43,7 +45,13 @@ export default function UpdateCenterPage() {
   }, [status])
 
   const start = async () => {
-    if (!window.confirm('Start the Ascend update now? The update runs detached, but the panel may briefly disconnect while services restart.')) return
+    const ok = await dialog.confirm({
+      title: 'Start Ascend update?',
+      message: 'The update runs detached, but the panel may briefly disconnect while services restart.',
+      confirmLabel: 'Start update',
+      tone: 'warning',
+    })
+    if (!ok) return
     setStarting(true)
     setMessage('')
     try {

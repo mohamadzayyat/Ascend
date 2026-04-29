@@ -1,9 +1,13 @@
 import hmac
+import ipaddress
 import os
 import re
 import shutil
+import socket
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +51,7 @@ def register_file_manager_feature(*, flask_app, db_instance, csrf_protect, deplo
 # ═══════════════════════════════════════════
 
 MAX_EDIT_FILE_BYTES = 2 * 1024 * 1024  # 2MB cap for read/write through the editor
+MAX_URL_DOWNLOAD_BYTES = 1024 * 1024 * 1024  # 1GB cap for server-side URL downloads
 HIDDEN_NAMES = {'node_modules', '.git'}
 
 
@@ -317,6 +322,79 @@ def _fm_handle_download(scope):
     if not target.is_file():
         return jsonify({'error': 'Not a file'}), 400
     return send_file(str(target), as_attachment=True, download_name=target.name)
+
+
+def _fm_url_public_hostname(url):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        raise ValueError('Only http:// and https:// URLs are supported.')
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f'Could not resolve URL host: {exc}') from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if not ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            raise ValueError('URL host resolves to a private or unsafe address.')
+    return parsed
+
+
+def _fm_download_filename(parsed, explicit_name):
+    raw = (explicit_name or '').strip()
+    if raw:
+        name = Path(raw.replace('\\', '/')).name
+    else:
+        name = Path(urllib.parse.unquote(parsed.path or '').replace('\\', '/')).name
+    name = re.sub(r'[\x00-\x1f<>:"|?*]+', '_', name or '').strip('. ')
+    return name or f'download-{int(time.time())}'
+
+
+def _fm_handle_download_url(scope):
+    data = request.get_json(silent=True) or {}
+    relpath = data.get('path', '')
+    url = str(data.get('url') or '').strip()
+    if not url:
+        return jsonify({'error': 'URL is required.'}), 400
+    try:
+        parsed = _fm_url_public_hostname(url)
+        base, target_dir = _fm_resolve(scope, relpath, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if not target_dir.is_dir():
+        return jsonify({'error': 'Target is not a directory'}), 400
+
+    filename = _fm_download_filename(parsed, data.get('filename'))
+    dest = (target_dir / filename).resolve()
+    try:
+        dest.relative_to(base)
+    except ValueError:
+        return jsonify({'error': 'Invalid target filename.'}), 400
+
+    request_obj = urllib.request.Request(url, headers={'User-Agent': 'AscendFileManager/1.0'})
+    tmp = dest.with_name(f'.{dest.name}.download-{os.getpid()}')
+    total = 0
+    try:
+        with urllib.request.urlopen(request_obj, timeout=30) as res, open(tmp, 'wb') as out:
+            length = res.headers.get('Content-Length')
+            if length and int(length) > MAX_URL_DOWNLOAD_BYTES:
+                raise ValueError('Remote file is larger than the 1GB download limit.')
+            while True:
+                chunk = res.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_URL_DOWNLOAD_BYTES:
+                    raise ValueError('Remote file is larger than the 1GB download limit.')
+                out.write(chunk)
+        tmp.replace(dest)
+    except Exception as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return jsonify({'error': f'Download failed: {str(exc)[:300]}'}), 400
+    return jsonify({'status': 'ok', 'path': _fm_rel(dest, base), 'name': dest.name, 'size': dest.stat().st_size})
 
 
 def _fm_handle_upload(scope):
@@ -608,6 +686,13 @@ def api_app_files_download(app_id):
     return err or _fm_handle_download(a)
 
 
+@bp.route('/api/app/<int:app_id>/files/download-url', methods=['POST'])
+@login_required
+def api_app_files_download_url(app_id):
+    a, err = _fm_owned_app(app_id)
+    return err or _fm_handle_download_url(a)
+
+
 @bp.route('/api/app/<int:app_id>/files/upload', methods=['POST'])
 @login_required
 def api_app_files_upload(app_id):
@@ -677,6 +762,13 @@ def api_project_files_write(project_id):
 def api_project_files_download(project_id):
     p, err = _fm_owned_project(project_id)
     return err or _fm_handle_download(p)
+
+
+@bp.route('/api/project/<int:project_id>/files/download-url', methods=['POST'])
+@login_required
+def api_project_files_download_url(project_id):
+    p, err = _fm_owned_project(project_id)
+    return err or _fm_handle_download_url(p)
 
 
 @bp.route('/api/project/<int:project_id>/files/upload', methods=['POST'])
@@ -869,6 +961,13 @@ def api_server_files_download():
     return err or _fm_handle_download(scope)
 
 
+@bp.route('/api/server/files/download-url', methods=['POST'])
+@login_required
+def api_server_files_download_url():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_download_url(scope)
+
+
 @bp.route('/api/server/files/upload', methods=['POST'])
 @login_required
 def api_server_files_upload():
@@ -916,4 +1015,3 @@ def api_server_files_archive():
 def api_server_files_delete():
     scope, err = _fm_owned_server()
     return err or _fm_handle_delete(scope)
-

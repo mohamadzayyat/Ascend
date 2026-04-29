@@ -3,20 +3,28 @@ import { ExternalLink, Trash2, GitBranch, Boxes } from 'lucide-react'
 import { useState } from 'react'
 import { apiClient } from '@/lib/api'
 import { useProjects } from '@/lib/hooks/useAuth'
-import { typedConfirm } from '@/lib/confirm'
+import { useDialog } from '@/lib/dialog'
 
 export default function ProjectCard({ project }) {
   const [deleting, setDeleting] = useState(false)
   const { mutate } = useProjects()
+  const dialog = useDialog()
 
   const handleDelete = async () => {
-    if (!typedConfirm(`Delete "${project.name}" and all its apps? This cannot be undone.`, project.name)) return
+    const ok = await dialog.typedConfirm({
+      title: 'Delete project?',
+      message: `Delete "${project.name}" and all its apps? This cannot be undone.`,
+      expected: project.name,
+      confirmLabel: 'Delete project',
+      tone: 'danger',
+    })
+    if (!ok) return
     setDeleting(true)
     try {
       await apiClient.deleteProject(project.id, project.name)
       mutate()
     } catch (err) {
-      alert(err.response?.data?.error || 'Failed to delete project')
+      await dialog.alert({ title: 'Delete failed', message: err.response?.data?.error || 'Failed to delete project', tone: 'danger' })
       setDeleting(false)
     }
   }

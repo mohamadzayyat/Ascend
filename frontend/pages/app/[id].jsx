@@ -45,11 +45,14 @@ export default function AppDetail() {
     let cancelled = false
     setBranchesLoading(true)
     setBranchesError('')
-    apiClient.listProjectBranches(app.project_id)
+    const branchRequest = project?.repo_mode === 'multi'
+      ? apiClient.listAppBranches(app.id)
+      : apiClient.listProjectBranches(app.project_id)
+    branchRequest
       .then((res) => {
         if (cancelled) return
         const names = res.data?.branches || []
-        const defaultBranch = res.data?.default_branch || names[0] || project?.github_branch || ''
+        const defaultBranch = res.data?.default_branch || names[0] || app?.github_branch || project?.github_branch || ''
         setBranches(names)
         setSelectedBranch((current) => (current && names.includes(current) ? current : defaultBranch))
       })
@@ -65,7 +68,7 @@ export default function AppDetail() {
     return () => {
       cancelled = true
     }
-  }, [app?.project_id, project?.github_branch])
+  }, [app?.id, app?.project_id, app?.github_branch, project?.github_branch, project?.repo_mode])
 
   if (!id) return null
   if (isLoading) {
@@ -92,7 +95,7 @@ export default function AppDetail() {
     setDeploying(true)
     setDeployError('')
     try {
-      const branch = selectedBranch || branches[0] || project?.github_branch || 'main'
+      const branch = selectedBranch || branches[0] || app?.github_branch || project?.github_branch || 'main'
       const res = await apiClient.deployApp(app.id, branch)
       setFocusDeploymentId(res.data?.id || null)
       mutate()
@@ -230,7 +233,7 @@ export default function AppDetail() {
       )}
 
       {activeTab === 'settings' && (
-        <AppSettings app={app} onUpdate={() => mutate()} />
+        <AppSettings app={{ ...app, project }} onUpdate={() => mutate()} />
       )}
     </div>
   )
