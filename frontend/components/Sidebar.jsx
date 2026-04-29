@@ -113,13 +113,10 @@ export default function Sidebar() {
             {utilityItems.map((item) => (
               <NavLink key={item.href} {...item} collapsed={sidebarCollapsed} onClick={closeMobileNav} />
             ))}
-            <button
-              onClick={handleLogout}
-              className={`w-full flex items-center gap-3 px-4 py-2 rounded-lg text-gray-300 hover:bg-primary hover:text-white transition ${sidebarCollapsed ? 'md:justify-center md:px-2' : ''}`}
-              title={sidebarCollapsed ? 'Logout' : undefined}
-            >
+            <button onClick={handleLogout} className={`sidebar-link group/nav ${sidebarCollapsed ? 'md:w-12 md:justify-center md:px-0' : ''}`}>
               <LogOut className="w-5 h-5" />
               <span className={sidebarCollapsed ? 'md:hidden' : ''}>Logout</span>
+              {sidebarCollapsed && <SidebarTooltip label="Logout" />}
             </button>
           </div>
         </div>
@@ -138,10 +135,10 @@ export default function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex flex-col items-center justify-center gap-1 py-2 text-[11px] ${item.active ? 'text-accent' : 'text-gray-400'}`}
+              className={`h-16 min-w-0 flex flex-col items-center justify-center gap-1 text-[11px] transition-colors ${item.active ? 'text-accent' : 'text-gray-400'}`}
             >
-              {item.icon}
-              <span className="truncate max-w-full px-1">{item.label}</span>
+              <span className="h-6 w-6 flex items-center justify-center">{item.icon}</span>
+              <span className="block h-4 w-full truncate px-1 text-center leading-4">{item.label}</span>
             </Link>
           ))}
         </div>
@@ -155,7 +152,7 @@ function NavLink({ href, active, icon, label, collapsed, onClick }) {
     <Link
       href={href}
       onClick={onClick}
-      className={`group/nav relative flex items-center gap-3 px-4 py-2 rounded-lg transition ${collapsed ? 'md:justify-center md:px-2' : ''} ${
+      className={`sidebar-link group/nav ${collapsed ? 'md:w-12 md:justify-center md:px-0' : ''} ${
         active
           ? 'bg-accent text-white'
           : 'text-gray-300 hover:bg-primary hover:text-white'
@@ -163,11 +160,15 @@ function NavLink({ href, active, icon, label, collapsed, onClick }) {
     >
       {icon}
       <span className={collapsed ? 'md:hidden' : ''}>{label}</span>
-      {collapsed && (
-        <span className="pointer-events-none absolute left-full ml-3 hidden whitespace-nowrap rounded-md border border-gray-700 bg-secondary px-2.5 py-1.5 text-xs text-white shadow-lg shadow-black/30 md:group-hover/nav:block">
-          {label}
-        </span>
-      )}
+      {collapsed && <SidebarTooltip label={label} />}
     </Link>
+  )
+}
+
+function SidebarTooltip({ label }) {
+  return (
+    <span className="pointer-events-none fixed left-[4.75rem] z-[80] hidden whitespace-nowrap rounded-md border border-gray-700 bg-secondary px-2.5 py-1.5 text-xs text-white opacity-0 shadow-lg shadow-black/30 transition-opacity md:group-hover/nav:block md:group-hover/nav:opacity-100">
+      {label}
+    </span>
   )
 }
