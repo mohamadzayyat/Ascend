@@ -158,6 +158,8 @@ def _crowdsec_decisions():
         except Exception:
             return str(value)
 
+    state = _load_json(STATE_PATH, {})
+    block_history = state.get('crowdsec_block_history') if isinstance(state.get('crowdsec_block_history'), dict) else {}
     items = []
     for item in raw_items if isinstance(raw_items, list) else []:
         if not isinstance(item, dict):
@@ -169,15 +171,20 @@ def _crowdsec_decisions():
             left, _, right = scope_and_value.partition(':')
             scope = scope or left.strip()
             scope_value = right.strip()
+        value_text = scalar(scope_value)
+        history = block_history.get(value_text or '') if value_text else None
         items.append({
             'id': scalar(pick(item, 'id', 'ID')),
-            'value': scalar(scope_value),
+            'value': value_text,
             'scope': scalar(scope),
             'type': scalar(pick(item, 'type', 'Type')),
             'origin': scalar(pick(item, 'origin', 'Origin', 'source', 'Source')),
             'reason': scalar(pick(item, 'reason', 'Reason')),
             'duration': scalar(pick(item, 'duration', 'Duration')),
             'until': scalar(pick(item, 'until', 'Until', 'expiration', 'Expiration')),
+            'created_at': scalar(pick(item, 'created_at', 'CreatedAt', 'created', 'Created', 'start_at', 'StartAt')),
+            'blocked_at': scalar((history or {}).get('blocked_at')) or scalar(pick(item, 'created_at', 'CreatedAt', 'created', 'Created', 'start_at', 'StartAt')),
+            'blocked_by': scalar((history or {}).get('blocked_by')) or scalar(pick(item, 'origin', 'Origin', 'source', 'Source')),
             'scenario': scalar(pick(item, 'scenario', 'Scenario')),
             'raw': item,
         })
@@ -268,7 +275,7 @@ def _ssh_failed_logins(limit=500):
     }
 
 
-def _crowdsec_add_block(ip, duration='24h', reason='manual ssh brute-force block from Ascend'):
+def _crowdsec_add_block(ip, duration='24h', reason='manual ssh brute-force block from Ascend', blocked_by='ascend'):
     cscli = shutil.which('cscli')
     if not cscli:
         return False, 'cscli is not installed.'
@@ -280,6 +287,16 @@ def _crowdsec_add_block(ip, duration='24h', reason='manual ssh brute-force block
     rc, out, err = _run(cmd, timeout=12)
     if rc != 0:
         return False, err or out or 'Could not add CrowdSec decision.'
+    state = _load_json(STATE_PATH, {})
+    history = state.get('crowdsec_block_history') if isinstance(state.get('crowdsec_block_history'), dict) else {}
+    history[ip] = {
+        'blocked_at': _now(),
+        'duration': duration,
+        'reason': reason,
+        'blocked_by': blocked_by,
+    }
+    state['crowdsec_block_history'] = history
+    _write_json(STATE_PATH, state)
     return True, out or 'Decision added.'
 
 
@@ -324,7 +341,7 @@ def _auto_block_ssh_repeat_attackers():
             continue
         if recently_blocked.get(ip) == row.get('latest_raw'):
             continue
-        ok, message = _crowdsec_add_block(ip, duration, f'automatic ssh brute-force block: {count} failed logins in 24h')
+        ok, message = _crowdsec_add_block(ip, duration, f'automatic ssh brute-force block: {count} failed logins in 24h', 'ascend-auto-ssh')
         if ok:
             result['blocked'].append({'ip': ip, 'count': count, 'message': message})
             recently_blocked[ip] = row.get('latest_raw') or _now()
@@ -575,7 +592,7 @@ def api_security_crowdsec_block():
     ip = str(data.get('ip') or '').strip()
     duration = str(data.get('duration') or '24h').strip()
     reason = str(data.get('reason') or 'manual ssh brute-force block from Ascend').strip()
-    ok, message = _crowdsec_add_block(ip, duration, reason)
+    ok, message = _crowdsec_add_block(ip, duration, reason, 'ascend-manual')
     if not ok:
         return jsonify({'error': message}), 400
     _audit_log('security.crowdsec_ip_blocked', 'ok', f'CrowdSec block added: {ip}', {'ip': ip, 'duration': duration, 'reason': reason})
@@ -603,7 +620,7 @@ def api_security_ssh_failures_block_repeat():
         ip = row.get('ip')
         if not ip or ip in already or int(row.get('count') or 0) < threshold:
             continue
-        ok, message = _crowdsec_add_block(ip, duration, f'ssh brute-force: {row.get("count")} failed logins in 24h')
+        ok, message = _crowdsec_add_block(ip, duration, f'ssh brute-force: {row.get("count")} failed logins in 24h', 'ascend-bulk-ssh')
         if ok:
             blocked.append({'ip': ip, 'count': row.get('count'), 'message': message})
         else:

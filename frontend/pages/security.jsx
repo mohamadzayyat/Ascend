@@ -23,6 +23,8 @@ const TABS = [
   ['logs', 'Logs'],
 ]
 
+const PAGE_SIZE = 10
+
 function toneClasses(tone) {
   return {
     green: 'border-green-500/40 bg-green-500/10 text-green-200',
@@ -148,6 +150,27 @@ function asArray(value) {
   return Array.isArray(value) ? value : []
 }
 
+function formatMaybeDate(value) {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (Number.isFinite(d.getTime())) return d.toLocaleString()
+  return asText(value)
+}
+
+function Pager({ page, total, onPage }) {
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  if (pages <= 1) return null
+  return (
+    <div className="px-4 py-3 border-t border-gray-700 flex items-center justify-between text-sm">
+      <span className="text-gray-400">Page {page + 1} of {pages}</span>
+      <div className="flex gap-2">
+        <button onClick={() => onPage(Math.max(0, page - 1))} disabled={page <= 0} className="px-3 py-1.5 border border-gray-600 rounded text-gray-200 disabled:opacity-50">Prev</button>
+        <button onClick={() => onPage(Math.min(pages - 1, page + 1))} disabled={page >= pages - 1} className="px-3 py-1.5 border border-gray-600 rounded text-gray-200 disabled:opacity-50">Next</button>
+      </div>
+    </div>
+  )
+}
+
 export default function SecurityPage() {
   const [activeTab, setActiveTab] = useState('overview')
   const [status, setStatus] = useState(null)
@@ -160,6 +183,8 @@ export default function SecurityPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [sshFailures, setSshFailures] = useState({ summary: [], events: [], total: 0, errors: [] })
+  const [blocksPage, setBlocksPage] = useState(0)
+  const [sshPage, setSshPage] = useState(0)
 
   const state = status?.state || {}
   const tools = status?.tools || {}
@@ -179,6 +204,9 @@ export default function SecurityPage() {
   const bouncerOk = !!tools.crowdsec_firewall_bouncer_service?.ok
   const definitionsNewest = latestDate(tools.definitions?.database_files)
   const definitionsAge = daysSince(definitionsNewest)
+  const pagedDecisions = crowdsecDecisions.slice(blocksPage * PAGE_SIZE, (blocksPage + 1) * PAGE_SIZE)
+  const sshSummary = asArray(sshFailures.summary)
+  const pagedSshSummary = sshSummary.slice(sshPage * PAGE_SIZE, (sshPage + 1) * PAGE_SIZE)
 
   const load = async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true)
@@ -212,6 +240,7 @@ export default function SecurityPage() {
         total: Number(data?.total || 0),
         errors: asArray(data?.errors),
       })
+      setSshPage(0)
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load SSH failures')
     }
@@ -522,9 +551,10 @@ export default function SecurityPage() {
                 {crowdsecDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div> : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left min-w-[900px]">
-                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked value</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Origin</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
-                      <tbody className="divide-y divide-gray-700/70">{crowdsecDecisions.map((item, idx) => <tr key={`${asText(item.id || item.value, idx)}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value ? asText(item.value) : <span className="text-yellow-200">Decision #{asText(item.id)}</span>}</td><td className="px-4 py-3 text-gray-300">{asText(item.scope || item.type)}</td><td className="px-4 py-3 text-gray-300">{asText(item.reason || item.scenario)}</td><td className="px-4 py-3 text-gray-400">{asText(item.origin)}</td><td className="px-4 py-3 text-gray-400">{asText(item.until || item.duration)}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${asText(item.value || item.id)}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
+                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked value</th><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Blocked at</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
+                      <tbody className="divide-y divide-gray-700/70">{pagedDecisions.map((item, idx) => <tr key={`${asText(item.id || item.value, idx)}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value ? asText(item.value) : <span className="text-yellow-200">Decision #{asText(item.id)}</span>}</td><td className="px-4 py-3 text-gray-300">{asText(item.scope || item.type)}</td><td className="px-4 py-3 text-gray-300">{asText(item.reason || item.scenario)}</td><td className="px-4 py-3 text-gray-400">{formatMaybeDate(item.blocked_at || item.created_at)}</td><td className="px-4 py-3 text-gray-400">{asText(item.until || item.duration)}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${asText(item.value || item.id)}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
                     </table>
+                    <Pager page={blocksPage} total={crowdsecDecisions.length} onPage={setBlocksPage} />
                   </div>
                 )}
               </section>
@@ -545,12 +575,12 @@ export default function SecurityPage() {
                   </div>
                 </div>
                 {sshFailures.errors?.length > 0 && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{sshFailures.errors.map((e) => asText(e)).join(' | ')}</div>}
-                <div className="px-5 py-3 text-sm text-gray-400 border-b border-gray-700">{sshFailures.total || 0} failed SSH login event(s), {sshFailures.summary?.length || 0} public source IP(s)</div>
-                {!sshFailures.summary?.length ? <div className="p-8 text-center text-gray-500 text-sm">No failed SSH logins found in the current window.</div> : (
+                <div className="px-5 py-3 text-sm text-gray-400 border-b border-gray-700">{sshFailures.total || 0} failed SSH login event(s), {sshSummary.length || 0} public source IP(s)</div>
+                {!sshSummary.length ? <div className="p-8 text-center text-gray-500 text-sm">No failed SSH logins found in the current window.</div> : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left min-w-[900px]">
                       <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Source IP</th><th className="px-4 py-3">Failures</th><th className="px-4 py-3">Top users</th><th className="px-4 py-3">Last seen</th><th className="px-4 py-3">Latest log</th><th className="px-4 py-3"></th></tr></thead>
-                      <tbody className="divide-y divide-gray-700/70">{sshFailures.summary.map((row) => {
+                      <tbody className="divide-y divide-gray-700/70">{pagedSshSummary.map((row) => {
                         const rowIp = asText(row.ip, '')
                         const alreadyBlocked = crowdsecDecisions.some((d) => asText(d.value, '') === rowIp)
                         return (
@@ -571,6 +601,7 @@ export default function SecurityPage() {
                         )
                       })}</tbody>
                     </table>
+                    <Pager page={sshPage} total={sshSummary.length} onPage={setSshPage} />
                   </div>
                 )}
               </section>
