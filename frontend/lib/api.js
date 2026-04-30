@@ -254,6 +254,10 @@ export const apiClient = {
     api.delete(`/api/databases/connections/${connId}/backup-schedules/${scheduleId}`),
 }
 
+export function securityStatusStreamUrl() {
+  return `${API_URL}/api/security/status/stream`
+}
+
 // Build the WebSocket URL for the server-shell endpoint. Respects
 // NEXT_PUBLIC_API_URL for dev (cross-origin), falls back to same-origin in prod.
 export function terminalWebSocketUrl() {

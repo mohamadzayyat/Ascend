@@ -8,13 +8,14 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  Search,
   ShieldAlert,
   ShieldCheck,
   Trash2,
   Wrench,
   Zap,
 } from 'lucide-react'
-import { apiClient } from '@/lib/api'
+import { apiClient, securityStatusStreamUrl } from '@/lib/api'
 import { useDialog } from '@/lib/dialog'
 
 const TABS = [
@@ -194,7 +195,9 @@ export default function SecurityPage() {
   const [busy, setBusy] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [streamConnected, setStreamConnected] = useState(false)
   const [sshFailures, setSshFailures] = useState({ summary: [], events: [], total: 0, errors: [] })
+  const [blocksSearch, setBlocksSearch] = useState('')
   const [blocksPage, setBlocksPage] = useState(0)
   const [sshPage, setSshPage] = useState(0)
   const [threats, setThreats] = useState({ processes: [], persistence: [], immutable: [] })
@@ -220,7 +223,20 @@ export default function SecurityPage() {
   const http401Threshold = tools.crowdsec_http_401_threshold || {}
   const definitionsNewest = latestDate(tools.definitions?.database_files)
   const definitionsAge = daysSince(definitionsNewest)
-  const pagedDecisions = crowdsecDecisions.slice(blocksPage * PAGE_SIZE, (blocksPage + 1) * PAGE_SIZE)
+  const filteredDecisions = useMemo(() => {
+    const query = blocksSearch.trim().toLowerCase()
+    if (!query) return crowdsecDecisions
+    return crowdsecDecisions.filter((item) => [
+      item.value,
+      item.id,
+      item.reason,
+      item.scenario,
+      item.origin,
+      item.type,
+      item.blocked_by,
+    ].some((value) => asText(value, '').toLowerCase().includes(query)))
+  }, [crowdsecDecisions, blocksSearch])
+  const pagedDecisions = filteredDecisions.slice(blocksPage * PAGE_SIZE, (blocksPage + 1) * PAGE_SIZE)
   const sshSummary = asArray(sshFailures.summary)
   const pagedSshSummary = sshSummary.slice(sshPage * PAGE_SIZE, (sshPage + 1) * PAGE_SIZE)
   const persistenceItems = asArray(threats.persistence)
@@ -230,10 +246,12 @@ export default function SecurityPage() {
   const load = async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true)
     try {
-      const [{ data: statusData }, { data: logData }] = await Promise.all([
+      const shouldLoadLog = activeTab === 'logs' || scanRunning || installRunning || crowdsecInstallRunning
+      const [{ data: statusData }, logResult] = await Promise.all([
         apiClient.getSecurityCenterStatus(),
-        apiClient.getSecurityLogs(logKind),
+        shouldLoadLog ? apiClient.getSecurityLogs(logKind) : Promise.resolve({ data: { log } }),
       ])
+      const logData = logResult.data || {}
       setStatus(statusData)
       setThreats(statusData.threats || { processes: [], persistence: [], immutable: [] })
       setLog(logData.log || '')
@@ -275,9 +293,11 @@ export default function SecurityPage() {
     }
   }
 
-  useEffect(() => { load() }, [logKind])
+  useEffect(() => { load() }, [])
+  useEffect(() => { if (activeTab === 'logs') apiClient.getSecurityLogs(logKind).then(({ data }) => setLog(data.log || '')).catch(() => {}) }, [activeTab, logKind])
   useEffect(() => { if (activeTab === 'ip') loadSshFailures() }, [activeTab])
   useEffect(() => { if (activeTab === 'threats') loadThreats() }, [activeTab])
+  useEffect(() => { setBlocksPage(0) }, [blocksSearch])
   useEffect(() => {
     setSelectedPersistence((current) => {
       const valid = new Set(persistenceItems.map(threatPersistenceKey))
@@ -289,10 +309,57 @@ export default function SecurityPage() {
     })
   }, [threats.persistence])
   useEffect(() => {
-    if (!scanRunning && !installRunning && !crowdsecInstallRunning && !securityStatusRefreshing) return undefined
-    const timer = setInterval(() => load({ quiet: true }), 2500)
-    return () => clearInterval(timer)
-  }, [scanRunning, installRunning, crowdsecInstallRunning, securityStatusRefreshing, logKind])
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') return undefined
+    let closed = false
+    let fallbackTimer = null
+    const source = new EventSource(securityStatusStreamUrl(), { withCredentials: true })
+    source.addEventListener('open', () => {
+      if (closed) return
+      setStreamConnected(true)
+      if (fallbackTimer) {
+        clearInterval(fallbackTimer)
+        fallbackTimer = null
+      }
+    })
+    source.addEventListener('status', (event) => {
+      if (closed) return
+      try {
+        const data = JSON.parse(event.data)
+        setStatus(data)
+        setThreats(data.threats || { processes: [], persistence: [], immutable: [] })
+        setError('')
+        setLoading(false)
+        setSelectedPaths((current) => {
+          if (Object.keys(current).length) return current
+          const next = {}
+          for (const p of data.scan_paths || []) next[p.key] = ['web_roots', 'tmp', 'deployments', 'static_sites'].includes(p.key)
+          return next
+        })
+      } catch {
+        /* Ignore malformed stream frames. */
+      }
+    })
+    source.addEventListener('logs', (event) => {
+      if (closed || activeTab !== 'logs') return
+      try {
+        const data = JSON.parse(event.data)
+        setLog(data[logKind] || '')
+      } catch {
+        /* Ignore malformed stream frames. */
+      }
+    })
+    source.addEventListener('error', () => {
+      if (closed) return
+      setStreamConnected(false)
+      if (!fallbackTimer) fallbackTimer = setInterval(() => load({ quiet: true }), 15000)
+    })
+    return () => {
+      closed = true
+      source.close()
+      if (fallbackTimer) clearInterval(fallbackTimer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, logKind])
 
   const issues = useMemo(() => {
     const rows = []
@@ -626,6 +693,12 @@ export default function SecurityPage() {
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
         </button>
       </div>
+      <div className="mb-4 flex justify-end">
+        <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${streamConnected ? 'border-green-500/30 bg-green-500/10 text-green-200' : 'border-yellow-500/30 bg-yellow-500/10 text-yellow-200'}`}>
+          <span className={`h-2 w-2 rounded-full ${streamConnected ? 'bg-green-400' : 'bg-yellow-400'}`} />
+          {streamConnected ? 'Live updates connected' : 'Live updates reconnecting'}
+        </span>
+      </div>
 
       {message && <div className="mb-4 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-200 text-sm">{message}</div>}
       {error && <div className="mb-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm whitespace-pre-wrap">{error}</div>}
@@ -876,18 +949,29 @@ export default function SecurityPage() {
                 </div>
               </section>
               <section className="rounded-lg border border-gray-700 bg-secondary overflow-hidden">
-                <div className="px-5 py-4 border-b border-gray-700">
-                  <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Ban className="w-5 h-5 text-accent" /> Active IP Blocks</h2>
-                  <p className="text-gray-500 text-sm mt-1">These are active CrowdSec decisions. Removing one unblocks the IP.</p>
+                <div className="px-5 py-4 border-b border-gray-700 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Ban className="w-5 h-5 text-accent" /> Active IP Blocks</h2>
+                    <p className="text-gray-500 text-sm mt-1">These are active CrowdSec decisions. Removing one unblocks the IP.</p>
+                  </div>
+                  <label className="relative w-full sm:w-80">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                    <input
+                      value={blocksSearch}
+                      onChange={(e) => setBlocksSearch(e.target.value)}
+                      placeholder="Search IP, reason, decision..."
+                      className="w-full rounded border border-gray-700 bg-primary px-9 py-2 text-sm text-white placeholder-gray-500 focus:border-accent focus:outline-none"
+                    />
+                  </label>
                 </div>
                 {tools.crowdsec_decisions?.error && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{tools.crowdsec_decisions.error}</div>}
-                {crowdsecDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div> : (
+                {crowdsecDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div> : filteredDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No IP blocks match your search.</div> : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm text-left min-w-[900px]">
                       <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked IP</th><th className="px-4 py-3">Decision</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Blocked at</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
                       <tbody className="divide-y divide-gray-700/70">{pagedDecisions.map((item, idx) => <tr key={`${asText(item.id || item.value, idx)}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value ? asText(item.value) : <span className="text-yellow-200">IP unavailable</span>}</td><td className="px-4 py-3 text-gray-300">#{asText(item.id)}</td><td className="px-4 py-3 text-gray-300">{asText(item.reason || item.scenario)}</td><td className="px-4 py-3 text-gray-400">{formatMaybeDate(item.blocked_at || item.created_at)}</td><td className="px-4 py-3 text-gray-400">{asText(item.until || item.duration)}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${asText(item.value || item.id)}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
                     </table>
-                    <Pager page={blocksPage} total={crowdsecDecisions.length} onPage={setBlocksPage} />
+                    <Pager page={blocksPage} total={filteredDecisions.length} onPage={setBlocksPage} />
                   </div>
                 )}
               </section>

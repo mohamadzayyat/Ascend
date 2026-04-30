@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request, stream_with_context
 from flask_login import login_required
 
 bp = Blueprint('security_center', __name__)
@@ -889,6 +889,11 @@ def register_security_feature(*, flask_app, csrf_protect, base_dir, deployments_
 @login_required
 def api_security_status():
     status = _current_status()
+    status = _finalize_security_status(status)
+    return jsonify(status)
+
+
+def _finalize_security_status(status):
     scan = ((status.get('state') or {}).get('scan') or {})
     state = status.get('state') or {}
     notify_key = scan.get('started_at')
@@ -897,7 +902,52 @@ def api_security_status():
         state['last_infected_scan_notified'] = notify_key
         _write_json(STATE_PATH, state)
         status['state'] = state
-    return jsonify(status)
+    return status
+
+
+@bp.route('/api/security/status/stream')
+@login_required
+def api_security_status_stream():
+    def emit(event, payload):
+        return f'event: {event}\ndata: {json.dumps(payload, separators=(",", ":"))}\n\n'
+
+    @stream_with_context
+    def generate():
+        yield ': connected\n\n'
+        last_payload = ''
+        last_log_at = 0.0
+        while True:
+            try:
+                status = _finalize_security_status(_current_status())
+                payload = json.dumps(status, sort_keys=True, default=str)
+                if payload != last_payload:
+                    last_payload = payload
+                    yield emit('status', status)
+                state = status.get('state') or {}
+                scan = state.get('scan') or {}
+                install = state.get('install') or {}
+                crowdsec_install = state.get('crowdsec_install') or {}
+                running = any((row.get('status') in {'starting', 'running'}) for row in (scan, install, crowdsec_install))
+                now_ts = time.monotonic()
+                if running and now_ts - last_log_at >= 3:
+                    last_log_at = now_ts
+                    yield emit('logs', {
+                        'scan': _tail(SCAN_LOG_PATH, 30000),
+                        'install': _tail(INSTALL_LOG_PATH, 30000),
+                        'crowdsec': _tail(CROWDSEC_LOG_PATH, 30000),
+                    })
+                yield ': heartbeat\n\n'
+                time.sleep(5 if running else 12)
+            except GeneratorExit:
+                break
+            except Exception as exc:
+                yield emit('error', {'error': str(exc)})
+                time.sleep(10)
+
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
+    })
 
 
 @bp.route('/api/security/install/start', methods=['POST'])
