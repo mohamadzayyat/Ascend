@@ -60,6 +60,9 @@ BOUNCER_SERVICE_CANDIDATES = [
     'crowdsec-firewall-bouncer-iptables.service',
     'crowdsec-firewall-bouncer-nftables.service',
 ]
+HTTP_401_SCENARIO_MARKER = 'http-generic-401-bf'
+HTTP_401_THRESHOLD = 10
+HTTP_401_WINDOW = '24h'
 
 
 def _now():
@@ -96,6 +99,89 @@ def _run(cmd, timeout=4):
         return proc.returncode, (proc.stdout or '').strip(), (proc.stderr or '').strip()
     except Exception as exc:
         return 1, '', str(exc)
+
+
+def _crowdsec_http_401_scenario_files():
+    roots = [Path('/etc/crowdsec/scenarios'), Path('/etc/crowdsec/postoverflows')]
+    files = []
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            for path in root.rglob('*.yaml'):
+                try:
+                    text = path.read_text(encoding='utf-8', errors='replace')
+                except Exception:
+                    continue
+                if HTTP_401_SCENARIO_MARKER in text or HTTP_401_SCENARIO_MARKER in path.name:
+                    files.append(path)
+        except Exception:
+            continue
+    return files
+
+
+def _crowdsec_http_401_threshold_status():
+    files = _crowdsec_http_401_scenario_files()
+    if not files:
+        return {
+            'available': shutil.which('cscli') is not None,
+            'configured': False,
+            'threshold': HTTP_401_THRESHOLD,
+            'window': HTTP_401_WINDOW,
+            'files': [],
+            'message': 'HTTP 401 brute-force scenario was not found.',
+        }
+    rows = []
+    configured = False
+    for path in files:
+        text = path.read_text(encoding='utf-8', errors='replace')
+        cap = re.search(r'(?m)^\s*capacity\s*:\s*(\d+)\s*$', text)
+        leak = re.search(r'(?m)^\s*leakspeed\s*:\s*([^\s#]+)', text)
+        capacity = int(cap.group(1)) if cap else None
+        leakspeed = leak.group(1) if leak else None
+        ok = capacity == HTTP_401_THRESHOLD and str(leakspeed or '').lower() == HTTP_401_WINDOW
+        configured = configured or ok
+        rows.append({'path': str(path), 'capacity': capacity, 'leakspeed': leakspeed, 'configured': ok})
+    return {
+        'available': True,
+        'configured': configured,
+        'threshold': HTTP_401_THRESHOLD,
+        'window': HTTP_401_WINDOW,
+        'files': rows,
+        'message': 'Blocks after 10 HTTP 401 events in 24h.' if configured else 'HTTP 401 threshold is not tuned yet.',
+    }
+
+
+def _apply_crowdsec_http_401_threshold():
+    files = _crowdsec_http_401_scenario_files()
+    if not files:
+        return False, [{'error': 'Could not find the http-generic-401-bf CrowdSec scenario file.'}]
+    results = []
+    for path in files:
+        text = path.read_text(encoding='utf-8', errors='replace')
+        original = text
+        if re.search(r'(?m)^\s*capacity\s*:', text):
+            text = re.sub(r'(?m)^(\s*capacity\s*:\s*).+$', rf'\g<1>{HTTP_401_THRESHOLD}', text, count=1)
+        else:
+            text += f'\ncapacity: {HTTP_401_THRESHOLD}\n'
+        if re.search(r'(?m)^\s*leakspeed\s*:', text):
+            text = re.sub(r'(?m)^(\s*leakspeed\s*:\s*).+$', rf'\g<1>{HTTP_401_WINDOW}', text, count=1)
+        else:
+            text += f'leakspeed: {HTTP_401_WINDOW}\n'
+        if text != original:
+            backup = path.with_suffix(path.suffix + f'.ascend-{int(time.time())}.bak')
+            shutil.copy2(path, backup)
+            path.write_text(text, encoding='utf-8')
+            results.append({'path': str(path), 'backup': str(backup), 'changed': True})
+        else:
+            results.append({'path': str(path), 'changed': False})
+    systemctl = shutil.which('systemctl')
+    if systemctl:
+        rc, out, err = _run([systemctl, 'restart', 'crowdsec.service'], timeout=20)
+        results.append({'cmd': 'systemctl restart crowdsec.service', 'returncode': rc, 'stdout': out, 'stderr': err})
+        if rc != 0:
+            return False, results
+    return True, results
 
 
 def _safe_read_lines(path, max_bytes=1024 * 1024):
@@ -477,6 +563,17 @@ def _cached_crowdsec_decisions():
     return {**fallback, 'refreshing': True}
 
 
+def _invalidate_crowdsec_decisions_cache():
+    _CROWDSEC_DECISIONS_CACHE['at'] = 0.0
+    _CROWDSEC_DECISIONS_CACHE['data'] = None
+    try:
+        state = _load_json(STATE_PATH, {})
+        state.pop('crowdsec_decisions_cache', None)
+        _write_json(STATE_PATH, state)
+    except Exception:
+        pass
+
+
 def _valid_public_ip(value):
     try:
         ip = ipaddress.ip_address(str(value))
@@ -720,6 +817,7 @@ def _current_status():
             'cscli': cscli,
             'crowdsec_service': _service_active('crowdsec.service'),
             'crowdsec_firewall_bouncer_service': _service_active_any(BOUNCER_SERVICE_CANDIDATES),
+            'crowdsec_http_401_threshold': _crowdsec_http_401_threshold_status(),
             'crowdsec_decisions': _cached_crowdsec_decisions(),
             'clamav_freshclam_service': _service_active('clamav-freshclam.service'),
             'clamav_daemon_service': _service_active('clamav-daemon.service'),
@@ -896,7 +994,36 @@ def api_security_crowdsec_decision_delete():
         return jsonify({'error': 'Decision id or IP value is required.'}), 400
     rc, out, err = _run(cmd, timeout=10)
     if rc != 0:
-        return jsonify({'error': err or out or 'Could not delete CrowdSec decision.'}), 500
+        message = err or out or 'Could not delete CrowdSec decision.'
+        if 'doesn\'t exist' in message or 'does not exist' in message or 'not found' in message.lower():
+            if decision_id and value:
+                rc_ip, out_ip, err_ip = _run([cscli, 'decisions', 'delete', '--ip', value], timeout=10)
+                if rc_ip == 0:
+                    _invalidate_crowdsec_decisions_cache()
+                    _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed by IP fallback: {value}', {'id': decision_id, 'value': value, 'fallback': 'ip'})
+                    return jsonify({'message': 'CrowdSec decision removed.', 'output': out_ip, 'fallback': 'ip'})
+                fallback_message = err_ip or out_ip or ''
+                if 'doesn\'t exist' in fallback_message or 'does not exist' in fallback_message or 'not found' in fallback_message.lower():
+                    _invalidate_crowdsec_decisions_cache()
+                    _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value}', {'id': decision_id, 'value': value, 'already_removed': True})
+                    return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
+                return jsonify({'error': fallback_message or message}), 500
+            _invalidate_crowdsec_decisions_cache()
+            _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value or decision_id}', {'id': decision_id, 'value': value, 'already_removed': True})
+            return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
+        if decision_id and value:
+            rc_ip, out_ip, err_ip = _run([cscli, 'decisions', 'delete', '--ip', value], timeout=10)
+            if rc_ip == 0:
+                _invalidate_crowdsec_decisions_cache()
+                _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed by IP fallback: {value}', {'id': decision_id, 'value': value, 'fallback': 'ip'})
+                return jsonify({'message': 'CrowdSec decision removed.', 'output': out_ip, 'fallback': 'ip'})
+            ip_message = err_ip or out_ip or ''
+            if 'doesn\'t exist' in ip_message or 'does not exist' in ip_message or 'not found' in ip_message.lower():
+                _invalidate_crowdsec_decisions_cache()
+                _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value}', {'id': decision_id, 'value': value, 'already_removed': True})
+                return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
+        return jsonify({'error': message}), 500
+    _invalidate_crowdsec_decisions_cache()
     _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed: {value or decision_id}', {'id': decision_id, 'value': value})
     return jsonify({'message': 'CrowdSec decision removed.', 'output': out})
 
@@ -1156,6 +1283,11 @@ def api_security_repair():
             'label': 'Clear failed install state',
             'steps': [],
         },
+        'crowdsec_http_401_threshold': {
+            'label': 'Tune HTTP 401 brute-force threshold',
+            'steps': [],
+            'custom': 'http_401_threshold',
+        },
     }
     spec = actions.get(action)
     if not spec:
@@ -1168,6 +1300,13 @@ def api_security_repair():
         _write_json(STATE_PATH, state)
         _audit_log('security.repair', 'ok', spec['label'], {'action': action})
         return jsonify({'message': 'Security install state cleared.', 'results': []})
+    if spec.get('custom') == 'http_401_threshold':
+        ok, results = _apply_crowdsec_http_401_threshold()
+        status = 'ok' if ok else 'failed'
+        _audit_log('security.repair', status, spec['label'], {'action': action, 'results': results})
+        if not ok:
+            return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
+        return jsonify({'message': 'HTTP 401 brute-force threshold set to 10 attempts in 24h.', 'results': results})
     steps = [s for s in spec.get('steps') or [] if s and s[0]]
     if not steps:
         return jsonify({'error': 'This repair needs systemctl or the required tool, but it was not found.'}), 400

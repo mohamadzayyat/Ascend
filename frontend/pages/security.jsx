@@ -217,6 +217,7 @@ export default function SecurityPage() {
   const freshclamInstalled = !!tools.freshclam?.installed
   const crowdsecInstalled = !!tools.cscli?.installed
   const bouncerOk = !!tools.crowdsec_firewall_bouncer_service?.ok
+  const http401Threshold = tools.crowdsec_http_401_threshold || {}
   const definitionsNewest = latestDate(tools.definitions?.database_files)
   const definitionsAge = daysSince(definitionsNewest)
   const pagedDecisions = crowdsecDecisions.slice(blocksPage * PAGE_SIZE, (blocksPage + 1) * PAGE_SIZE)
@@ -856,6 +857,7 @@ export default function SecurityPage() {
                 <StatusRow title="CrowdSec agent" ok={crowdsecInstalled && tools.crowdsec_service?.ok} detail={`${tools.crowdsec?.version || tools.cscli?.version || 'Not installed'} | Service: ${tools.crowdsec_service?.active || 'unknown'}`} action={crowdsecInstalled ? 'Restart' : 'Install'} busy={busy === (crowdsecInstalled ? 'crowdsec_restart' : 'install_crowdsec')} onAction={() => runFix(crowdsecInstalled ? 'crowdsec_restart' : 'install_crowdsec')} />
                 <StatusRow title="Firewall bouncer" ok={bouncerOk} detail={`${tools.crowdsec_firewall_bouncer_service?.name || 'crowdsec firewall bouncer'}: ${tools.crowdsec_firewall_bouncer_service?.active || 'unknown'}`} action="Repair" busy={busy === 'crowdsec_bouncer_restart'} onAction={() => runFix('crowdsec_bouncer_restart')} />
                 <StatusRow title="Nginx/SSH collections" ok={crowdsecInstalled} detail="Installs core Linux, SSH, and Nginx detection collections." action="Apply" busy={busy === 'crowdsec_collections'} onAction={() => runFix('crowdsec_collections')} />
+                <StatusRow title="HTTP 401 brute-force rule" ok={!!http401Threshold.configured} detail={http401Threshold.message || 'Blocks repeated HTTP 401 authentication failures.'} action={crowdsecInstalled ? 'Apply 10/24h' : ''} busy={busy === 'crowdsec_http_401_threshold'} onAction={() => runFix('crowdsec_http_401_threshold')} />
               </div>
               <section className="rounded-lg border border-gray-700 bg-secondary p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">

@@ -3,6 +3,7 @@ import { useRouter } from 'next/router'
 import { useAuth } from '@/lib/hooks/useAuth'
 import { DialogProvider } from '@/lib/dialog'
 import Sidebar from '@/components/Sidebar'
+import InternetStatusToast from '@/components/InternetStatusToast'
 import '../styles/globals.css'
 import '@xyflow/react/dist/style.css'
 
@@ -43,6 +44,7 @@ export default function App({ Component, pageProps }) {
           <main className="app-main flex-1 min-w-0 overflow-auto pt-16 pb-20 md:pt-0 md:pb-0 md:pl-3">
             <Component {...pageProps} />
           </main>
+          <InternetStatusToast />
         </div>
       </DialogProvider>
     )
