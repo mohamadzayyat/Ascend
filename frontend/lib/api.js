@@ -231,13 +231,15 @@ export const apiClient = {
       sql, database, confirm_destructive: confirmDestructive,
     }),
   listDbBackups: (id) => api.get(`/api/databases/connections/${id}/backups`),
-  runDbBackup: (id) => api.post(`/api/databases/connections/${id}/backups/run`),
+  runDbBackup: (id, targetDatabase = '') => api.post(`/api/databases/connections/${id}/backups/run`, { target_database: targetDatabase || '' }),
   downloadDbBackupFromUrl: (id, data) =>
     api.post(`/api/databases/connections/${id}/backups/download-url`, data, { timeout: 1900000 }),
   startDbRestore: (id, data) => api.post(`/api/databases/connections/${id}/restore-jobs`, data, { timeout: 120000 }),
   getDbRestoreJob: (jobId) => api.get(`/api/databases/restore-jobs/${jobId}`),
   downloadDbBackupUrl: (backupId) =>
     `${API_URL}/api/databases/backups/${backupId}/download`,
+  shareDbBackup: (backupId, expiresHours = 24) =>
+    api.post(`/api/databases/backups/${backupId}/share`, { expires_hours: expiresHours }),
   deleteDbBackup: (backupId) => api.delete(`/api/databases/backups/${backupId}`),
   getDbSchedule: (id) => api.get(`/api/databases/connections/${id}/schedule`),
   upsertDbSchedule: (id, data) =>
@@ -304,6 +306,8 @@ export function makeFileApi(prefix) {
       api.post(`${prefix}/files/archive`, { paths, current_path: currentPath, output_name: outputName, mode: 'download' }, { responseType: 'blob' }),
     archiveCreate: (paths, currentPath = '', outputName = '') =>
       api.post(`${prefix}/files/archive`, { paths, current_path: currentPath, output_name: outputName, mode: 'create' }),
+    share: (path, expiresHours = 24) =>
+      api.post(`${prefix}/files/share`, { path, expires_hours: expiresHours }),
   }
 }
 export const appFileApi = (id) => makeFileApi(`/api/app/${id}`)

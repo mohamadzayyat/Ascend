@@ -16,6 +16,8 @@ from flask import Blueprint, after_this_request, jsonify, request, send_file, se
 from flask_login import current_user, login_required
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from backend.services.share_links import create_share_link
+
 bp = Blueprint('file_manager', __name__)
 
 app = None
@@ -657,6 +659,30 @@ def _fm_handle_archive(scope):
     return send_file(str(zip_path), as_attachment=True, download_name=output_name)
 
 
+def _fm_handle_share(scope):
+    data = request.get_json(silent=True) or {}
+    relpath = str(data.get('path') or '').strip()
+    if not relpath:
+        return jsonify({'error': 'Choose a file or folder to share.'}), 400
+    try:
+        _base, target = _fm_resolve(scope, relpath)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not target.exists():
+        return jsonify({'error': 'File or folder not found.'}), 404
+    try:
+        share = create_share_link(
+            target,
+            download_name=f'{target.name}.zip' if target.is_dir() else target.name,
+            title=target.name,
+            expires_hours=data.get('expires_hours'),
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    share['url'] = f"{request.host_url.rstrip('/')}/api/share/{share['token']}"
+    return jsonify(share), 201
+
+
 # ── App-scoped routes ──────────────────────────────────────────────
 @bp.route('/api/app/<int:app_id>/files/list')
 @login_required
@@ -735,6 +761,13 @@ def api_app_files_archive(app_id):
     return err or _fm_handle_archive(a)
 
 
+@bp.route('/api/app/<int:app_id>/files/share', methods=['POST'])
+@login_required
+def api_app_files_share(app_id):
+    a, err = _fm_owned_app(app_id)
+    return err or _fm_handle_share(a)
+
+
 # ── Project-scoped routes (browse the cloned repo root) ───────────
 @bp.route('/api/project/<int:project_id>/files/list')
 @login_required
@@ -811,6 +844,13 @@ def api_project_files_copy(project_id):
 def api_project_files_archive(project_id):
     p, err = _fm_owned_project(project_id)
     return err or _fm_handle_archive(p)
+
+
+@bp.route('/api/project/<int:project_id>/files/share', methods=['POST'])
+@login_required
+def api_project_files_share(project_id):
+    p, err = _fm_owned_project(project_id)
+    return err or _fm_handle_share(p)
 
 
 @bp.route('/api/project/<int:project_id>/files/delete', methods=['POST'])
@@ -1008,6 +1048,13 @@ def api_server_files_copy():
 def api_server_files_archive():
     scope, err = _fm_owned_server()
     return err or _fm_handle_archive(scope)
+
+
+@bp.route('/api/server/files/share', methods=['POST'])
+@login_required
+def api_server_files_share():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_share(scope)
 
 
 @bp.route('/api/server/files/delete', methods=['POST'])

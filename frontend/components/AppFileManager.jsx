@@ -19,6 +19,7 @@ import {
   Folder,
   FolderPlus,
   Home,
+  Link2,
   MoreHorizontal,
   Palette,
   Plus,
@@ -264,6 +265,7 @@ export default function AppFileManager({
   const [uploadProgress, setUploadProgress] = useState(null) // { percent, loaded, total, count }
   const [dragOver, setDragOver] = useState(false)
   const [status, setStatus] = useState('')
+  const [shareLink, setShareLink] = useState(null)
   const uploadRef = useRef(null)
   const zipRef = useRef(null)
   const editorStorageKey = `ascend:file-editor:${scopeKey}`
@@ -673,6 +675,36 @@ export default function AppFileManager({
     }
     const url = api.downloadUrl(entry.path)
     window.open(url, '_blank')
+  }
+
+  const shareEntry = async (entry) => {
+    const rawHours = await dialog.prompt({
+      title: 'Create temporary public link',
+      message: `Share "${entry.name}" with a temporary download link.`,
+      label: 'Expires after hours',
+      defaultValue: '24',
+      confirmLabel: 'Create link',
+      required: true,
+    })
+    if (!rawHours) return
+    const hours = Math.max(1, Math.min(parseInt(rawHours, 10) || 24, 168))
+    try {
+      const res = await api.share(entry.path, hours)
+      setShareLink({ ...res.data, name: entry.name })
+      flash(`Share link created for ${entry.name}`)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Share link failed')
+    }
+  }
+
+  const copyShareLink = async () => {
+    if (!shareLink?.url) return
+    try {
+      await navigator.clipboard.writeText(shareLink.url)
+      flash('Share link copied')
+    } catch {
+      setError('Could not copy link. Select and copy it manually.')
+    }
   }
 
   const extractEntry = async (entry) => {
@@ -1181,6 +1213,16 @@ export default function AppFileManager({
               >
                 Download
               </MenuItem>
+              <MenuItem
+                icon={<Link2 className="w-4 h-4" />}
+                onClick={() => {
+                  const entry = menu.entry
+                  setMenu(null)
+                  shareEntry(entry)
+                }}
+              >
+                Share temporary link
+              </MenuItem>
               {isZipFile(menu.entry.name) && (
                 <MenuItem
                   icon={<FileArchive className="w-4 h-4" />}
@@ -1205,6 +1247,18 @@ export default function AppFileManager({
               }}
             >
               Download zip
+            </MenuItem>
+          )}
+          {menu.entry.is_dir && (
+            <MenuItem
+              icon={<Link2 className="w-4 h-4" />}
+              onClick={() => {
+                const entry = menu.entry
+                setMenu(null)
+                shareEntry(entry)
+              }}
+            >
+              Share temporary link
             </MenuItem>
           )}
           <MenuItem
@@ -1278,6 +1332,45 @@ export default function AppFileManager({
           onClose={closePreview}
           onDownload={() => downloadEntry({ path: preview.path, name: baseName(preview.path), is_dir: false })}
         />
+      )}
+
+      {shareLink && (
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+          <div className="w-full max-w-xl rounded-lg border border-gray-700 bg-secondary shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-700 px-4 py-3">
+              <div>
+                <h2 className="text-white font-semibold">Public link for {shareLink.name}</h2>
+                <p className="text-xs text-gray-400 mt-1">Anyone with this link can download it until the expiry time.</p>
+              </div>
+              <button type="button" onClick={() => setShareLink(null)} className="text-gray-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <label className="block text-sm text-gray-300">
+                Temporary download link
+                <div className="mt-1 flex gap-2">
+                  <input readOnly value={shareLink.url || ''} className="flex-1 bg-primary border border-gray-700 rounded px-3 py-2 text-white font-mono text-xs" />
+                  <button type="button" onClick={copyShareLink} className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold">
+                    Copy
+                  </button>
+                </div>
+              </label>
+              <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                Expires at {shareLink.expires_at ? new Date(shareLink.expires_at).toLocaleString() : 'the selected expiry time'}.
+                Delete or rename the source file to invalidate the link sooner.
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-700 px-4 py-3">
+              <a href={shareLink.url} target="_blank" rel="noreferrer" className="px-3 py-2 rounded border border-gray-600 text-gray-200 hover:bg-primary text-sm">
+                View link
+              </a>
+              <button type="button" onClick={() => setShareLink(null)} className="px-3 py-2 rounded bg-accent hover:bg-accent/80 text-white text-sm font-semibold">
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

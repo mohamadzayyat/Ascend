@@ -21,7 +21,7 @@ function DatabaseDialogProvider({ children }) {
 
   const openDialog = useCallback((next) => new Promise((resolve) => {
     resolverRef.current = resolve
-    setTypedValue('')
+    setTypedValue(next.defaultValue || '')
     setDialog(next)
   }), [])
 
@@ -36,6 +36,8 @@ function DatabaseDialogProvider({ children }) {
     alert: ({ title = 'Notice', message, tone = 'info' }) => openDialog({ mode: 'alert', title, message, tone }),
     confirm: ({ title = 'Confirm action', message, confirmLabel = 'Confirm', tone = 'danger' }) =>
       openDialog({ mode: 'confirm', title, message, confirmLabel, tone }),
+    prompt: ({ title = 'Input required', message = '', label = '', defaultValue = '', confirmLabel = 'Continue', tone = 'info', required = false }) =>
+      openDialog({ mode: 'prompt', title, message, label, defaultValue, confirmLabel, tone, required }),
     typedConfirm: ({ title = 'Confirm action', message, expected, confirmLabel = 'Confirm', tone = 'danger' }) =>
       openDialog({ mode: 'typed', title, message, expected, confirmLabel, tone }),
   }), [openDialog])
@@ -50,7 +52,11 @@ function DatabaseDialogProvider({ children }) {
     : dialog?.tone === 'warning'
       ? 'bg-amber-500 hover:bg-amber-400 text-gray-950'
       : 'bg-accent hover:bg-accent/80'
-  const typedOk = dialog?.mode !== 'typed' || typedValue === dialog.expected
+  const typedOk = dialog?.mode === 'typed'
+    ? typedValue === dialog.expected
+    : dialog?.mode === 'prompt' && dialog.required
+      ? typedValue.trim().length > 0
+      : true
 
   return (
     <DialogContext.Provider value={value}>
@@ -67,15 +73,23 @@ function DatabaseDialogProvider({ children }) {
                 </div>
               </div>
             </div>
-            {dialog.mode === 'typed' && (
+            {(dialog.mode === 'typed' || dialog.mode === 'prompt') && (
               <div className="px-4 pb-2">
-                <label className="block text-sm text-gray-300 mb-2">
-                  Type <span className="font-mono text-white">{dialog.expected}</span> to continue
-                </label>
+                {dialog.mode === 'typed' ? (
+                  <label className="block text-sm text-gray-300 mb-2">
+                    Type <span className="font-mono text-white">{dialog.expected}</span> to continue
+                  </label>
+                ) : (
+                  dialog.label && <label className="block text-sm text-gray-300 mb-2">{dialog.label}</label>
+                )}
                 <input
                   autoFocus
                   value={typedValue}
                   onChange={(e) => setTypedValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && typedOk) closeDialog(dialog.mode === 'prompt' ? typedValue : true)
+                    if (e.key === 'Escape') closeDialog(false)
+                  }}
                   className="w-full bg-primary border border-gray-700 rounded px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
@@ -93,7 +107,7 @@ function DatabaseDialogProvider({ children }) {
               <button
                 type="button"
                 disabled={!typedOk}
-                onClick={() => closeDialog(dialog.mode === 'alert' ? undefined : true)}
+                  onClick={() => closeDialog(dialog.mode === 'prompt' ? typedValue : dialog.mode === 'alert' ? undefined : true)}
                 className={`px-3 py-2 rounded text-white text-sm font-semibold disabled:opacity-50 ${dialog.mode === 'alert' ? 'bg-accent hover:bg-accent/80' : confirmClasses}`}
               >
                 {dialog.mode === 'alert' ? 'OK' : dialog.confirmLabel}
@@ -2024,6 +2038,12 @@ function BackupsTab({ connection }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [running, setRunning] = useState(false)
+  const [backupDialogOpen, setBackupDialogOpen] = useState(false)
+  const [backupScope, setBackupScope] = useState('all')
+  const [backupDatabase, setBackupDatabase] = useState('')
+  const [backupDatabases, setBackupDatabases] = useState([])
+  const [backupDbLoading, setBackupDbLoading] = useState(false)
+  const [shareLink, setShareLink] = useState(null)
 
   const refresh = async () => {
     try {
@@ -2045,10 +2065,34 @@ function BackupsTab({ connection }) {
     // eslint-disable-next-line
   }, [connection.id])
 
+  const openBackupDialog = async () => {
+    setBackupDialogOpen(true)
+    setBackupScope('all')
+    setBackupDbLoading(true)
+    try {
+      const res = await apiClient.listDatabases(connection.id)
+      const userDbs = res.data.databases || []
+      setBackupDatabases(userDbs)
+      setBackupDatabase(connection.default_database && userDbs.includes(connection.default_database) ? connection.default_database : (userDbs[0] || ''))
+    } catch (err) {
+      setBackupDatabases([])
+      setBackupDatabase('')
+      setError(err.response?.data?.error || 'Failed to load database list')
+    } finally {
+      setBackupDbLoading(false)
+    }
+  }
+
   const onRun = async () => {
+    const targetDatabase = backupScope === 'single' ? backupDatabase.trim() : ''
+    if (backupScope === 'single' && !targetDatabase) {
+      await dialog.alert({ title: 'Choose a database', message: 'Select a database to back up, or choose all databases.', tone: 'warning' })
+      return
+    }
     setRunning(true)
     try {
-      await apiClient.runDbBackup(connection.id)
+      await apiClient.runDbBackup(connection.id, targetDatabase)
+      setBackupDialogOpen(false)
       setTimeout(refresh, 800)
     } catch (err) {
       await dialog.alert({ title: 'Backup failed to start', message: err.response?.data?.error || 'Failed to start backup', tone: 'danger' })
@@ -2073,6 +2117,34 @@ function BackupsTab({ connection }) {
     }
   }
 
+  const onShare = async (b) => {
+    const rawHours = await dialog.prompt({
+      title: 'Create temporary backup link',
+      message: `Share "${b.filename}" with a temporary download link.`,
+      label: 'Expires after hours',
+      defaultValue: '24',
+      confirmLabel: 'Create link',
+      required: true,
+    })
+    if (!rawHours) return
+    const hours = Math.max(1, Math.min(parseInt(rawHours, 10) || 24, 168))
+    try {
+      const res = await apiClient.shareDbBackup(b.id, hours)
+      setShareLink({ ...res.data, name: b.filename })
+    } catch (err) {
+      await dialog.alert({ title: 'Share failed', message: err.response?.data?.error || 'Could not create share link', tone: 'danger' })
+    }
+  }
+
+  const copyShareLink = async () => {
+    if (!shareLink?.url) return
+    try {
+      await navigator.clipboard.writeText(shareLink.url)
+    } catch {
+      await dialog.alert({ title: 'Copy failed', message: 'Could not copy automatically. Select the link and copy it manually.', tone: 'warning' })
+    }
+  }
+
   return (
     <div className="p-4 flex flex-col gap-3 h-full">
       <BackupUploadSettings />
@@ -2080,7 +2152,7 @@ function BackupsTab({ connection }) {
         <span className="text-sm text-gray-400">{backups.length} backup(s)</span>
         <button
           type="button"
-          onClick={onRun}
+          onClick={openBackupDialog}
           disabled={running}
           className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
         >
@@ -2131,6 +2203,15 @@ function BackupsTab({ connection }) {
                         Download
                       </a>
                     )}
+                    {b.status === 'success' && (
+                      <button
+                        type="button"
+                        onClick={() => onShare(b)}
+                        className="text-accent hover:underline text-xs mr-3"
+                      >
+                        Share
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => onDelete(b)}
@@ -2148,6 +2229,103 @@ function BackupsTab({ connection }) {
           </table>
         </div>
       )}
+      {backupDialogOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-lg border border-gray-700 bg-secondary shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-700 px-4 py-3">
+              <div>
+                <h2 className="text-white font-semibold">Create database backup</h2>
+                <p className="text-xs text-gray-400 mt-1">Choose whether this manual backup should include everything or one database.</p>
+              </div>
+              <button type="button" onClick={() => setBackupDialogOpen(false)} disabled={running} className="text-gray-400 hover:text-white disabled:opacity-50">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <label className={`block rounded border p-3 cursor-pointer ${backupScope === 'all' ? 'border-accent bg-accent/10' : 'border-gray-700 bg-primary/30 hover:border-gray-600'}`}>
+                <span className="flex items-start gap-3">
+                  <input type="radio" name="backup-scope" checked={backupScope === 'all'} onChange={() => setBackupScope('all')} className="mt-1" />
+                  <span>
+                    <span className="block text-sm font-semibold text-white">All databases</span>
+                    <span className="block text-xs text-gray-400 mt-0.5">Full MySQL dump for this connection. This will usually be larger.</span>
+                  </span>
+                </span>
+              </label>
+              <label className={`block rounded border p-3 cursor-pointer ${backupScope === 'single' ? 'border-accent bg-accent/10' : 'border-gray-700 bg-primary/30 hover:border-gray-600'}`}>
+                <span className="flex items-start gap-3">
+                  <input type="radio" name="backup-scope" checked={backupScope === 'single'} onChange={() => setBackupScope('single')} className="mt-1" />
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm font-semibold text-white">Specific database</span>
+                    <span className="block text-xs text-gray-400 mt-0.5">Smaller dump for one selected database.</span>
+                    <select
+                      value={backupDatabase}
+                      onChange={(e) => setBackupDatabase(e.target.value)}
+                      disabled={backupScope !== 'single' || backupDbLoading || !backupDatabases.length}
+                      className="mt-3 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white disabled:opacity-50"
+                    >
+                      {backupDbLoading && <option value="">Loading databases...</option>}
+                      {!backupDbLoading && backupDatabases.length === 0 && <option value="">No databases available</option>}
+                      {!backupDbLoading && backupDatabases.map((dbName) => <option key={dbName} value={dbName}>{dbName}</option>)}
+                    </select>
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-700 px-4 py-3">
+              <button type="button" onClick={() => setBackupDialogOpen(false)} disabled={running} className="px-3 py-2 rounded border border-gray-600 text-gray-200 hover:bg-primary text-sm disabled:opacity-50">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={onRun}
+                disabled={running || backupDbLoading || (backupScope === 'single' && !backupDatabase)}
+                className="px-3 py-2 rounded bg-accent hover:bg-accent/80 text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+              >
+                {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                Start backup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {shareLink && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-lg border border-gray-700 bg-secondary shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-700 px-4 py-3">
+              <div>
+                <h2 className="text-white font-semibold">Public link for {shareLink.name}</h2>
+                <p className="text-xs text-gray-400 mt-1">Anyone with this link can download this backup until it expires.</p>
+              </div>
+              <button type="button" onClick={() => setShareLink(null)} className="text-gray-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <label className="block text-sm text-gray-300">
+                Temporary download link
+                <div className="mt-1 flex gap-2">
+                  <input readOnly value={shareLink.url || ''} className="flex-1 bg-primary border border-gray-700 rounded px-3 py-2 text-white font-mono text-xs" />
+                  <button type="button" onClick={copyShareLink} className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold">
+                    Copy
+                  </button>
+                </div>
+              </label>
+              <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                Expires at {shareLink.expires_at ? new Date(shareLink.expires_at).toLocaleString() : 'the selected expiry time'}.
+                Deleting the backup invalidates this link sooner.
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-700 px-4 py-3">
+              <a href={shareLink.url} target="_blank" rel="noreferrer" className="px-3 py-2 rounded border border-gray-600 text-gray-200 hover:bg-primary text-sm">
+                View link
+              </a>
+              <button type="button" onClick={() => setShareLink(null)} className="px-3 py-2 rounded bg-accent hover:bg-accent/80 text-white text-sm font-semibold">
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -2161,6 +2339,7 @@ function BackupUploadSettings() {
     username: '',
     password: '',
     remote_path: '',
+    include_link_in_success_email: true,
     has_password: false,
   })
   const [open, setOpen] = useState(false)
@@ -2188,6 +2367,7 @@ function BackupUploadSettings() {
         webdav_url: form.webdav_url,
         username: form.username,
         remote_path: form.remote_path,
+        include_link_in_success_email: !!form.include_link_in_success_email,
         clear_password: false,
       }
       if (form.password.trim()) payload.password = form.password.trim()
@@ -2233,6 +2413,18 @@ function BackupUploadSettings() {
           <label className="md:col-span-2 flex items-center gap-2 text-gray-300">
             <input type="checkbox" checked={!!form.enabled} onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))} />
             Upload successful backups to WebDAV
+          </label>
+          <label className="md:col-span-2 flex items-start gap-2 text-gray-300">
+            <input
+              type="checkbox"
+              checked={!!form.include_link_in_success_email}
+              onChange={(e) => setForm((f) => ({ ...f, include_link_in_success_email: e.target.checked }))}
+              className="mt-0.5"
+            />
+            <span>
+              Include uploaded drive link in successful backup emails
+              <span className="block text-[11px] text-gray-500 mt-0.5">The link points to the WebDAV upload location and may require the drive account to be signed in.</span>
+            </span>
           </label>
           <label className="md:col-span-2 text-gray-300">
             WebDAV URL

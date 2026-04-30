@@ -211,6 +211,15 @@ def _html_escape(s):
     return html.escape(str(s), quote=True)
 
 
+def _html_linkify(s):
+    safe = _html_escape(s)
+    url_re = re.compile(r'(https?://[^\s<>"\']+)')
+    return url_re.sub(
+        lambda m: f'<a href="{m.group(1)}" style="color:#2563eb;text-decoration:none;font-weight:600;">{m.group(1)}</a>',
+        safe,
+    )
+
+
 def _email_html_template(subject, body_plain):
     lines = [ln.rstrip() for ln in str(body_plain or '').splitlines()]
     detail_rows = []
@@ -224,10 +233,11 @@ def _email_html_template(subject, body_plain):
         if ln.strip():
             notes.append(ln.strip())
     details_html = ''.join(
-        f'<tr><td>{_html_escape(k)}</td><td>{_html_escape(v)}</td></tr>'
+        f'<tr><td style="padding:9px 12px;border-bottom:1px solid #e5eaf3;color:#667085;font-size:13px;width:34%;">{_html_escape(k)}</td>'
+        f'<td style="padding:9px 12px;border-bottom:1px solid #e5eaf3;color:#172033;font-size:13px;word-break:break-word;">{_html_linkify(v)}</td></tr>'
         for k, v in detail_rows
     )
-    notes_html = ''.join(f'<p>{_html_escape(n)}</p>' for n in notes)
+    notes_html = ''.join(f'<p>{_html_linkify(n)}</p>' for n in notes)
     safe_subject = _html_escape(subject)
     return f'''<!doctype html>
 <html>

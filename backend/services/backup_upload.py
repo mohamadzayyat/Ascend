@@ -29,6 +29,7 @@ def _backup_upload_defaults():
         'webdav_url': 'https://app.koofr.net/dav/Koofr/Ascend-Backups',
         'username': '',
         'remote_path': '',
+        'include_link_in_success_email': True,
     }
 
 
@@ -43,7 +44,7 @@ def _backup_upload_settings_load():
         return d
     if not isinstance(parsed, dict):
         return d
-    for k in ('enabled', 'provider', 'webdav_url', 'username', 'remote_path'):
+    for k in ('enabled', 'provider', 'webdav_url', 'username', 'remote_path', 'include_link_in_success_email'):
         if k in parsed:
             d[k] = parsed[k]
     pwd_enc = parsed.get('password_encrypted') or ''

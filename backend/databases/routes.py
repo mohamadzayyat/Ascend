@@ -17,9 +17,10 @@ from flask import Blueprint, jsonify, request, send_file
 from flask_login import current_user, login_required
 from werkzeug.utils import secure_filename
 
-from backend.services.backup_upload import _upload_backup_to_remote
+from backend.services.backup_upload import _backup_upload_settings_load, _upload_backup_to_remote
 from backend.services.database_restore import get_restore_job, init_database_restore, start_restore_job
 from backend.services.email_notifications import _notify_email_async
+from backend.services.share_links import create_share_link
 
 bp = Blueprint('databases', __name__)
 
@@ -1512,6 +1513,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
             argv += ['--all-databases']
 
         started = time.time()
+        uploaded_to = None
         try:
             with open(filepath, 'wb') as out:
                 proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
@@ -1560,11 +1562,24 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         st = archive.status
         dblist = ', '.join(databases) if databases else 'all databases'
         if st == 'success':
+            remote_lines = ''
+            try:
+                include_remote_link = bool(_backup_upload_settings_load().get('include_link_in_success_email'))
+            except Exception:
+                include_remote_link = False
+            if uploaded_to and include_remote_link:
+                remote_lines = (
+                    f'Remote upload: uploaded\n'
+                    f'Remote backup link: {uploaded_to}\n'
+                    'Remote link note: This drive link may require the backup storage account to be signed in.\n'
+                )
+            elif uploaded_to:
+                remote_lines = 'Remote upload: uploaded\n'
             _notify_email_async(
                 'backup_success',
                 f'Ascend: backup succeeded — {cname}',
                 f'Connection: {cname}\nFile: {archive.filename}\nDatabases: {dblist}\nTrigger: {triggered_by}\n'
-                f'Size: {archive.size_bytes or 0} bytes\nTime (UTC): {archive.completed_at.isoformat()}',
+                f'Size: {archive.size_bytes or 0} bytes\n{remote_lines}Time (UTC): {archive.completed_at.isoformat()}',
             )
         else:
             err = (archive.error_message or '')[:3000]
@@ -1638,11 +1653,15 @@ def api_db_backups_run(conn_id):
     conn, err = _conn_owned(conn_id)
     if err:
         return err
+    data = request.get_json(silent=True) or {}
+    target_database = str(data.get('target_database') or '').strip()
+    if target_database and not re.fullmatch(r'[A-Za-z0-9_$]+', target_database):
+        return jsonify({'error': 'Invalid database name.'}), 400
     # Run in a background thread so the HTTP request doesn't block on a long dump
     def _run():
-        _run_backup(conn.id, schedule_id=None, triggered_by='manual')
+        _run_backup(conn.id, schedule_id=None, triggered_by='manual', target_database=target_database or None)
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({'started': True})
+    return jsonify({'started': True, 'target_database': target_database or ''})
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/backups/download-url', methods=['POST'])
@@ -1721,6 +1740,35 @@ def api_db_backup_download(backup_id):
         return jsonify({'error': 'Backup file is not available.'}), 410
     mimetype = 'text/plain; charset=utf-8' if a.filename.lower().endswith('.sql') else None
     return send_file(a.filepath, as_attachment=True, download_name=a.filename, mimetype=mimetype)
+
+
+@bp.route('/api/databases/backups/<int:backup_id>/share', methods=['POST'])
+@login_required
+def api_db_backup_share(backup_id):
+    err = _admin_required()
+    if err:
+        return err
+    a = db.session.get(BackupArchive, backup_id)
+    if a is None:
+        return jsonify({'error': 'Backup not found.'}), 404
+    conn = db.session.get(DatabaseConnection, a.connection_id)
+    if conn is None or conn.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if a.status != 'success' or not Path(a.filepath).exists():
+        return jsonify({'error': 'Backup file is not available.'}), 410
+    data = request.get_json(silent=True) or {}
+    try:
+        share = create_share_link(
+            a.filepath,
+            download_name=a.filename,
+            title=f'Database backup {a.filename}',
+            expires_hours=data.get('expires_hours'),
+            allow_sensitive=True,
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    share['url'] = f"{request.host_url.rstrip('/')}/api/share/{share['token']}"
+    return jsonify(share), 201
 
 
 @bp.route('/api/databases/backups/<int:backup_id>', methods=['DELETE'])

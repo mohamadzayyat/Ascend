@@ -61,6 +61,7 @@ from backend.services.email_notifications import (
     _parse_notify_emails,
     _smtp_send_raw,
 )
+from backend.services.share_links import init_share_links, public_share_download
 
 # ═══════════════════════════════════════════
 # Setup
@@ -157,6 +158,7 @@ AUDIT_LOG_SETTING_KEY = 'audit_log_v1'
 UPDATE_STATE_SETTING_KEY = 'update_state_v1'
 SYSTEM_ALERT_NOTIFY_SETTING_KEY = 'system_alert_notifications_v1'
 PHP_INSTALL_STATE_SETTING_KEY = 'php_install_state_v1'
+SHARE_LINKS_SETTING_KEY = 'share_links_v1'
 
 _EMAIL_NOTIFY_EVENT_DEFAULTS = {
     'backup_success': False,
@@ -212,6 +214,16 @@ init_backup_upload(
     encrypt_password=_encrypt_password,
     decrypt_password=_decrypt_password,
 )
+init_share_links(
+    db=db,
+    app_setting_model=AppSetting,
+    setting_key=SHARE_LINKS_SETTING_KEY,
+)
+
+
+@app.route('/api/share/<token>')
+def public_share_link(token):
+    return public_share_download(token)
 
 
 def _admin_required():
@@ -1281,6 +1293,8 @@ def api_settings_backup_upload():
     cur = _backup_upload_settings_load()
     if 'enabled' in data:
         cur['enabled'] = bool(data['enabled'])
+    if 'include_link_in_success_email' in data:
+        cur['include_link_in_success_email'] = bool(data['include_link_in_success_email'])
     for k in ('provider', 'webdav_url', 'username', 'remote_path'):
         if k in data and isinstance(data[k], str):
             cur[k] = data[k].strip()
@@ -1294,6 +1308,7 @@ def api_settings_backup_upload():
         'webdav_url': (cur.get('webdav_url') or '').strip(),
         'username': (cur.get('username') or '').strip(),
         'remote_path': (cur.get('remote_path') or '').strip().strip('/'),
+        'include_link_in_success_email': bool(cur.get('include_link_in_success_email')),
         'password_encrypted': _encrypt_password(cur['password']) if cur.get('password') else '',
     }
     rec = db.session.get(AppSetting, BACKUP_UPLOAD_SETTING_KEY)
