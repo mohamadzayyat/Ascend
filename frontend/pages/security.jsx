@@ -7,6 +7,7 @@ import {
   FileWarning,
   Loader2,
   Play,
+  Power,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -212,6 +213,7 @@ export default function SecurityPage() {
   const quarantineItems = state.quarantine || []
   const crowdsecDecisions = asArray(tools.crowdsec_decisions?.items)
   const autoSshBlock = status?.auto_ssh_block || state.auto_ssh_block_last || {}
+  const securityEnabled = status?.security_enabled !== false
   const scanRunning = ['starting', 'running'].includes(scan.status)
   const installRunning = ['starting', 'running'].includes(install.status)
   const crowdsecInstallRunning = ['starting', 'running'].includes(crowdsecInstall.status)
@@ -363,6 +365,7 @@ export default function SecurityPage() {
 
   const issues = useMemo(() => {
     const rows = []
+    if (!securityEnabled) rows.push({ severity: 'warning', title: 'Security protection is paused', message: 'Automatic protection actions are off. Turn Security protection on to resume background SSH brute-force blocking.' })
     if (!clamInstalled) rows.push({ severity: 'critical', title: 'Malware scanner is missing', message: 'ClamAV is not installed, so Ascend cannot scan websites or uploads for malware.', fix: 'install_clamav' })
     if (clamInstalled && !freshclamInstalled) rows.push({ severity: 'warning', title: 'ClamAV updater is missing', message: 'freshclam is not available, so malware signatures may become stale.', fix: 'install_clamav' })
     if (clamInstalled && definitionsAge !== null && definitionsAge > 2) rows.push({ severity: 'warning', title: 'Virus definitions are stale', message: `Latest definition file is ${Math.floor(definitionsAge)} days old. Update signatures before trusting scan results.`, fix: 'clamav_update_definitions', command: 'freshclam' })
@@ -377,7 +380,7 @@ export default function SecurityPage() {
     if ((threats.persistence || []).length) rows.push({ severity: 'critical', title: 'Suspicious persistence detected', message: `${threats.persistence.length} cron/system/profile file(s) contain miner indicators. Open Threats and remove them.` })
     if ((threats.immutable || []).length) rows.push({ severity: 'warning', title: 'Immutable persistence protection found', message: `${threats.immutable.length} suspicious file(s) have immutable flags that can block cleanup.` })
     return rows
-  }, [clamInstalled, freshclamInstalled, definitionsAge, tools, findings.length, crowdsecInstalled, bouncerOk, install.status, crowdsecInstall.status, threats])
+  }, [securityEnabled, clamInstalled, freshclamInstalled, definitionsAge, tools, findings.length, crowdsecInstalled, bouncerOk, install.status, crowdsecInstall.status, threats])
 
   const health = useMemo(() => {
     const critical = issues.filter((i) => i.severity === 'critical').length
@@ -409,6 +412,31 @@ export default function SecurityPage() {
     } catch (e) {
       const detail = e.response?.data?.results?.find((r) => r.stderr || r.stdout)
       setError(e.response?.data?.error || detail?.stderr || detail?.stdout || 'Repair failed')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const toggleSecurityProtection = async () => {
+    const nextEnabled = !securityEnabled
+    const ok = await dialog.confirm({
+      title: nextEnabled ? 'Turn on security protection?' : 'Turn off security protection?',
+      message: nextEnabled
+        ? 'Ascend will resume automatic protection checks such as SSH brute-force auto-blocking.'
+        : 'Ascend will pause automatic protection actions such as SSH brute-force auto-blocking. Installed services, existing IP blocks, quarantine files, and manual tools will remain unchanged.',
+      confirmLabel: nextEnabled ? 'Turn on' : 'Turn off',
+      tone: nextEnabled ? 'warning' : 'danger',
+    })
+    if (!ok) return
+    setBusy('security-toggle')
+    setMessage('')
+    setError('')
+    try {
+      const { data } = await apiClient.updateSecurityCenterSettings({ enabled: nextEnabled })
+      setMessage(data.message || (nextEnabled ? 'Security protection enabled.' : 'Security protection paused.'))
+      await load({ quiet: true })
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to update security protection setting')
     } finally {
       setBusy('')
     }
@@ -700,6 +728,34 @@ export default function SecurityPage() {
         </span>
       </div>
 
+      {status && (
+        <section className={`mb-4 rounded-lg border p-4 ${securityEnabled ? 'border-green-500/30 bg-green-500/10' : 'border-yellow-500/40 bg-yellow-500/10'}`}>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <Power className={`mt-0.5 h-5 w-5 ${securityEnabled ? 'text-green-300' : 'text-yellow-300'}`} />
+              <div>
+                <div className="text-white font-semibold">Security protection is {securityEnabled ? 'on' : 'off'}</div>
+                <p className="text-gray-300 text-sm mt-1">
+                  {securityEnabled
+                    ? 'Automatic protection is active. Ascend can run background checks and auto-block repeated SSH attackers.'
+                    : 'Automatic protection actions are paused. Existing blocks, installed services, quarantine files, and manual tools are unchanged.'}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={toggleSecurityProtection}
+              disabled={busy === 'security-toggle'}
+              className={`inline-flex items-center gap-2 rounded px-4 py-2 text-sm font-medium disabled:opacity-50 ${
+                securityEnabled ? 'border border-yellow-500/50 text-yellow-100 hover:bg-yellow-500/10' : 'bg-accent text-white hover:bg-blue-600'
+              }`}
+            >
+              {busy === 'security-toggle' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Power className="h-4 w-4" />}
+              {securityEnabled ? 'Turn off' : 'Turn on'}
+            </button>
+          </div>
+        </section>
+      )}
+
       {message && <div className="mb-4 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-200 text-sm">{message}</div>}
       {error && <div className="mb-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm whitespace-pre-wrap">{error}</div>}
 
@@ -937,12 +993,14 @@ export default function SecurityPage() {
                   <div>
                     <h2 className="text-white font-semibold">Automatic SSH brute-force blocking</h2>
                     <p className="text-gray-400 text-sm mt-1">
-                      Public IPs with {autoSshBlock.threshold || 5}+ failed SSH logins in 24 hours are blocked for {autoSshBlock.duration || '24h'}.
+                      {securityEnabled
+                        ? `Public IPs with ${autoSshBlock.threshold || 5}+ failed SSH logins in 24 hours are blocked for ${autoSshBlock.duration || '24h'}.`
+                        : 'Paused while Security protection is turned off. Existing active blocks remain in place.'}
                     </p>
                     {autoSshBlock.skipped && <p className="text-yellow-200 text-sm mt-2">{asText(autoSshBlock.skipped)}</p>}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Badge value={autoSshBlock.enabled === false ? 'disabled' : 'enabled'} tone={autoSshBlock.enabled === false ? 'yellow' : 'green'} />
+                    <Badge value={!securityEnabled ? 'paused' : autoSshBlock.enabled === false ? 'disabled' : 'enabled'} tone={!securityEnabled || autoSshBlock.enabled === false ? 'yellow' : 'green'} />
                     <Badge value={`${autoSshBlock.blocked?.length || 0} blocked last check`} tone={(autoSshBlock.blocked?.length || 0) ? 'red' : 'gray'} />
                     {autoSshBlock.checked_at && <Badge value={new Date(autoSshBlock.checked_at).toLocaleTimeString()} tone="blue" />}
                   </div>

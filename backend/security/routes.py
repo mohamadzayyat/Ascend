@@ -683,14 +683,21 @@ def _crowdsec_add_block(ip, duration='24h', reason='manual ssh brute-force block
     return True, out or 'Decision added.'
 
 
+def _security_enabled(state=None):
+    current = state if isinstance(state, dict) else _load_json(STATE_PATH, {})
+    return bool(current.get('security_enabled', True))
+
+
 def _auto_block_ssh_repeat_attackers():
     state = _load_json(STATE_PATH, {})
     config = state.get('auto_ssh_block') if isinstance(state.get('auto_ssh_block'), dict) else {}
-    enabled = config.get('enabled', True)
+    security_enabled = _security_enabled(state)
+    enabled = config.get('enabled', True) and security_enabled
     threshold = max(2, min(int(config.get('threshold') or 5), 100))
     duration = str(config.get('duration') or '24h')
     result = {
         'enabled': bool(enabled),
+        'security_enabled': security_enabled,
         'threshold': threshold,
         'duration': duration,
         'blocked': [],
@@ -698,6 +705,11 @@ def _auto_block_ssh_repeat_attackers():
         'skipped': '',
         'checked_at': _now(),
     }
+    if not security_enabled:
+        result['skipped'] = 'Security protection is turned off.'
+        state['auto_ssh_block_last'] = result
+        _write_json(STATE_PATH, state)
+        return result
     if not enabled:
         result['skipped'] = 'Automatic SSH blocking is disabled.'
         state['auto_ssh_block_last'] = result
@@ -756,6 +768,14 @@ def _auto_block_ssh_repeat_attackers_async():
     global _AUTO_SSH_BLOCK_RUNNING
     state = _load_json(STATE_PATH, {})
     last = state.get('auto_ssh_block_last') if isinstance(state.get('auto_ssh_block_last'), dict) else {}
+    if not _security_enabled(state):
+        return {
+            **last,
+            'enabled': False,
+            'security_enabled': False,
+            'scheduled': False,
+            'skipped': 'Security protection is turned off.',
+        }
     checked_at = _parse_iso(last.get('checked_at'))
     if checked_at:
         age = (datetime.now(timezone.utc) - checked_at).total_seconds()
@@ -799,6 +819,7 @@ def _scan_paths():
 
 def _current_status():
     state = _load_json(STATE_PATH, {})
+    security_enabled = _security_enabled(state)
     auto_ssh_block = _auto_block_ssh_repeat_attackers_async()
     state = _load_json(STATE_PATH, {})
     clamscan = _tool_version('clamscan', ['--version'])
@@ -823,6 +844,7 @@ def _current_status():
             'clamav_daemon_service': _service_active('clamav-daemon.service'),
             'definitions': _freshclam_status(),
         },
+        'security_enabled': security_enabled,
         'state': state,
         'auto_ssh_block': auto_ssh_block,
         'threats': _cached_threat_status(),
@@ -891,6 +913,41 @@ def api_security_status():
     status = _current_status()
     status = _finalize_security_status(status)
     return jsonify(status)
+
+
+@bp.route('/api/security/settings', methods=['PUT'])
+@login_required
+def api_security_settings():
+    gate = _admin_required()
+    if gate:
+        return gate
+    data = request.get_json(silent=True) or {}
+    if 'enabled' not in data:
+        return jsonify({'error': 'enabled is required.'}), 400
+    enabled = bool(data.get('enabled'))
+    state = _load_json(STATE_PATH, {})
+    state['security_enabled'] = enabled
+    if not enabled:
+        last = state.get('auto_ssh_block_last') if isinstance(state.get('auto_ssh_block_last'), dict) else {}
+        state['auto_ssh_block_last'] = {
+            **last,
+            'enabled': False,
+            'security_enabled': False,
+            'scheduled': False,
+            'skipped': 'Security protection is turned off.',
+            'checked_at': _now(),
+        }
+    _write_json(STATE_PATH, state)
+    _audit_log(
+        'security.settings_updated',
+        'ok',
+        'Security protection enabled' if enabled else 'Security protection disabled',
+        {'security_enabled': enabled},
+    )
+    return jsonify({
+        'security_enabled': enabled,
+        'message': 'Security protection enabled.' if enabled else 'Security protection paused.',
+    })
 
 
 def _finalize_security_status(status):

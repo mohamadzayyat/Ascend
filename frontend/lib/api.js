@@ -114,6 +114,7 @@ export const apiClient = {
   getPhpInstallStatus: () => api.get('/api/system/php-install/status'),
   startPhpInstall: (version) => api.post('/api/system/php-install/start', { version }),
   getSecurityCenterStatus: () => api.get('/api/security/status'),
+  updateSecurityCenterSettings: (data) => api.put('/api/security/settings', data || {}),
   startSecurityInstall: () => api.post('/api/security/install/start'),
   startSecurityScan: (data) => api.post('/api/security/scan/start', data || {}),
   startCrowdSecInstall: () => api.post('/api/security/crowdsec/install/start'),
