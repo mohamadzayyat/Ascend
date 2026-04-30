@@ -100,10 +100,12 @@ _COLLATE_SPACE_RE = re.compile(r'(\bCOLLATE\s+)[A-Za-z0-9_]+', re.IGNORECASE)
 _CHARSET_EQ_RE = re.compile(r'(\b(?:DEFAULT\s+)?(?:CHARSET|CHARACTER\s+SET)\s*=\s*)[A-Za-z0-9_]+', re.IGNORECASE)
 _CHARSET_SPACE_RE = re.compile(r'(\b(?:DEFAULT\s+)?CHARACTER\s+SET\s+)[A-Za-z0-9_]+', re.IGNORECASE)
 _ZERO_DATE_DEFAULT_RE = re.compile(
-    r'\bDEFAULT\s+(?:\'0000-00-00(?: 00:00:00(?:\.\d{1,6})?)?\'|"0000-00-00(?: 00:00:00(?:\.\d{1,6})?)?")',
+    r'\bDEFAULT\s+(?:\'0000-00-00(?: 00:00:00(?:\.\d{1,6})?)?\'|"0000-00-00(?: 00:00:00(?:\.\d{1,6})?)?"|0000-00-00(?:\s+00:00:00(?:\.\d{1,6})?)?)',
     re.IGNORECASE,
 )
-_DATE_COLUMN_RE = re.compile(r'^\s*`[^`]+`\s+(?:date|datetime|timestamp)\b', re.IGNORECASE)
+_DATE_COLUMN_RE = re.compile(r'^\s*`[^`]+`\s+date\b', re.IGNORECASE)
+_TEMPORAL_COLUMN_RE = re.compile(r'^\s*`[^`]+`\s+(?:date|datetime|timestamp)\b', re.IGNORECASE)
+_CURRENT_TIMESTAMP_DEFAULT_RE = re.compile(r'\bDEFAULT\s+current_timestamp(?:\(\))?', re.IGNORECASE)
 _MARIADB_TABLE_OPTIONS_RE = re.compile(
     r'\s+(?:PAGE_CHECKSUM|TRANSACTIONAL)\s*=\s*(?:0|1|DEFAULT)\b',
     re.IGNORECASE,
@@ -132,8 +134,11 @@ def _rewrite_dump_line_for_target(line, target_db, charset, collation, mariadb_m
         text = _MARIADB_TABLE_OPTIONS_RE.sub('', text)
         if _ZERO_DATE_DEFAULT_RE.search(text):
             text = _ZERO_DATE_DEFAULT_RE.sub('DEFAULT NULL', text)
-            if _DATE_COLUMN_RE.match(text):
+            if _TEMPORAL_COLUMN_RE.match(text):
                 text = re.sub(r'\bNOT\s+NULL\b', 'NULL', text, count=1, flags=re.IGNORECASE)
+        if _DATE_COLUMN_RE.match(text) and _CURRENT_TIMESTAMP_DEFAULT_RE.search(text):
+            text = _CURRENT_TIMESTAMP_DEFAULT_RE.sub('DEFAULT NULL', text)
+            text = re.sub(r'\bNOT\s+NULL\b', 'NULL', text, count=1, flags=re.IGNORECASE)
         return text.encode('utf-8')
     return line
 
@@ -191,6 +196,19 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
             phase = 'Importing dump with MariaDB -> MySQL cleanup' if mariadb_mysql_compat else 'Importing dump'
             _restore_job_update(job_id, phase=phase, progress=20)
             pipe_closed_early = False
+            if mariadb_mysql_compat:
+                compat_sql = (
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_TRANS_TABLES', '');\n"
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_ALL_TABLES', '');\n"
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_DATE', '');\n"
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_IN_DATE', '');\n"
+                ).encode('utf-8')
+                try:
+                    proc.stdin.write(compat_sql)
+                except (BrokenPipeError, OSError) as exc:
+                    if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
+                        raise
+                    pipe_closed_early = True
             with open(path, 'rb') as fh:
                 for line in fh:
                     done += len(line)
