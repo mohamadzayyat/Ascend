@@ -106,10 +106,28 @@ _ZERO_DATE_DEFAULT_RE = re.compile(
 _DATE_COLUMN_RE = re.compile(r'^\s*`[^`]+`\s+date\b', re.IGNORECASE)
 _TEMPORAL_COLUMN_RE = re.compile(r'^\s*`[^`]+`\s+(?:date|datetime|timestamp)\b', re.IGNORECASE)
 _CURRENT_TIMESTAMP_DEFAULT_RE = re.compile(r'\bDEFAULT\s+current_timestamp(?:\(\))?', re.IGNORECASE)
+_SQL_MODE_VALUE_RE = re.compile(r'([\'"])([^\'"]*\b(?:NO_AUTO_CREATE_USER|STRICT_TRANS_TABLES|STRICT_ALL_TABLES|NO_ZERO_DATE|NO_ZERO_IN_DATE)\b[^\'"]*)\1', re.IGNORECASE)
+_UNSAFE_SQL_MODES = {
+    'NO_AUTO_CREATE_USER',
+    'STRICT_TRANS_TABLES',
+    'STRICT_ALL_TABLES',
+    'NO_ZERO_DATE',
+    'NO_ZERO_IN_DATE',
+}
 _MARIADB_TABLE_OPTIONS_RE = re.compile(
     r'\s+(?:PAGE_CHECKSUM|TRANSACTIONAL)\s*=\s*(?:0|1|DEFAULT)\b',
     re.IGNORECASE,
 )
+
+
+def _rewrite_sql_mode_value(match):
+    quote, raw_modes = match.groups()
+    modes = []
+    for mode in raw_modes.split(','):
+        clean = mode.strip()
+        if clean and clean.upper() not in _UNSAFE_SQL_MODES:
+            modes.append(clean)
+    return f'{quote}{",".join(modes)}{quote}'
 
 
 def _rewrite_dump_line_for_target(line, target_db, charset, collation, mariadb_mysql_compat=False):
@@ -126,6 +144,8 @@ def _rewrite_dump_line_for_target(line, target_db, charset, collation, mariadb_m
             return b''
         if re.match(r'^(?:/\*!\d+\s*)?SET\s+@mariadb_', stripped, re.IGNORECASE):
             return b''
+        if 'sql_mode' in stripped.lower():
+            text = _SQL_MODE_VALUE_RE.sub(_rewrite_sql_mode_value, text)
         text = _DEFINER_RE.sub('', text)
         text = _CHARSET_EQ_RE.sub(lambda m: f'{m.group(1)}{charset}', text)
         text = _CHARSET_SPACE_RE.sub(lambda m: f'{m.group(1)}{charset}', text)
