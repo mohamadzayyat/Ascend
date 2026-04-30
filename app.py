@@ -148,6 +148,7 @@ from backend.models import (
     DatabaseConnection,
     BackupSchedule,
     BackupArchive,
+    DatabaseRestoreJob,
     Deployment,
 )
 
@@ -5140,6 +5141,7 @@ _reschedule_backup_jobs = register_database_feature(
     database_connection_model=DatabaseConnection,
     backup_schedule_model=BackupSchedule,
     backup_archive_model=BackupArchive,
+    restore_job_model=DatabaseRestoreJob,
     encrypt_password=_encrypt_password,
     decrypt_password=_decrypt_password,
     iso_utc_func=iso_utc,
@@ -5192,6 +5194,7 @@ def make_shell_context():
         'Deployment': Deployment, 'AppSetting': AppSetting,
         'DatabaseConnection': DatabaseConnection,
         'BackupSchedule': BackupSchedule, 'BackupArchive': BackupArchive,
+        'DatabaseRestoreJob': DatabaseRestoreJob,
     }
 
 

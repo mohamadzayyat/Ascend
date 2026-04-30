@@ -31,6 +31,7 @@ BASE_DIR = None
 DatabaseConnection = None
 BackupSchedule = None
 BackupArchive = None
+DatabaseRestoreJob = None
 _encrypt_password = None
 _decrypt_password = None
 iso_utc = None
@@ -38,8 +39,8 @@ DB_BACKUPS_ROOT = None
 MAX_SQL_URL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 
 
-def register_database_feature(*, flask_app, db_instance, csrf_protect, base_dir, database_connection_model, backup_schedule_model, backup_archive_model, encrypt_password, decrypt_password, iso_utc_func):
-    global app, db, csrf, BASE_DIR, DatabaseConnection, BackupSchedule, BackupArchive, _encrypt_password, _decrypt_password, iso_utc, DB_BACKUPS_ROOT
+def register_database_feature(*, flask_app, db_instance, csrf_protect, base_dir, database_connection_model, backup_schedule_model, backup_archive_model, restore_job_model, encrypt_password, decrypt_password, iso_utc_func):
+    global app, db, csrf, BASE_DIR, DatabaseConnection, BackupSchedule, BackupArchive, DatabaseRestoreJob, _encrypt_password, _decrypt_password, iso_utc, DB_BACKUPS_ROOT
     app = flask_app
     db = db_instance
     csrf = csrf_protect
@@ -47,6 +48,7 @@ def register_database_feature(*, flask_app, db_instance, csrf_protect, base_dir,
     DatabaseConnection = database_connection_model
     BackupSchedule = backup_schedule_model
     BackupArchive = backup_archive_model
+    DatabaseRestoreJob = restore_job_model
     _encrypt_password = encrypt_password
     _decrypt_password = decrypt_password
     iso_utc = iso_utc_func
@@ -57,6 +59,7 @@ def register_database_feature(*, flask_app, db_instance, csrf_protect, base_dir,
         db=db,
         database_connection_model=DatabaseConnection,
         backup_archive_model=BackupArchive,
+        restore_job_model=DatabaseRestoreJob,
         open_mysql=_open_mysql,
         run_backup=_run_backup,
         mysqldump_env=_mysqldump_env,
@@ -1822,6 +1825,7 @@ def api_db_restore_start(conn_id):
             data.get('target_database'),
             data.get('collation') or 'utf8mb4_general_ci',
             bool(data.get('replace_existing', True)),
+            bool(data.get('mariadb_mysql_compat', False)),
         )
     except LookupError as exc:
         return jsonify({'error': str(exc)}), 404

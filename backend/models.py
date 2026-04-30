@@ -331,6 +331,16 @@ class BackupArchive(db.Model):
         }
 
 
+class DatabaseRestoreJob(db.Model):
+    id = db.Column(db.String(64), primary_key=True)
+    connection_id = db.Column(db.Integer, db.ForeignKey('database_connection.id'), nullable=False)
+    backup_id = db.Column(db.Integer, db.ForeignKey('backup_archive.id'), nullable=False)
+    status = db.Column(db.String(20), default='queued', nullable=False)
+    payload = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class Deployment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey('project.id'), nullable=False)

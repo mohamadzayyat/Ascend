@@ -1584,6 +1584,7 @@ function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
 
 function ManageDatabasesTab({ connection }) {
   const dialog = useDialog()
+  const [manageSubtab, setManageSubtab] = useState('create')
   const [databases, setDatabases] = useState([])
   const [loading, setLoading] = useState(true)
   const [createForm, setCreateForm] = useState({ name: '', charset: 'utf8mb4', collation: 'utf8mb4_general_ci' })
@@ -1689,6 +1690,13 @@ function ManageDatabasesTab({ connection }) {
       setCreateError('Database name is required.')
       return
     }
+    const ok = await dialog.confirm({
+      title: 'Create database?',
+      message: `Ascend will run:\n${createSqlPreview}\n\nThis creates a new database on "${connection.name}".`,
+      confirmLabel: 'Create database',
+      tone: 'warning',
+    })
+    if (!ok) return
     setCreateBusy(true)
     setCreateError('')
     setCreateResult(null)
@@ -1714,15 +1722,15 @@ function ManageDatabasesTab({ connection }) {
       setImportError('Choose or enter a target database.')
       return
     }
-    if (importForm.mode === 'existing') {
-      const ok = await dialog.confirm({
-        title: 'Import into existing database?',
-        message: `Import ${importFile.name} into "${target}"?\n\nExisting objects may be changed by the SQL file.`,
-        confirmLabel: 'Import',
-        tone: 'warning',
-      })
-      if (!ok) return
-    }
+    const ok = await dialog.confirm({
+      title: importForm.mode === 'existing' ? 'Import into existing database?' : 'Create database and import?',
+      message: importForm.mode === 'existing'
+        ? `Ascend will import "${importFile.name}" into existing database "${target}".\n\nThe SQL file may create, update, drop, or overwrite objects depending on its contents.`
+        : `Ascend will create database "${target}" using ${importForm.charset} / ${importForm.collation}, then import "${importFile.name}" into it.`,
+      confirmLabel: 'Import SQL',
+      tone: 'warning',
+    })
+    if (!ok) return
     setImportBusy(true)
     setImportError('')
     setImportResult(null)
@@ -1747,6 +1755,16 @@ function ManageDatabasesTab({ connection }) {
       setUsersError('Username and password are required.')
       return
     }
+    const label = `${userForm.username.trim()}@${userForm.host.trim() || 'localhost'}`
+    const ok = await dialog.confirm({
+      title: 'Create MySQL user?',
+      message: userForm.database
+        ? `Ascend will create "${label}" and grant these privileges on "${userForm.database}":\n${(userForm.privileges || []).join(', ') || 'none'}`
+        : `Ascend will create "${label}" without granting database access yet.`,
+      confirmLabel: 'Create user',
+      tone: 'warning',
+    })
+    if (!ok) return
     setUserBusy(true)
     setUsersError('')
     setUserResult(null)
@@ -1771,6 +1789,13 @@ function ManageDatabasesTab({ connection }) {
       setUsersError('Choose a user and database to grant.')
       return
     }
+    const ok = await dialog.confirm({
+      title: 'Grant database privileges?',
+      message: `Ascend will grant these privileges to "${grantForm.username.trim()}@${grantForm.host.trim() || 'localhost'}" on "${grantForm.database}":\n${(grantForm.privileges || []).join(', ') || 'none'}`,
+      confirmLabel: 'Grant privileges',
+      tone: 'warning',
+    })
+    if (!ok) return
     setUserBusy(true)
     setUsersError('')
     setUserResult(null)
@@ -1813,6 +1838,28 @@ function ManageDatabasesTab({ connection }) {
 
   return (
     <div className="p-4 flex flex-col gap-4 h-full">
+      <div className="flex flex-wrap items-center gap-2 border-b border-gray-700">
+        {[
+          ['create', 'Create database'],
+          ['import', 'Import SQL'],
+          ['users', 'Users & permissions'],
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setManageSubtab(id)}
+            className={`px-3 py-2 text-sm border-b-2 -mb-px ${
+              manageSubtab === id
+                ? 'border-accent text-white'
+                : 'border-transparent text-gray-400 hover:text-white'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {manageSubtab === 'create' && (
       <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-5xl">
         <div className="flex items-center justify-between gap-3 mb-3">
           <div>
@@ -1856,7 +1903,9 @@ function ManageDatabasesTab({ connection }) {
         {createError && <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{createError}</div>}
         {createResult?.ok && <div className="mt-3 rounded border border-green-500/30 bg-green-500/10 p-3 text-green-300 text-sm">Created {createResult.database} in {createResult.duration_ms} ms.</div>}
       </div>
+      )}
 
+      {manageSubtab === 'import' && (
       <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-5xl">
         <div className="mb-3">
           <h2 className="text-white font-semibold">Import SQL file</h2>
@@ -1933,7 +1982,9 @@ function ManageDatabasesTab({ connection }) {
           </div>
         )}
       </div>
+      )}
 
+      {manageSubtab === 'users' && (
       <div className="rounded border border-gray-700 bg-primary/30 p-4 max-w-5xl">
         <div className="flex items-center justify-between gap-3 mb-3">
           <div>
@@ -2053,6 +2104,7 @@ function ManageDatabasesTab({ connection }) {
           </table>
         </div>
       </div>
+      )}
     </div>
   )
 }
@@ -2490,7 +2542,7 @@ function RestoreTab({ connection }) {
   const dialog = useDialog()
   const [backups, setBackups] = useState([])
   const [databases, setDatabases] = useState([])
-  const [form, setForm] = useState({ backup_id: '', target_database: '', collation: 'utf8mb4_general_ci', replace_existing: true })
+  const [form, setForm] = useState({ backup_id: '', target_database: '', collation: 'utf8mb4_general_ci', replace_existing: true, mariadb_mysql_compat: false })
   const [job, setJob] = useState(null)
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(false)
@@ -2568,9 +2620,12 @@ function RestoreTab({ connection }) {
     }
     const target = form.target_database.trim()
     const targetExists = databases.includes(target)
+    const compatMsg = form.mariadb_mysql_compat
+      ? ' MariaDB -> MySQL compatibility cleanup will be applied while streaming the dump.'
+      : ''
     const msg = targetExists
-      ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.`
-      : `Create database "${target}" and restore this backup into it?`
+      ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.${compatMsg}`
+      : `Create database "${target}" and restore this backup into it?${compatMsg}`
     const ok = await dialog.confirm({
       title: targetExists ? 'Restore into existing database?' : 'Create and restore database?',
       message: msg,
@@ -2597,6 +2652,7 @@ function RestoreTab({ connection }) {
         target_database: target,
         collation: form.collation.trim() || 'utf8mb4_general_ci',
         replace_existing: shouldReplace,
+        mariadb_mysql_compat: !!form.mariadb_mysql_compat,
         confirm_text: shouldReplace ? target : '',
       })
       setJob(res.data.job)
@@ -2664,6 +2720,20 @@ function RestoreTab({ connection }) {
         <label className="md:col-span-2 flex items-center gap-2 text-sm text-gray-300">
           <input type="checkbox" checked={!!form.replace_existing} onChange={(e) => setForm((f) => ({ ...f, replace_existing: e.target.checked }))} />
           Replace existing database after the safety backup
+        </label>
+        <label className="md:col-span-2 flex items-start gap-2 rounded border border-amber-500/25 bg-amber-500/10 p-3 text-sm text-amber-50">
+          <input
+            type="checkbox"
+            checked={!!form.mariadb_mysql_compat}
+            onChange={(e) => setForm((f) => ({ ...f, mariadb_mysql_compat: e.target.checked }))}
+            className="mt-0.5"
+          />
+          <span>
+            MariaDB to MySQL compatibility cleanup
+            <span className="block mt-1 text-xs text-amber-100/75">
+              Use this when restoring MariaDB dumps into MySQL 8. Ascend removes DEFINER clauses, MariaDB sandbox lines, MariaDB-only table options, and rewrites dump collations while streaming the file.
+            </span>
+          </span>
         </label>
       </div>
       <div>
