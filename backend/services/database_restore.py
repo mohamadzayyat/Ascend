@@ -97,6 +97,8 @@ _DEFINER_RE = re.compile(
 )
 _COLLATE_EQ_RE = re.compile(r'(\bCOLLATE\s*=\s*)[A-Za-z0-9_]+', re.IGNORECASE)
 _COLLATE_SPACE_RE = re.compile(r'(\bCOLLATE\s+)[A-Za-z0-9_]+', re.IGNORECASE)
+_CHARSET_EQ_RE = re.compile(r'(\b(?:DEFAULT\s+)?(?:CHARSET|CHARACTER\s+SET)\s*=\s*)[A-Za-z0-9_]+', re.IGNORECASE)
+_CHARSET_SPACE_RE = re.compile(r'(\b(?:DEFAULT\s+)?CHARACTER\s+SET\s+)[A-Za-z0-9_]+', re.IGNORECASE)
 _MARIADB_TABLE_OPTIONS_RE = re.compile(
     r'\s+(?:PAGE_CHECKSUM|TRANSACTIONAL)\s*=\s*(?:0|1|DEFAULT)\b',
     re.IGNORECASE,
@@ -118,6 +120,8 @@ def _rewrite_dump_line_for_target(line, target_db, charset, collation, mariadb_m
         if re.match(r'^(?:/\*!\d+\s*)?SET\s+@mariadb_', stripped, re.IGNORECASE):
             return b''
         text = _DEFINER_RE.sub('', text)
+        text = _CHARSET_EQ_RE.sub(lambda m: f'{m.group(1)}{charset}', text)
+        text = _CHARSET_SPACE_RE.sub(lambda m: f'{m.group(1)}{charset}', text)
         text = _COLLATE_EQ_RE.sub(lambda m: f'{m.group(1)}{collation}', text)
         text = _COLLATE_SPACE_RE.sub(lambda m: f'{m.group(1)}{collation}', text)
         text = _MARIADB_TABLE_OPTIONS_RE.sub('', text)
