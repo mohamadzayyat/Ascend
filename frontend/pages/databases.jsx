@@ -139,6 +139,31 @@ const DB_COLLATIONS = {
 const MYSQL_PRIVILEGE_OPTIONS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'INDEX', 'ALTER', 'CREATE VIEW', 'SHOW VIEW', 'TRIGGER']
 const COLUMN_TYPES = ['INT', 'BIGINT', 'VARCHAR', 'TEXT', 'LONGTEXT', 'DECIMAL', 'DATETIME', 'TIMESTAMP', 'DATE', 'TINYINT', 'BOOLEAN', 'JSON']
 
+async function copyTextToClipboard(text) {
+  const value = String(text || '')
+  if (!value) return false
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(value)
+    return true
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } finally {
+    textarea.remove()
+  }
+  return ok
+}
+
 function columnDefinitionPreview(col) {
   const name = col.name?.trim() || 'column_name'
   const type = col.type || 'VARCHAR'
@@ -2139,7 +2164,8 @@ function BackupsTab({ connection }) {
   const copyShareLink = async () => {
     if (!shareLink?.url) return
     try {
-      await navigator.clipboard.writeText(shareLink.url)
+      const ok = await copyTextToClipboard(shareLink.url)
+      if (!ok) throw new Error('copy failed')
     } catch {
       await dialog.alert({ title: 'Copy failed', message: 'Could not copy automatically. Select the link and copy it manually.', tone: 'warning' })
     }

@@ -1432,12 +1432,19 @@ def _download_sql_backup_from_url(url, dest):
         raise
 
 
+def _is_ascend_share_url(parsed):
+    path = urllib.parse.unquote(parsed.path or '')
+    return path.startswith('/api/share/') or path.startswith('/share/')
+
+
 def _downloaded_backup_filename(conn, parsed, explicit_name):
     raw = str(explicit_name or '').strip()
     if raw:
         name = secure_filename(Path(raw.replace('\\', '/')).name)
     else:
         name = secure_filename(Path(urllib.parse.unquote(parsed.path or '').replace('\\', '/')).name)
+        if name and not name.lower().endswith('.sql') and _is_ascend_share_url(parsed):
+            name = ''
     if not name:
         ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
         name = f'{_safe_dir_name(conn.name)}-download-{ts}.sql'
