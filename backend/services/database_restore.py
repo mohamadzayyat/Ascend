@@ -99,6 +99,11 @@ _COLLATE_EQ_RE = re.compile(r'(\bCOLLATE\s*=\s*)[A-Za-z0-9_]+', re.IGNORECASE)
 _COLLATE_SPACE_RE = re.compile(r'(\bCOLLATE\s+)[A-Za-z0-9_]+', re.IGNORECASE)
 _CHARSET_EQ_RE = re.compile(r'(\b(?:DEFAULT\s+)?(?:CHARSET|CHARACTER\s+SET)\s*=\s*)[A-Za-z0-9_]+', re.IGNORECASE)
 _CHARSET_SPACE_RE = re.compile(r'(\b(?:DEFAULT\s+)?CHARACTER\s+SET\s+)[A-Za-z0-9_]+', re.IGNORECASE)
+_ZERO_DATE_DEFAULT_RE = re.compile(
+    r'\bDEFAULT\s+(?:\'0000-00-00(?: 00:00:00(?:\.\d{1,6})?)?\'|"0000-00-00(?: 00:00:00(?:\.\d{1,6})?)?")',
+    re.IGNORECASE,
+)
+_DATE_COLUMN_RE = re.compile(r'^\s*`[^`]+`\s+(?:date|datetime|timestamp)\b', re.IGNORECASE)
 _MARIADB_TABLE_OPTIONS_RE = re.compile(
     r'\s+(?:PAGE_CHECKSUM|TRANSACTIONAL)\s*=\s*(?:0|1|DEFAULT)\b',
     re.IGNORECASE,
@@ -125,6 +130,10 @@ def _rewrite_dump_line_for_target(line, target_db, charset, collation, mariadb_m
         text = _COLLATE_EQ_RE.sub(lambda m: f'{m.group(1)}{collation}', text)
         text = _COLLATE_SPACE_RE.sub(lambda m: f'{m.group(1)}{collation}', text)
         text = _MARIADB_TABLE_OPTIONS_RE.sub('', text)
+        if _ZERO_DATE_DEFAULT_RE.search(text):
+            text = _ZERO_DATE_DEFAULT_RE.sub('DEFAULT NULL', text)
+            if _DATE_COLUMN_RE.match(text):
+                text = re.sub(r'\bNOT\s+NULL\b', 'NULL', text, count=1, flags=re.IGNORECASE)
         return text.encode('utf-8')
     return line
 
