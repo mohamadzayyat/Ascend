@@ -973,6 +973,12 @@ def api_db_table_rows(conn_id):
         return jsonify({'error': 'search string is too long.'}), 400
     # Strip LIKE metacharacters from user input (we add wildcards server-side).
     search_safe = re.sub(r'[%_\\]', '', search) if search else ''
+    sort_column = (request.args.get('sort_column') or '').strip()
+    sort_direction = (request.args.get('sort_direction') or 'asc').strip().lower()
+    if sort_column and not re.fullmatch(r'[A-Za-z0-9_$]+', sort_column):
+        return jsonify({'error': 'Invalid sort column.'}), 400
+    if sort_direction not in {'asc', 'desc'}:
+        return jsonify({'error': 'sort_direction must be asc or desc.'}), 400
     column_filters = {}
     raw_filters = (request.args.get('column_filters') or '').strip()
     if raw_filters:
@@ -1003,7 +1009,7 @@ def api_db_table_rows(conn_id):
             primary_key = _table_primary_key_columns(cur, database, table)
             where_parts = []
             where_args = []
-            if search_safe or column_filters:
+            if search_safe or column_filters or sort_column:
                 cur.execute("""
                     SELECT COLUMN_NAME FROM information_schema.COLUMNS
                     WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
@@ -1031,10 +1037,17 @@ def api_db_table_rows(conn_id):
                 where_args.append(f'%{value}%')
             where_sql = (' WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
             where_args = tuple(where_args)
+            order_sql = ''
+            applied_sort = None
+            if sort_column:
+                if sort_column not in valid_filter_cols:
+                    return jsonify({'error': f'Unknown sort column: {sort_column}'}), 400
+                order_sql = f' ORDER BY `{sort_column}` {sort_direction.upper()}'
+                applied_sort = {'column': sort_column, 'direction': sort_direction}
             count_sql = f'SELECT COUNT(*) FROM `{table}`' + where_sql
             cur.execute(count_sql, where_args)
             total = (cur.fetchone() or [0])[0]
-            data_sql = f'SELECT * FROM `{table}`' + where_sql + ' LIMIT %s OFFSET %s'
+            data_sql = f'SELECT * FROM `{table}`' + where_sql + order_sql + ' LIMIT %s OFFSET %s'
             cur.execute(data_sql, where_args + (per_page, offset))
             cols = [d[0] for d in cur.description] if cur.description else []
             rows = [list(r) for r in cur.fetchall()]
@@ -1063,6 +1076,7 @@ def api_db_table_rows(conn_id):
         'search': search or None,
         'column_filters': column_filters,
         'ignored_column_filters': ignored_filters if column_filters else [],
+        'sort': applied_sort,
     })
 
 

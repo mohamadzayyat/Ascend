@@ -197,15 +197,44 @@ function newTableTabId() {
   return `tbl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`
 }
 
+const DB_UI_STATE_KEY = 'ascend.databases.ui.v2'
+const DB_NAV_STATE_KEY = 'ascend.databases.navigator.v1'
+const DB_MANAGE_STATE_KEY = 'ascend.databases.manage.v1'
+
+function readStoredJson(key, fallback = {}) {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = window.localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeStoredJson(key, value) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    /* Ignore storage quota/privacy failures. */
+  }
+}
+
+function arrayToSet(value) {
+  return new Set(Array.isArray(value) ? value : [])
+}
+
 export default function DatabasesPage() {
+  const initialUi = useMemo(() => readStoredJson(DB_UI_STATE_KEY, {}), [])
   const [connections, setConnections] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [activeId, setActiveId] = useState(null)
+  const [activeId, setActiveId] = useState(initialUi.activeId || null)
   const [showAddForm, setShowAddForm] = useState(false)
-  const [panelTab, setPanelTab] = useState('browse')
-  const [openTableTabs, setOpenTableTabs] = useState([])
-  const [browseSelection, setBrowseSelection] = useState(null)
+  const [panelTab, setPanelTab] = useState(initialUi.panelTab || 'browse')
+  const [openTableTabs, setOpenTableTabs] = useState(Array.isArray(initialUi.openTableTabs) ? initialUi.openTableTabs : [])
+  const [browseSelection, setBrowseSelection] = useState(initialUi.browseSelection || null)
+  const [databaseContext, setDatabaseContext] = useState(initialUi.databaseContext || {})
   /** When set, SQL tab applies this to the editor once then clears via callback. */
   const [pendingSql, setPendingSql] = useState(null)
   const consumePendingSql = useCallback(() => setPendingSql(null), [])
@@ -219,8 +248,12 @@ export default function DatabasesPage() {
     try {
       const res = await apiClient.listDbConnections()
       setConnections(res.data.connections)
-      if (!activeId && res.data.connections.length > 0) {
-        setActiveId(res.data.connections[0].id)
+      if (res.data.connections.length > 0) {
+        const ids = new Set(res.data.connections.map((c) => c.id))
+        if (!activeId || !ids.has(activeId)) {
+          const storedId = initialUi.activeId && ids.has(initialUi.activeId) ? initialUi.activeId : null
+          setActiveId(storedId || res.data.connections[0].id)
+        }
       }
       setError('')
     } catch (err) {
@@ -232,16 +265,42 @@ export default function DatabasesPage() {
 
   useEffect(() => { refresh() /* eslint-disable-next-line */ }, [])
 
+  useEffect(() => {
+    writeStoredJson(DB_UI_STATE_KEY, {
+      activeId,
+      panelTab,
+      openTableTabs: openTableTabs.slice(0, 12),
+      browseSelection,
+      databaseContext,
+    })
+  }, [activeId, panelTab, openTableTabs, browseSelection, databaseContext])
+
+  useEffect(() => {
+    const builtIn = TABS.some((t) => t.id === panelTab)
+    const tableOpen = openTableTabs.some((t) => t.id === panelTab)
+    if (!builtIn && !tableOpen) setPanelTab('browse')
+  }, [panelTab, openTableTabs])
+
   const onConnectionDeleted = (id) => {
     setConnections((prev) => {
       const next = prev.filter((c) => c.id !== id)
       if (activeId === id) {
         setActiveId(next[0]?.id || null)
         setBrowseSelection(null)
+        setDatabaseContext((current) => {
+          const nextCtx = { ...current }
+          delete nextCtx[id]
+          return nextCtx
+        })
       }
       return next
     })
   }
+
+  const rememberDatabase = useCallback((connId, database) => {
+    if (!connId || !database) return
+    setDatabaseContext((current) => ({ ...current, [connId]: database }))
+  }, [])
 
   const handleActivateConnection = (connId) => {
     if (connId !== activeId) {
@@ -277,18 +336,21 @@ export default function DatabasesPage() {
 
   const onOpenTableFolder = useCallback((connId, database, folder) => {
     setActiveId(connId)
+    rememberDatabase(connId, database)
     setBrowseSelection({ connectionId: connId, database, folder })
     setPanelTab('browse')
-  }, [])
+  }, [rememberDatabase])
 
   const onBrowseObject = (connId, database, name, kind) => {
     setActiveId(connId)
+    rememberDatabase(connId, database)
     setBrowseSelection({ connectionId: connId, database, name, kind })
     setPanelTab('browse')
   }
 
   const onRoutineInspect = (connId, database, name, routineType) => {
     setActiveId(connId)
+    rememberDatabase(connId, database)
     const rt = routineType === 'FUNCTION' ? 'FUNCTION' : 'PROCEDURE'
     setPendingSql(`SHOW CREATE ${rt} \`${database}\`.\`${name}\``)
     setPanelTab('sql')
@@ -356,6 +418,7 @@ export default function DatabasesPage() {
               onBrowseObject={onBrowseObject}
               onTableLeafDoubleClick={(connId, database, name, kind) => {
                 setActiveId(connId)
+                rememberDatabase(connId, database)
                 openTableTab(database, name, kind)
               }}
               onOpenTableFolder={onOpenTableFolder}
@@ -373,6 +436,8 @@ export default function DatabasesPage() {
                 browseSelection={browseSelection}
                 onBrowseSelectionChange={setBrowseSelection}
                 onOpenTableTab={openTableTab}
+                databaseContext={databaseContext}
+                onDatabaseContextChange={rememberDatabase}
                 pendingSql={pendingSql}
                 onPendingSqlConsumed={consumePendingSql}
               />
@@ -406,11 +471,12 @@ function SchemaNavigator({
   onRefresh,
 }) {
   const dialog = useDialog()
+  const initialNav = useMemo(() => readStoredJson(DB_NAV_STATE_KEY, {}), [])
   const [busyId, setBusyId] = useState(null)
   const [testResults, setTestResults] = useState({})
-  const [expandedConn, setExpandedConn] = useState(() => new Set())
-  const [expandedDb, setExpandedDb] = useState(() => new Set())
-  const [expandedCat, setExpandedCat] = useState(() => new Set())
+  const [expandedConn, setExpandedConn] = useState(() => arrayToSet(initialNav.expandedConn))
+  const [expandedDb, setExpandedDb] = useState(() => arrayToSet(initialNav.expandedDb))
+  const [expandedCat, setExpandedCat] = useState(() => arrayToSet(initialNav.expandedCat))
   const [dbsByConn, setDbsByConn] = useState({})
   const [loadingDbs, setLoadingDbs] = useState({})
   const [schemaByKey, setSchemaByKey] = useState({})
@@ -456,6 +522,20 @@ function SchemaNavigator({
       setLoadingSchema((m) => ({ ...m, [sk]: false }))
     }
   }
+
+  useEffect(() => {
+    expandedConn.forEach((cid) => loadDatabases(cid))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections.length])
+
+  useEffect(() => {
+    expandedDb.forEach((key) => {
+      const [cid, ...dbParts] = String(key).split(':')
+      const dbName = dbParts.join(':')
+      if (cid && dbName) loadSchema(Number(cid), dbName)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dbsByConn])
 
   const onToggleConnection = (e, cid) => {
     e.stopPropagation()
@@ -755,6 +835,8 @@ function ConnectionPanel({
   browseSelection,
   onBrowseSelectionChange,
   onOpenTableTab,
+  databaseContext,
+  onDatabaseContextChange,
   pendingSql,
   onPendingSqlConsumed,
 }) {
@@ -814,15 +896,17 @@ function ConnectionPanel({
         })}
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
-        {tab === 'browse' && (
+        <div className={tab === 'browse' ? 'h-full' : 'hidden'}>
           <BrowseTab
             key={connection.id}
             connection={connection}
             browseSelection={browseSelection}
             onBrowseSelectionChange={onBrowseSelectionChange}
             onOpenTableTab={onOpenTableTab}
+            rememberedDatabase={databaseContext?.[connection.id] || ''}
+            onDatabaseContextChange={onDatabaseContextChange}
           />
-        )}
+        </div>
         {activeTable && (
           <div className="p-4 h-full flex flex-col min-h-0">
             <div className="text-xs text-gray-500 mb-2">
@@ -842,11 +926,13 @@ function ConnectionPanel({
         {tab === 'sql' && (
           <SqlTab
             connection={connection}
+            preferredDatabase={databaseContext?.[connection.id] || browseSelection?.database || ''}
+            onDatabaseChange={(db) => onDatabaseContextChange(connection.id, db)}
             pendingSql={pendingSql}
             onPendingSqlConsumed={onPendingSqlConsumed}
           />
         )}
-        {tab === 'manage' && <ManageDatabasesTab connection={connection} />}
+        {tab === 'manage' && <ManageDatabasesTab connection={connection} preferredDatabase={databaseContext?.[connection.id] || browseSelection?.database || ''} onDatabaseChange={(db) => onDatabaseContextChange(connection.id, db)} />}
         {tab === 'backups' && <BackupsTab connection={connection} />}
         {tab === 'restore' && <RestoreTab connection={connection} />}
         {tab === 'schedule' && <ScheduleTab connection={connection} />}
@@ -966,6 +1052,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   const [searchDebounced, setSearchDebounced] = useState('')
   const [columnFilters, setColumnFilters] = useState({})
   const [columnFiltersDebounced, setColumnFiltersDebounced] = useState({})
+  const [sort, setSort] = useState(null)
   const [editing, setEditing] = useState(null)
   const [changes, setChanges] = useState({})
   const [insertOpen, setInsertOpen] = useState(false)
@@ -994,6 +1081,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     setSearchDebounced('')
     setColumnFilters({})
     setColumnFiltersDebounced({})
+    setSort(null)
     setChanges({})
     setEditing(null)
     setInsertOpen(false)
@@ -1003,14 +1091,14 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     setView('data')
   }, [database, table])
 
-  useEffect(() => { setPage(1) }, [database, table, searchDebounced, columnFiltersDebounced])
+  useEffect(() => { setPage(1) }, [database, table, searchDebounced, columnFiltersDebounced, sort])
 
   const loadRows = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const q = showSearch ? searchDebounced : ''
-      const res = await apiClient.getTableRows(connectionId, database, table, page, perPage, q, columnFiltersDebounced)
+      const res = await apiClient.getTableRows(connectionId, database, table, page, perPage, q, columnFiltersDebounced, sort)
       setData(res.data)
       setChanges({})
       setEditing(null)
@@ -1019,7 +1107,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     } finally {
       setLoading(false)
     }
-  }, [connectionId, database, table, page, perPage, searchDebounced, showSearch, columnFiltersDebounced])
+  }, [connectionId, database, table, page, perPage, searchDebounced, showSearch, columnFiltersDebounced, sort])
 
   useEffect(() => { loadRows() }, [loadRows])
 
@@ -1061,11 +1149,27 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     setColumnFilters((current) => ({ ...current, [col]: value }))
   }
 
+  useEffect(() => {
+    writeStoredJson(DB_NAV_STATE_KEY, {
+      expandedConn: Array.from(expandedConn),
+      expandedDb: Array.from(expandedDb),
+      expandedCat: Array.from(expandedCat),
+    })
+  }, [expandedConn, expandedDb, expandedCat])
+
   const clearFilters = () => {
     setSearchInput('')
     setSearchDebounced('')
     setColumnFilters({})
     setColumnFiltersDebounced({})
+  }
+
+  const toggleSort = (col) => {
+    setSort((current) => {
+      if (current?.column !== col) return { column: col, direction: 'asc' }
+      if (current.direction === 'asc') return { column: col, direction: 'desc' }
+      return null
+    })
   }
 
   const setCellValue = (rowIndex, col, value) => {
@@ -1147,7 +1251,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
         )}
         <div className="flex items-center justify-between text-xs text-gray-400 shrink-0"><span>{data.total.toLocaleString()} row{data.total === 1 ? '' : 's'}{hasAnyFilter ? ' matching filters' : ' total'}{activeColumnFilterCount ? ` (${activeColumnFilterCount} column filter${activeColumnFilterCount === 1 ? '' : 's'})` : ''} - page {data.page} of {totalPages}</span><div className="flex items-center gap-2"><button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Prev</button><button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Next</button></div></div>
         {insertOpen && <div className="rounded border border-gray-700 bg-secondary p-3"><div className="text-sm font-semibold text-white mb-2">Insert row</div><div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">{data.columns.map((col) => <label key={col} className="text-xs text-gray-400">{col}<input value={newRow[col] ?? ''} onChange={(e) => setNewRow((r) => ({ ...r, [col]: e.target.value }))} placeholder="leave empty for default/null" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label>)}</div><div className="mt-3 flex gap-2"><button type="button" onClick={insertRow} className="px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold">Insert</button><button type="button" onClick={() => { setInsertOpen(false); setNewRow({}) }} className="px-3 py-1.5 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs">Cancel</button></div></div>}
-        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0 z-10"><tr><th className="px-3 py-2 font-semibold whitespace-nowrap w-24">Actions</th>{data.columns.map((c) => <th key={c} className="px-3 py-2 font-semibold whitespace-nowrap">{c}</th>)}</tr><tr className="border-t border-gray-700 bg-secondary/95"><th className="px-3 py-2 text-xs font-normal text-gray-500 whitespace-nowrap">Filter</th>{data.columns.map((c) => <th key={`${c}-filter`} className="px-2 py-1.5 min-w-[9rem]"><input type="search" value={columnFilters[c] || ''} onChange={(e) => setColumnFilter(c, e.target.value)} placeholder={`Filter ${c}`} className="w-full rounded border border-gray-700 bg-primary px-2 py-1 text-xs font-normal text-white placeholder:text-gray-600 focus:border-accent focus:outline-none" /></th>)}</tr></thead><tbody>{data.rows.map((row, i) => <tr key={i} className="border-t border-gray-700 hover:bg-primary/40"><td className="px-3 py-1.5 whitespace-nowrap"><div className="flex gap-1"><button type="button" onClick={() => saveRow(i)} disabled={!changes[i]} title="Save row" className="p-1 rounded bg-primary hover:bg-gray-700 text-green-300 disabled:opacity-30"><Save className="w-3.5 h-3.5" /></button><button type="button" onClick={() => deleteRow(i)} disabled={!hasPrimaryKey} title="Delete row" className="p-1 rounded bg-primary hover:bg-gray-700 text-red-300 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button></div></td>{data.columns.map((col, j) => { const v = changes[i]?.[col] !== undefined ? changes[i][col] : row[j]; const isEditing = editing?.row === i && editing?.col === col; return <td key={col} className="px-3 py-1.5 text-gray-200 whitespace-nowrap max-w-xs truncate" title={v === null ? 'NULL' : String(v)} onDoubleClick={() => hasPrimaryKey && setEditing({ row: i, col })}>{isEditing ? <input autoFocus value={v ?? ''} onChange={(e) => setCellValue(i, col, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(null) }} className="w-full min-w-[10rem] bg-black/30 border border-accent rounded px-2 py-1 text-white" /> : v === null ? <span className="text-gray-500 italic">NULL</span> : <span className={changes[i]?.[col] !== undefined ? 'text-yellow-200' : ''}>{String(v)}</span>}</td> })}</tr>)}</tbody></table></div>
+        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0 z-10"><tr><th className="px-3 py-2 font-semibold whitespace-nowrap w-24">Actions</th>{data.columns.map((c) => <th key={c} className="px-1 py-1 font-semibold whitespace-nowrap"><button type="button" onClick={() => toggleSort(c)} title={`Sort by ${c}`} className={`w-full rounded px-2 py-1 text-left hover:bg-secondary ${sort?.column === c ? 'text-accent' : 'text-gray-300'}`}><span className="inline-flex items-center gap-1">{c}<span className="text-xs">{sort?.column === c ? (sort.direction === 'asc' ? '▲' : '▼') : '↕'}</span></span></button></th>)}</tr><tr className="border-t border-gray-700 bg-secondary/95"><th className="px-3 py-2 text-xs font-normal text-gray-500 whitespace-nowrap">Filter</th>{data.columns.map((c) => <th key={`${c}-filter`} className="px-2 py-1.5 min-w-[9rem]"><input type="search" value={columnFilters[c] || ''} onChange={(e) => setColumnFilter(c, e.target.value)} placeholder={`Filter ${c}`} className="w-full rounded border border-gray-700 bg-primary px-2 py-1 text-xs font-normal text-white placeholder:text-gray-600 focus:border-accent focus:outline-none" /></th>)}</tr></thead><tbody>{data.rows.map((row, i) => <tr key={i} className="border-t border-gray-700 hover:bg-primary/40"><td className="px-3 py-1.5 whitespace-nowrap"><div className="flex gap-1"><button type="button" onClick={() => saveRow(i)} disabled={!changes[i]} title="Save row" className="p-1 rounded bg-primary hover:bg-gray-700 text-green-300 disabled:opacity-30"><Save className="w-3.5 h-3.5" /></button><button type="button" onClick={() => deleteRow(i)} disabled={!hasPrimaryKey} title="Delete row" className="p-1 rounded bg-primary hover:bg-gray-700 text-red-300 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button></div></td>{data.columns.map((col, j) => { const v = changes[i]?.[col] !== undefined ? changes[i][col] : row[j]; const isEditing = editing?.row === i && editing?.col === col; return <td key={col} className="px-3 py-1.5 text-gray-200 whitespace-nowrap max-w-xs truncate" title={v === null ? 'NULL' : String(v)} onDoubleClick={() => hasPrimaryKey && setEditing({ row: i, col })}>{isEditing ? <input autoFocus value={v ?? ''} onChange={(e) => setCellValue(i, col, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(null) }} className="w-full min-w-[10rem] bg-black/30 border border-accent rounded px-2 py-1 text-white" /> : v === null ? <span className="text-gray-500 italic">NULL</span> : <span className={changes[i]?.[col] !== undefined ? 'text-yellow-200' : ''}>{String(v)}</span>}</td> })}</tr>)}</tbody></table></div>
       </>}
     </div>
   )
@@ -1221,7 +1325,7 @@ function CreateTablePanel({ connectionId, database, onCreated }) {
   return <div className="rounded border border-gray-700 bg-secondary p-3 max-w-5xl"><div className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3"><label className="text-xs text-gray-400 md:col-span-2">Table name<input value={form.table} onChange={(e) => setForm((f) => ({ ...f, table: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" placeholder="new_table" /></label><label className="text-xs text-gray-400">Engine<input value={form.engine} onChange={(e) => setForm((f) => ({ ...f, engine: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Collation<select value={form.collation} onChange={(e) => setForm((f) => ({ ...f, collation: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{(DB_COLLATIONS[form.charset] || DB_COLLATIONS.utf8mb4).map((c) => <option key={c} value={c}>{c}</option>)}</select></label></div><div className="space-y-2">{form.columns.map((col, idx) => <div key={idx} className="grid grid-cols-1 md:grid-cols-7 gap-2 items-end"><label className="text-xs text-gray-400 md:col-span-2">Column<input value={col.name} onChange={(e) => patchColumn(idx, { name: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Type<select value={col.type} onChange={(e) => patchColumn(idx, { type: e.target.value, length: e.target.value === 'VARCHAR' ? '255' : e.target.value === 'INT' ? '11' : '' })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{COLUMN_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label><label className="text-xs text-gray-400">Length<input value={col.length || ''} onChange={(e) => patchColumn(idx, { length: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Default<input value={col.default || ''} onChange={(e) => patchColumn(idx, { default: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><div className="flex flex-wrap gap-2 text-xs text-gray-300"><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!col.nullable} onChange={(e) => patchColumn(idx, { nullable: e.target.checked })} /> Null</label><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!col.auto_increment} onChange={(e) => patchColumn(idx, { auto_increment: e.target.checked, nullable: false })} /> AI</label><label className="inline-flex items-center gap-1"><input type="radio" checked={form.primary_key === col.name && !!col.name} onChange={() => setForm((f) => ({ ...f, primary_key: col.name }))} /> PK</label></div><button type="button" onClick={() => removeColumn(idx)} disabled={form.columns.length <= 1} className="px-2 py-1.5 bg-primary hover:bg-gray-700 rounded text-red-300 text-xs disabled:opacity-40">Remove</button></div>)}</div><button type="button" onClick={addColumn} className="mt-3 px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1"><Plus className="w-3 h-3" /> Add field</button><pre className="mt-3 rounded border border-gray-700 bg-primary p-2 text-xs text-gray-300 whitespace-pre-wrap">{preview}</pre>{error && <div className="mt-2 text-red-300 text-xs">{error}</div>}<button type="button" onClick={submit} disabled={busy || !form.table.trim()} className="mt-3 px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-2 disabled:opacity-50">{busy && <Loader2 className="w-3 h-3 animate-spin" />} Create table</button></div>
 }
 
-function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab }) {
+function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab, rememberedDatabase = '', onDatabaseContextChange }) {
   const [databases, setDatabases] = useState([])
   const [database, setDatabase] = useState('')
   const [tables, setTables] = useState([])
@@ -1262,9 +1366,10 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
         } else if (ts?.folder) {
           setDatabase(ts.database)
         } else {
-          const def = connection.default_database && all.includes(connection.default_database)
+          const remembered = rememberedDatabase && all.includes(rememberedDatabase) ? rememberedDatabase : ''
+          const def = remembered || (connection.default_database && all.includes(connection.default_database)
             ? connection.default_database
-            : (res.data.databases?.[0] || '')
+            : (res.data.databases?.[0] || ''))
           setDatabase(def)
         }
         setError('')
@@ -1272,11 +1377,12 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
       .catch((err) => !cancelled && setError(err.response?.data?.error || 'Failed to load databases'))
       .finally(() => !cancelled && setLoading(false))
     return () => { cancelled = true }
-  }, [connection.id, connection.default_database])
+  }, [connection.id, connection.default_database, rememberedDatabase])
 
   useEffect(() => {
     if (!treeSel) return
     setDatabase(treeSel.database)
+    onDatabaseContextChange?.(connection.id, treeSel.database)
     if (treeSel.folder) return
     if (treeSel.name) setTable(treeSel.name)
   }, [treeSel?.database, treeSel?.name, treeSel?.kind, treeSel?.folder, treeSel?.connectionId])
@@ -1299,12 +1405,14 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
 
   const onDatabaseChange = (value) => {
     setDatabase(value)
+    onDatabaseContextChange?.(connection.id, value)
     onBrowseSelectionChange(null)
   }
 
   const onTableChange = (value) => {
     setTable(value)
     if (database && value) {
+      onDatabaseContextChange?.(connection.id, database)
       onBrowseSelectionChange({
         connectionId: connection.id,
         database,
@@ -1482,7 +1590,7 @@ function TableViewer({ connectionId, database, table, showSearch = false }) {
 
 // ── SQL runner ──────────────────────────────────────────────────
 
-function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
+function SqlTab({ connection, preferredDatabase = '', onDatabaseChange, pendingSql, onPendingSqlConsumed }) {
   const [databases, setDatabases] = useState([])
   const [database, setDatabase] = useState('')
   const [sql, setSql] = useState('SHOW DATABASES;')
@@ -1502,12 +1610,15 @@ function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
       .then((res) => {
         const all = [...(res.data.databases || []), ...(res.data.system_databases || [])]
         setDatabases(all)
-        if (connection.default_database && all.includes(connection.default_database)) {
-          setDatabase(connection.default_database)
-        }
+        const nextDb = preferredDatabase && all.includes(preferredDatabase)
+          ? preferredDatabase
+          : connection.default_database && all.includes(connection.default_database)
+            ? connection.default_database
+            : ''
+        setDatabase((current) => (current && all.includes(current) ? current : nextDb))
       })
       .catch(() => {})
-  }, [connection.id, connection.default_database])
+  }, [connection.id, connection.default_database, preferredDatabase])
 
   const run = async (forceConfirm = false) => {
     setRunning(true)
@@ -1537,7 +1648,10 @@ function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
         <label className="text-sm text-gray-400">Database (optional)</label>
         <select
           value={database}
-          onChange={(e) => setDatabase(e.target.value)}
+          onChange={(e) => {
+            setDatabase(e.target.value)
+            onDatabaseChange?.(e.target.value)
+          }}
           className="bg-primary border border-gray-700 text-white text-sm px-2 py-1 rounded min-w-[10rem]"
         >
           <option value="">(none — server-wide)</option>
@@ -1619,9 +1733,10 @@ function SqlTab({ connection, pendingSql, onPendingSqlConsumed }) {
 
 // ── Backups list + run-now ──────────────────────────────────────
 
-function ManageDatabasesTab({ connection }) {
+function ManageDatabasesTab({ connection, preferredDatabase = '', onDatabaseChange }) {
   const dialog = useDialog()
-  const [manageSubtab, setManageSubtab] = useState('create')
+  const initialManage = useMemo(() => readStoredJson(DB_MANAGE_STATE_KEY, {}), [])
+  const [manageSubtab, setManageSubtab] = useState(initialManage[connection.id]?.subtab || 'create')
   const [databases, setDatabases] = useState([])
   const [loading, setLoading] = useState(true)
   const [createForm, setCreateForm] = useState({ name: '', charset: 'utf8mb4', collation: 'utf8mb4_general_ci' })
@@ -1659,15 +1774,21 @@ function ManageDatabasesTab({ connection }) {
       const res = await apiClient.listDatabases(connection.id)
       const all = [...(res.data.databases || []), ...(res.data.system_databases || [])]
       setDatabases(all)
-      setImportForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
-      setUserForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
-      setGrantForm((f) => ({ ...f, database: f.database || connection.default_database || all[0] || '' }))
+      const pick = preferredDatabase && all.includes(preferredDatabase) ? preferredDatabase : connection.default_database || all[0] || ''
+      setImportForm((f) => ({ ...f, database: f.database || pick }))
+      setUserForm((f) => ({ ...f, database: f.database || pick }))
+      setGrantForm((f) => ({ ...f, database: f.database || pick }))
     } finally {
       setLoading(false)
     }
-  }, [connection.id, connection.default_database])
+  }, [connection.id, connection.default_database, preferredDatabase])
 
   useEffect(() => { refreshDatabases() }, [refreshDatabases])
+
+  useEffect(() => {
+    const current = readStoredJson(DB_MANAGE_STATE_KEY, {})
+    writeStoredJson(DB_MANAGE_STATE_KEY, { ...current, [connection.id]: { subtab: manageSubtab } })
+  }, [connection.id, manageSubtab])
 
   const refreshUsers = useCallback(async (database = '') => {
     setUsersLoading(true)
@@ -1960,7 +2081,7 @@ function ManageDatabasesTab({ connection }) {
             {importForm.mode === 'existing' ? (
               <label className="text-sm text-gray-300">
                 Database
-                <select value={importForm.database} onChange={(e) => patchImport({ database: e.target.value })} disabled={loading} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white disabled:opacity-50">
+                <select value={importForm.database} onChange={(e) => { patchImport({ database: e.target.value }); onDatabaseChange?.(e.target.value) }} disabled={loading} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white disabled:opacity-50">
                   {databases.map((d) => <option key={d} value={d}>{d}</option>)}
                 </select>
               </label>
@@ -2050,7 +2171,7 @@ function ManageDatabasesTab({ connection }) {
               </label>
               <label className="text-sm text-gray-300">
                 Grant on database
-                <select value={userForm.database} onChange={(e) => setUserForm((f) => ({ ...f, database: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                <select value={userForm.database} onChange={(e) => { setUserForm((f) => ({ ...f, database: e.target.value })); onDatabaseChange?.(e.target.value) }} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
                   <option value="">Create user only</option>
                   {databases.map((d) => <option key={d} value={d}>{d}</option>)}
                 </select>
@@ -2087,7 +2208,7 @@ function ManageDatabasesTab({ connection }) {
               </label>
               <label className="text-sm text-gray-300">
                 Database
-                <select value={grantForm.database} onChange={(e) => setGrantForm((f) => ({ ...f, database: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
+                <select value={grantForm.database} onChange={(e) => { setGrantForm((f) => ({ ...f, database: e.target.value })); onDatabaseChange?.(e.target.value) }} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-2 text-white">
                   {databases.map((d) => <option key={d} value={d}>{d}</option>)}
                 </select>
               </label>
