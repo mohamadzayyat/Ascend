@@ -964,6 +964,8 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   const [message, setMessage] = useState('')
   const [searchInput, setSearchInput] = useState('')
   const [searchDebounced, setSearchDebounced] = useState('')
+  const [columnFilters, setColumnFilters] = useState({})
+  const [columnFiltersDebounced, setColumnFiltersDebounced] = useState({})
   const [editing, setEditing] = useState(null)
   const [changes, setChanges] = useState({})
   const [insertOpen, setInsertOpen] = useState(false)
@@ -976,8 +978,22 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   }, [searchInput])
 
   useEffect(() => {
+    const t = setTimeout(() => {
+      const next = {}
+      for (const [key, value] of Object.entries(columnFilters)) {
+        const clean = String(value || '').trim()
+        if (clean) next[key] = clean
+      }
+      setColumnFiltersDebounced(next)
+    }, 350)
+    return () => clearTimeout(t)
+  }, [columnFilters])
+
+  useEffect(() => {
     setSearchInput('')
     setSearchDebounced('')
+    setColumnFilters({})
+    setColumnFiltersDebounced({})
     setChanges({})
     setEditing(null)
     setInsertOpen(false)
@@ -987,14 +1003,14 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     setView('data')
   }, [database, table])
 
-  useEffect(() => { setPage(1) }, [database, table, searchDebounced])
+  useEffect(() => { setPage(1) }, [database, table, searchDebounced, columnFiltersDebounced])
 
   const loadRows = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
       const q = showSearch ? searchDebounced : ''
-      const res = await apiClient.getTableRows(connectionId, database, table, page, perPage, q)
+      const res = await apiClient.getTableRows(connectionId, database, table, page, perPage, q, columnFiltersDebounced)
       setData(res.data)
       setChanges({})
       setEditing(null)
@@ -1003,7 +1019,7 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
     } finally {
       setLoading(false)
     }
-  }, [connectionId, database, table, page, perPage, searchDebounced, showSearch])
+  }, [connectionId, database, table, page, perPage, searchDebounced, showSearch, columnFiltersDebounced])
 
   useEffect(() => { loadRows() }, [loadRows])
 
@@ -1038,6 +1054,19 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   const totalPages = Math.max(1, Math.ceil(data.total / data.per_page))
   const hasPrimaryKey = (data.primary_key || []).length > 0
   const changedCount = Object.keys(changes).length
+  const activeColumnFilterCount = Object.values(columnFiltersDebounced).filter((v) => String(v || '').trim()).length
+  const hasAnyFilter = !!data.search || activeColumnFilterCount > 0
+
+  const setColumnFilter = (col, value) => {
+    setColumnFilters((current) => ({ ...current, [col]: value }))
+  }
+
+  const clearFilters = () => {
+    setSearchInput('')
+    setSearchDebounced('')
+    setColumnFilters({})
+    setColumnFiltersDebounced({})
+  }
 
   const setCellValue = (rowIndex, col, value) => {
     setChanges((prev) => ({ ...prev, [rowIndex]: { ...(prev[rowIndex] || {}), [col]: value } }))
@@ -1107,10 +1136,18 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
           }}
         />
       ) : <>
-        {showSearch && <div className="relative max-w-md shrink-0"><Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" /><input type="search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search rows (any column)..." className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600" /></div>}
-        <div className="flex items-center justify-between text-xs text-gray-400 shrink-0"><span>{data.total.toLocaleString()} row{data.total === 1 ? '' : 's'}{data.search ? ' matching search' : ' total'} - page {data.page} of {totalPages}</span><div className="flex items-center gap-2"><button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Prev</button><button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Next</button></div></div>
+        {showSearch && (
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="relative max-w-md flex-1 min-w-[16rem]">
+              <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+              <input type="search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search rows (any column)..." className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600" />
+            </div>
+            {hasAnyFilter && <button type="button" onClick={clearFilters} className="px-2 py-1.5 rounded border border-gray-700 text-gray-300 hover:bg-primary text-xs inline-flex items-center gap-1"><X className="w-3 h-3" /> Clear filters</button>}
+          </div>
+        )}
+        <div className="flex items-center justify-between text-xs text-gray-400 shrink-0"><span>{data.total.toLocaleString()} row{data.total === 1 ? '' : 's'}{hasAnyFilter ? ' matching filters' : ' total'}{activeColumnFilterCount ? ` (${activeColumnFilterCount} column filter${activeColumnFilterCount === 1 ? '' : 's'})` : ''} - page {data.page} of {totalPages}</span><div className="flex items-center gap-2"><button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Prev</button><button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading} className="px-2 py-1 bg-primary rounded disabled:opacity-40">Next</button></div></div>
         {insertOpen && <div className="rounded border border-gray-700 bg-secondary p-3"><div className="text-sm font-semibold text-white mb-2">Insert row</div><div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">{data.columns.map((col) => <label key={col} className="text-xs text-gray-400">{col}<input value={newRow[col] ?? ''} onChange={(e) => setNewRow((r) => ({ ...r, [col]: e.target.value }))} placeholder="leave empty for default/null" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label>)}</div><div className="mt-3 flex gap-2"><button type="button" onClick={insertRow} className="px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold">Insert</button><button type="button" onClick={() => { setInsertOpen(false); setNewRow({}) }} className="px-3 py-1.5 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs">Cancel</button></div></div>}
-        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0"><tr><th className="px-3 py-2 font-semibold whitespace-nowrap w-24">Actions</th>{data.columns.map((c) => <th key={c} className="px-3 py-2 font-semibold whitespace-nowrap">{c}</th>)}</tr></thead><tbody>{data.rows.map((row, i) => <tr key={i} className="border-t border-gray-700 hover:bg-primary/40"><td className="px-3 py-1.5 whitespace-nowrap"><div className="flex gap-1"><button type="button" onClick={() => saveRow(i)} disabled={!changes[i]} title="Save row" className="p-1 rounded bg-primary hover:bg-gray-700 text-green-300 disabled:opacity-30"><Save className="w-3.5 h-3.5" /></button><button type="button" onClick={() => deleteRow(i)} disabled={!hasPrimaryKey} title="Delete row" className="p-1 rounded bg-primary hover:bg-gray-700 text-red-300 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button></div></td>{data.columns.map((col, j) => { const v = changes[i]?.[col] !== undefined ? changes[i][col] : row[j]; const isEditing = editing?.row === i && editing?.col === col; return <td key={col} className="px-3 py-1.5 text-gray-200 whitespace-nowrap max-w-xs truncate" title={v === null ? 'NULL' : String(v)} onDoubleClick={() => hasPrimaryKey && setEditing({ row: i, col })}>{isEditing ? <input autoFocus value={v ?? ''} onChange={(e) => setCellValue(i, col, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(null) }} className="w-full min-w-[10rem] bg-black/30 border border-accent rounded px-2 py-1 text-white" /> : v === null ? <span className="text-gray-500 italic">NULL</span> : <span className={changes[i]?.[col] !== undefined ? 'text-yellow-200' : ''}>{String(v)}</span>}</td> })}</tr>)}</tbody></table></div>
+        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700"><table className="w-full text-sm text-left"><thead className="bg-primary text-gray-300 sticky top-0 z-10"><tr><th className="px-3 py-2 font-semibold whitespace-nowrap w-24">Actions</th>{data.columns.map((c) => <th key={c} className="px-3 py-2 font-semibold whitespace-nowrap">{c}</th>)}</tr><tr className="border-t border-gray-700 bg-secondary/95"><th className="px-3 py-2 text-xs font-normal text-gray-500 whitespace-nowrap">Filter</th>{data.columns.map((c) => <th key={`${c}-filter`} className="px-2 py-1.5 min-w-[9rem]"><input type="search" value={columnFilters[c] || ''} onChange={(e) => setColumnFilter(c, e.target.value)} placeholder={`Filter ${c}`} className="w-full rounded border border-gray-700 bg-primary px-2 py-1 text-xs font-normal text-white placeholder:text-gray-600 focus:border-accent focus:outline-none" /></th>)}</tr></thead><tbody>{data.rows.map((row, i) => <tr key={i} className="border-t border-gray-700 hover:bg-primary/40"><td className="px-3 py-1.5 whitespace-nowrap"><div className="flex gap-1"><button type="button" onClick={() => saveRow(i)} disabled={!changes[i]} title="Save row" className="p-1 rounded bg-primary hover:bg-gray-700 text-green-300 disabled:opacity-30"><Save className="w-3.5 h-3.5" /></button><button type="button" onClick={() => deleteRow(i)} disabled={!hasPrimaryKey} title="Delete row" className="p-1 rounded bg-primary hover:bg-gray-700 text-red-300 disabled:opacity-30"><Trash2 className="w-3.5 h-3.5" /></button></div></td>{data.columns.map((col, j) => { const v = changes[i]?.[col] !== undefined ? changes[i][col] : row[j]; const isEditing = editing?.row === i && editing?.col === col; return <td key={col} className="px-3 py-1.5 text-gray-200 whitespace-nowrap max-w-xs truncate" title={v === null ? 'NULL' : String(v)} onDoubleClick={() => hasPrimaryKey && setEditing({ row: i, col })}>{isEditing ? <input autoFocus value={v ?? ''} onChange={(e) => setCellValue(i, col, e.target.value)} onBlur={() => setEditing(null)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(null) }} className="w-full min-w-[10rem] bg-black/30 border border-accent rounded px-2 py-1 text-white" /> : v === null ? <span className="text-gray-500 italic">NULL</span> : <span className={changes[i]?.[col] !== undefined ? 'text-yellow-200' : ''}>{String(v)}</span>}</td> })}</tr>)}</tbody></table></div>
       </>}
     </div>
   )

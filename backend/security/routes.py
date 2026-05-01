@@ -101,14 +101,20 @@ def _run(cmd, timeout=4):
         return 1, '', str(exc)
 
 
-def _crowdsec_http_401_scenario_files():
+def _crowdsec_http_401_scenario_files(include_disabled=False):
     roots = [Path('/etc/crowdsec/scenarios'), Path('/etc/crowdsec/postoverflows')]
     files = []
+    suffixes = {'.yaml'}
+    if include_disabled:
+        suffixes.add('.ascend-disabled')
     for root in roots:
         if not root.exists():
             continue
         try:
-            for path in root.rglob('*.yaml'):
+            candidates = []
+            for suffix in suffixes:
+                candidates.extend(root.rglob(f'*{suffix}'))
+            for path in candidates:
                 try:
                     text = path.read_text(encoding='utf-8', errors='replace')
                 except Exception:
@@ -122,14 +128,16 @@ def _crowdsec_http_401_scenario_files():
 
 def _crowdsec_http_401_threshold_status():
     files = _crowdsec_http_401_scenario_files()
+    disabled_files = [p for p in _crowdsec_http_401_scenario_files(include_disabled=True) if str(p).endswith('.ascend-disabled')]
     if not files:
         return {
             'available': shutil.which('cscli') is not None,
+            'disabled': bool(disabled_files),
             'configured': False,
             'threshold': HTTP_401_THRESHOLD,
             'window': HTTP_401_WINDOW,
-            'files': [],
-            'message': 'HTTP 401 brute-force scenario was not found.',
+            'files': [{'path': str(path), 'disabled': True} for path in disabled_files],
+            'message': 'HTTP 401 brute-force rule is turned off.' if disabled_files else 'HTTP 401 brute-force scenario was not found.',
         }
     rows = []
     configured = False
@@ -144,6 +152,7 @@ def _crowdsec_http_401_threshold_status():
         rows.append({'path': str(path), 'capacity': capacity, 'leakspeed': leakspeed, 'configured': ok})
     return {
         'available': True,
+        'disabled': False,
         'configured': configured,
         'threshold': HTTP_401_THRESHOLD,
         'window': HTTP_401_WINDOW,
@@ -175,6 +184,37 @@ def _apply_crowdsec_http_401_threshold():
             results.append({'path': str(path), 'backup': str(backup), 'changed': True})
         else:
             results.append({'path': str(path), 'changed': False})
+    systemctl = shutil.which('systemctl')
+    if systemctl:
+        rc, out, err = _run([systemctl, 'restart', 'crowdsec.service'], timeout=20)
+        results.append({'cmd': 'systemctl restart crowdsec.service', 'returncode': rc, 'stdout': out, 'stderr': err})
+        if rc != 0:
+            return False, results
+    return True, results
+
+
+def _set_crowdsec_http_401_enabled(enabled):
+    active = _crowdsec_http_401_scenario_files()
+    disabled = [p for p in _crowdsec_http_401_scenario_files(include_disabled=True) if str(p).endswith('.ascend-disabled')]
+    results = []
+    if enabled:
+        if active:
+            results.append({'changed': False, 'message': 'HTTP 401 brute-force rule is already on.'})
+        for path in disabled:
+            target = Path(str(path)[:-len('.ascend-disabled')])
+            if target.exists():
+                target = target.with_name(f'{target.name}.restored-{int(time.time())}.yaml')
+            path.replace(target)
+            results.append({'path': str(path), 'restored_to': str(target), 'changed': True})
+    else:
+        if not active:
+            results.append({'changed': False, 'message': 'HTTP 401 brute-force rule is already off.'})
+        for path in active:
+            target = Path(str(path) + '.ascend-disabled')
+            if target.exists():
+                target = Path(str(path) + f'.ascend-disabled-{int(time.time())}')
+            path.replace(target)
+            results.append({'path': str(path), 'disabled_to': str(target), 'changed': True})
     systemctl = shutil.which('systemctl')
     if systemctl:
         rc, out, err = _run([systemctl, 'restart', 'crowdsec.service'], timeout=20)
@@ -1395,6 +1435,16 @@ def api_security_repair():
             'steps': [],
             'custom': 'http_401_threshold',
         },
+        'crowdsec_http_401_disable': {
+            'label': 'Turn off HTTP 401 brute-force rule',
+            'steps': [],
+            'custom': 'http_401_disable',
+        },
+        'crowdsec_http_401_enable': {
+            'label': 'Turn on HTTP 401 brute-force rule',
+            'steps': [],
+            'custom': 'http_401_enable',
+        },
     }
     spec = actions.get(action)
     if not spec:
@@ -1414,6 +1464,14 @@ def api_security_repair():
         if not ok:
             return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
         return jsonify({'message': 'HTTP 401 brute-force threshold set to 10 attempts in 24h.', 'results': results})
+    if spec.get('custom') in {'http_401_disable', 'http_401_enable'}:
+        enable = spec.get('custom') == 'http_401_enable'
+        ok, results = _set_crowdsec_http_401_enabled(enable)
+        status = 'ok' if ok else 'failed'
+        _audit_log('security.repair', status, spec['label'], {'action': action, 'results': results})
+        if not ok:
+            return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
+        return jsonify({'message': f'HTTP 401 brute-force rule {"turned on" if enable else "turned off"}.', 'results': results})
     steps = [s for s in spec.get('steps') or [] if s and s[0]]
     if not steps:
         return jsonify({'error': 'This repair needs systemctl or the required tool, but it was not found.'}), 400

@@ -223,6 +223,12 @@ export default function SecurityPage() {
   const crowdsecInstalled = !!tools.cscli?.installed
   const bouncerOk = !!tools.crowdsec_firewall_bouncer_service?.ok
   const http401Threshold = tools.crowdsec_http_401_threshold || {}
+  const http401Action = http401Threshold.disabled
+    ? 'crowdsec_http_401_enable'
+    : http401Threshold.configured
+      ? 'crowdsec_http_401_disable'
+      : 'crowdsec_http_401_threshold'
+  const http401ActionLabel = http401Threshold.disabled ? 'Turn on' : http401Threshold.configured ? 'Turn off' : 'Apply 10/24h'
   const definitionsNewest = latestDate(tools.definitions?.database_files)
   const definitionsAge = daysSince(definitionsNewest)
   const filteredDecisions = useMemo(() => {
@@ -392,6 +398,24 @@ export default function SecurityPage() {
   }, [issues])
 
   const runFix = async (fix) => {
+    if (fix === 'crowdsec_http_401_disable') {
+      const ok = await dialog.confirm({
+        title: 'Turn off HTTP 401 brute-force rule?',
+        message: 'CrowdSec will stop blocking repeated HTTP 401 login failures. SSH brute-force protection and other security features stay active.',
+        confirmLabel: 'Turn off rule',
+        tone: 'warning',
+      })
+      if (!ok) return
+    }
+    if (fix === 'crowdsec_http_401_enable') {
+      const ok = await dialog.confirm({
+        title: 'Turn on HTTP 401 brute-force rule?',
+        message: 'CrowdSec will resume blocking repeated HTTP 401 login failures for protected apps.',
+        confirmLabel: 'Turn on rule',
+        tone: 'warning',
+      })
+      if (!ok) return
+    }
     setBusy(fix)
     setMessage('')
     setError('')
@@ -986,7 +1010,7 @@ export default function SecurityPage() {
                 <StatusRow title="CrowdSec agent" ok={crowdsecInstalled && tools.crowdsec_service?.ok} detail={`${tools.crowdsec?.version || tools.cscli?.version || 'Not installed'} | Service: ${tools.crowdsec_service?.active || 'unknown'}`} action={crowdsecInstalled ? 'Restart' : 'Install'} busy={busy === (crowdsecInstalled ? 'crowdsec_restart' : 'install_crowdsec')} onAction={() => runFix(crowdsecInstalled ? 'crowdsec_restart' : 'install_crowdsec')} />
                 <StatusRow title="Firewall bouncer" ok={bouncerOk} detail={`${tools.crowdsec_firewall_bouncer_service?.name || 'crowdsec firewall bouncer'}: ${tools.crowdsec_firewall_bouncer_service?.active || 'unknown'}`} action="Repair" busy={busy === 'crowdsec_bouncer_restart'} onAction={() => runFix('crowdsec_bouncer_restart')} />
                 <StatusRow title="Nginx/SSH collections" ok={crowdsecInstalled} detail="Installs core Linux, SSH, and Nginx detection collections." action="Apply" busy={busy === 'crowdsec_collections'} onAction={() => runFix('crowdsec_collections')} />
-                <StatusRow title="HTTP 401 brute-force rule" ok={!!http401Threshold.configured} detail={http401Threshold.message || 'Blocks repeated HTTP 401 authentication failures.'} action={crowdsecInstalled ? 'Apply 10/24h' : ''} busy={busy === 'crowdsec_http_401_threshold'} onAction={() => runFix('crowdsec_http_401_threshold')} />
+                <StatusRow title="HTTP 401 brute-force rule" ok={!!http401Threshold.configured || !!http401Threshold.disabled} detail={http401Threshold.message || 'Blocks repeated HTTP 401 authentication failures.'} action={crowdsecInstalled ? http401ActionLabel : ''} busy={busy === http401Action} onAction={() => runFix(http401Action)} />
               </div>
               <section className="rounded-lg border border-gray-700 bg-secondary p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">

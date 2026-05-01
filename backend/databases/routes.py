@@ -973,6 +973,27 @@ def api_db_table_rows(conn_id):
         return jsonify({'error': 'search string is too long.'}), 400
     # Strip LIKE metacharacters from user input (we add wildcards server-side).
     search_safe = re.sub(r'[%_\\]', '', search) if search else ''
+    column_filters = {}
+    raw_filters = (request.args.get('column_filters') or '').strip()
+    if raw_filters:
+        try:
+            parsed_filters = json.loads(raw_filters)
+        except Exception:
+            return jsonify({'error': 'column_filters must be valid JSON.'}), 400
+        if not isinstance(parsed_filters, dict):
+            return jsonify({'error': 'column_filters must be an object.'}), 400
+        if len(parsed_filters) > 64:
+            return jsonify({'error': 'Too many column filters.'}), 400
+        for key, value in parsed_filters.items():
+            col = str(key or '').strip()
+            term = str(value or '').strip()
+            if not term:
+                continue
+            if len(col) > 128 or len(term) > 200:
+                return jsonify({'error': 'Column filter values are too long.'}), 400
+            if not re.fullmatch(r'[A-Za-z0-9_$]+', col):
+                return jsonify({'error': f'Invalid column filter: {col}'}), 400
+            column_filters[col] = re.sub(r'[%_\\]', '', term)
     try:
         client = _open_mysql(conn, database=database)
     except Exception as e:
@@ -980,24 +1001,36 @@ def api_db_table_rows(conn_id):
     try:
         with client.cursor() as cur:
             primary_key = _table_primary_key_columns(cur, database, table)
-            where_sql = ''
-            where_args = ()
-            if search_safe:
+            where_parts = []
+            where_args = []
+            if search_safe or column_filters:
                 cur.execute("""
                     SELECT COLUMN_NAME FROM information_schema.COLUMNS
                     WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
                     ORDER BY ORDINAL_POSITION
-                    LIMIT 48
                 """, (database, table))
                 colnames = [r[0] for r in cur.fetchall() if r and r[0]]
+            else:
+                colnames = []
+            if search_safe:
                 parts = []
-                for c in colnames:
+                for c in colnames[:48]:
                     if re.fullmatch(r'[A-Za-z0-9_$]+', c):
                         parts.append(f'CAST(`{c}` AS CHAR CHARACTER SET utf8mb4) LIKE %s')
                 if parts:
                     term = f'%{search_safe}%'
-                    where_sql = ' WHERE (' + ' OR '.join(parts) + ')'
-                    where_args = tuple([term] * len(parts))
+                    where_parts.append('(' + ' OR '.join(parts) + ')')
+                    where_args.extend([term] * len(parts))
+            valid_filter_cols = {c for c in colnames if re.fullmatch(r'[A-Za-z0-9_$]+', c)}
+            ignored_filters = []
+            for c, value in column_filters.items():
+                if c not in valid_filter_cols:
+                    ignored_filters.append(c)
+                    continue
+                where_parts.append(f'CAST(`{c}` AS CHAR CHARACTER SET utf8mb4) LIKE %s')
+                where_args.append(f'%{value}%')
+            where_sql = (' WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
+            where_args = tuple(where_args)
             count_sql = f'SELECT COUNT(*) FROM `{table}`' + where_sql
             cur.execute(count_sql, where_args)
             total = (cur.fetchone() or [0])[0]
@@ -1028,6 +1061,8 @@ def api_db_table_rows(conn_id):
         'per_page': per_page,
         'total': int(total),
         'search': search or None,
+        'column_filters': column_filters,
+        'ignored_column_filters': ignored_filters if column_filters else [],
     })
 
 

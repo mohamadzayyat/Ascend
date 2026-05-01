@@ -209,7 +209,7 @@ export const apiClient = {
   addTableColumn: (id, data) => api.post(`/api/databases/connections/${id}/table-columns`, data),
   getDatabaseSchema: (id, database) =>
     api.get(`/api/databases/connections/${id}/database-schema`, { params: { database } }),
-  getTableRows: (id, database, table, page = 1, perPage = 50, search = '') =>
+  getTableRows: (id, database, table, page = 1, perPage = 50, search = '', columnFilters = {}) =>
     api.get(`/api/databases/connections/${id}/table-rows`, {
       params: {
         database,
@@ -217,6 +217,7 @@ export const apiClient = {
         page,
         per_page: perPage,
         ...(search && String(search).trim() ? { search: String(search).trim() } : {}),
+        ...(columnFilters && Object.keys(columnFilters).length ? { column_filters: JSON.stringify(columnFilters) } : {}),
       },
     }),
   getTableDesign: (id, database, table) =>
