@@ -280,8 +280,10 @@ export function terminalWebSocketUrl() {
 // Lets AppFileManager stay scope-agnostic — the parent page picks the prefix.
 export function makeFileApi(prefix) {
   return {
-    list: (path = '', showHidden = false, search = '') =>
-      api.get(`${prefix}/files/list`, { params: { path, show_hidden: showHidden ? 1 : 0, search } }),
+    list: (path = '', showHidden = false, search = '', searchContents = true) =>
+      api.get(`${prefix}/files/list`, {
+        params: { path, show_hidden: showHidden ? 1 : 0, search, search_contents: searchContents ? 1 : 0 },
+      }),
     read: (path) => api.get(`${prefix}/files/read`, { params: { path } }),
     write: (path, content) => api.post(`${prefix}/files/write`, { path, content }),
     downloadUrl: (path) => `${API_URL}${prefix}/files/download?path=${encodeURIComponent(path)}`,

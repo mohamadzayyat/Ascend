@@ -275,6 +275,7 @@ export default function AppFileManager({
   const [showHidden, setShowHidden] = useState(false)
   const [search, setSearch] = useState('')
   const [searchInput, setSearchInput] = useState('')
+  const [searchContents, setSearchContents] = useState(true)
   const [searchLimited, setSearchLimited] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
   const [clipboard, setClipboard] = useState(null) // { mode, path, name, is_dir }
@@ -328,7 +329,7 @@ export default function AppFileManager({
     setLoading(true)
     setError('')
     try {
-      const res = await api.list(path, showHidden, search)
+      const res = await api.list(path, showHidden, search, searchContents)
       setEntries(res.data.entries || [])
       setBasePath(res.data.base_path || '')
       setExists(res.data.exists !== false)
@@ -339,7 +340,7 @@ export default function AppFileManager({
     } finally {
       setLoading(false)
     }
-  }, [api, path, showHidden, search])
+  }, [api, path, showHidden, search, searchContents])
 
   useEffect(() => { load() }, [load])
 
@@ -350,7 +351,7 @@ export default function AppFileManager({
 
   useEffect(() => {
     setSelected(new Set())
-  }, [path, search, showHidden])
+  }, [path, search, showHidden, searchContents])
 
   useEffect(() => {
     if (!menu) return
@@ -855,10 +856,19 @@ export default function AppFileManager({
               type="text"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search files"
+              placeholder={searchContents ? 'Search names and text' : 'Search file names'}
               className="w-56 pl-9 pr-3 py-2 rounded bg-primary border border-gray-600 text-white placeholder-gray-500 text-sm outline-none focus:border-accent"
             />
           </div>
+          <label className="flex items-center gap-2 text-gray-400 text-sm cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={searchContents}
+              onChange={(e) => setSearchContents(e.target.checked)}
+              className="accent-accent"
+            />
+            Search contents
+          </label>
           <label className="flex items-center gap-2 text-gray-400 text-sm cursor-pointer select-none">
             <input
               type="checkbox"
@@ -1078,7 +1088,9 @@ export default function AppFileManager({
         ) : loading && entries.length === 0 ? (
           <div className="p-8 text-center text-gray-400 text-sm">Loading...</div>
         ) : entries.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 text-sm">Empty folder. Drop files here to upload.</div>
+          <div className="p-8 text-center text-gray-500 text-sm">
+            {search ? 'No matching files found.' : 'Empty folder. Drop files here to upload.'}
+          </div>
         ) : (
           <table className="w-full text-sm">
             <thead className="bg-primary/50 text-gray-400 text-xs uppercase">
@@ -1133,13 +1145,26 @@ export default function AppFileManager({
                       />
                     </td>
                     <td className="px-3 py-2">
-                      <span className="inline-flex items-center gap-2 text-gray-200">
-                        <Icon className={`w-4 h-4 ${color}`} />
-                        {entry.name}
-                        {entry.is_dir && dragItem && dragItem.path !== entry.path && (
-                          <span className="text-xs text-gray-500">drop to move</span>
+                      <div className="min-w-0">
+                        <span className="inline-flex items-center gap-2 text-gray-200 max-w-full">
+                          <Icon className={`w-4 h-4 ${color} shrink-0`} />
+                          <span className="truncate">{entry.name}</span>
+                          {entry.is_dir && dragItem && dragItem.path !== entry.path && (
+                            <span className="text-xs text-gray-500 shrink-0">drop to move</span>
+                          )}
+                        </span>
+                        {search && entry.path && (
+                          <div className="mt-1 space-y-0.5">
+                            <div className="text-xs text-gray-500 font-mono truncate">{entry.path}</div>
+                            {entry.match?.type === 'content' && (
+                              <div className="text-xs text-gray-400 truncate">
+                                <span className="text-accent">Line {entry.match.line}:</span>{' '}
+                                <span className="font-mono">{entry.match.text}</span>
+                              </div>
+                            )}
+                          </div>
                         )}
-                      </span>
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-right text-gray-400 font-mono text-xs">{formatSize(entry.size)}</td>
                     <td className="px-3 py-2 text-right text-gray-500 text-xs">{formatTime(entry.mtime)}</td>

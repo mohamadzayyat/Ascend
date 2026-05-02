@@ -36,7 +36,6 @@ _encrypt_password = None
 _decrypt_password = None
 iso_utc = None
 DB_BACKUPS_ROOT = None
-MAX_SQL_URL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 
 
 def register_database_feature(*, flask_app, db_instance, csrf_protect, base_dir, database_connection_model, backup_schedule_model, backup_archive_model, restore_job_model, encrypt_password, decrypt_password, iso_utc_func):
@@ -1463,16 +1462,11 @@ def _download_sql_backup_from_url(url, dest):
     total = 0
     try:
         with urllib.request.urlopen(request_obj, timeout=30) as res, open(tmp, 'wb') as out:
-            length = res.headers.get('Content-Length')
-            if length and int(length) > MAX_SQL_URL_DOWNLOAD_BYTES:
-                raise ValueError('Remote SQL file is larger than the 1GB download limit.')
             while True:
                 chunk = res.read(1024 * 1024)
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > MAX_SQL_URL_DOWNLOAD_BYTES:
-                    raise ValueError('Remote SQL file is larger than the 1GB download limit.')
                 out.write(chunk)
         tmp.replace(dest)
         return total

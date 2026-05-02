@@ -54,7 +54,16 @@ def register_file_manager_feature(*, flask_app, db_instance, csrf_protect, deplo
 
 MAX_EDIT_FILE_BYTES = 2 * 1024 * 1024  # 2MB cap for read/write through the editor
 MAX_URL_DOWNLOAD_BYTES = 1024 * 1024 * 1024  # 1GB cap for server-side URL downloads
+MAX_SEARCH_FILE_BYTES = 1024 * 1024  # Keep content search responsive and avoid large/binary files.
 HIDDEN_NAMES = {'node_modules', '.git'}
+SEARCH_TEXT_EXTS = {
+    '', 'txt', 'md', 'json', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'css', 'scss',
+    'sass', 'less', 'html', 'htm', 'xml', 'yml', 'yaml', 'toml', 'ini', 'env',
+    'sh', 'bash', 'zsh', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'hpp',
+    'sql', 'php', 'vue', 'svelte', 'conf', 'log', 'gitignore', 'dockerfile',
+    'prettierrc', 'eslintrc', 'babelrc', 'editorconfig', 'lock', 'csv', 'tsv',
+    'patch', 'diff', 'rst',
+}
 
 
 class ServerFileScope:
@@ -187,6 +196,35 @@ def _fm_entry(p, base):
     }
 
 
+def _fm_searchable_text_file(p):
+    if not p.is_file():
+        return False
+    name = p.name.lower()
+    ext = name.rsplit('.', 1)[-1] if '.' in name else ''
+    if name in SEARCH_TEXT_EXTS or ext in SEARCH_TEXT_EXTS:
+        try:
+            return p.stat().st_size <= MAX_SEARCH_FILE_BYTES
+        except OSError:
+            return False
+    return False
+
+
+def _fm_find_content_match(p, query):
+    try:
+        with p.open('r', encoding='utf-8') as fh:
+            for line_no, line in enumerate(fh, start=1):
+                clean = line.rstrip('\r\n')
+                if query in clean.lower():
+                    return {
+                        'type': 'content',
+                        'line': line_no,
+                        'text': clean[:240],
+                    }
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
 def _fm_rel(target, base):
     return '' if target == base else str(target.relative_to(base)).replace('\\', '/')
 
@@ -207,7 +245,9 @@ def _fm_safe_extract_zip(zip_path, target_dir, base):
 def _fm_handle_list(scope):
     relpath = request.args.get('path', '')
     show_hidden = request.args.get('show_hidden') in ('1', 'true', 'yes')
-    search = (request.args.get('search') or '').strip().lower()
+    raw_search = (request.args.get('search') or '').strip()
+    search = raw_search.lower()
+    search_contents = request.args.get('search_contents') in ('1', 'true', 'yes')
     search_limit = 250
     try:
         base, target = _fm_resolve(scope, relpath, must_exist=False)
@@ -240,10 +280,18 @@ def _fm_handle_list(scope):
             parts = [part for part in rel.split('/') if part]
             if not show_hidden and any(part in HIDDEN_NAMES for part in parts):
                 continue
-            if search not in child.name.lower() and search not in rel.lower():
+            path_matches = search in child.name.lower() or search in rel.lower()
+            content_match = None
+            if not path_matches and search_contents and _fm_searchable_text_file(child):
+                content_match = _fm_find_content_match(child, search)
+            if not path_matches and not content_match:
                 continue
             entry = _fm_entry(child, base)
             if entry:
+                if content_match:
+                    entry['match'] = content_match
+                elif path_matches:
+                    entry['match'] = {'type': 'path'}
                 entries.append(entry)
                 count += 1
                 if count >= search_limit:
@@ -265,7 +313,8 @@ def _fm_handle_list(scope):
         'path': _fm_rel(target, base),
         'exists': True,
         'entries': entries,
-        'search': search,
+        'search': raw_search,
+        'search_contents': search_contents,
         'search_limited': bool(search and len(entries) >= search_limit),
     })
 
