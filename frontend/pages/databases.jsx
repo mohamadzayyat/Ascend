@@ -537,6 +537,14 @@ function SchemaNavigator({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbsByConn])
 
+  useEffect(() => {
+    writeStoredJson(DB_NAV_STATE_KEY, {
+      expandedConn: Array.from(expandedConn),
+      expandedDb: Array.from(expandedDb),
+      expandedCat: Array.from(expandedCat),
+    })
+  }, [expandedConn, expandedDb, expandedCat])
+
   const onToggleConnection = (e, cid) => {
     e.stopPropagation()
     const open = expandedConn.has(cid)
@@ -1148,14 +1156,6 @@ function TableViewerEnhanced({ connectionId, database, table, showSearch = false
   const setColumnFilter = (col, value) => {
     setColumnFilters((current) => ({ ...current, [col]: value }))
   }
-
-  useEffect(() => {
-    writeStoredJson(DB_NAV_STATE_KEY, {
-      expandedConn: Array.from(expandedConn),
-      expandedDb: Array.from(expandedDb),
-      expandedCat: Array.from(expandedCat),
-    })
-  }, [expandedConn, expandedDb, expandedCat])
 
   const clearFilters = () => {
     setSearchInput('')
