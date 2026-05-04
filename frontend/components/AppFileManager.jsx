@@ -266,7 +266,15 @@ export default function AppFileManager({
   hiddenLabel = 'Show node_modules / .git',
   missingText = "The app's deploy directory does not exist yet. Deploy the app first, then files will appear here.",
 }) {
-  const [path, setPath] = useState('')
+  const pathStorageKey = `ascend:file-manager:path:${scopeKey}`
+  const [path, setPath] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    try {
+      return window.localStorage.getItem(pathStorageKey) || ''
+    } catch {
+      return ''
+    }
+  })
   const [entries, setEntries] = useState([])
   const [basePath, setBasePath] = useState('')
   const [exists, setExists] = useState(true)
@@ -296,6 +304,15 @@ export default function AppFileManager({
   const zipRef = useRef(null)
   const editorStorageKey = `ascend:file-editor:${scopeKey}`
   const dialog = useDialog()
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(pathStorageKey, path)
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [pathStorageKey, path])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
