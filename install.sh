@@ -214,6 +214,19 @@ wait_for_apt_lock() {
     return 0
 }
 
+recover_dpkg_if_needed() {
+    wait_for_apt_lock
+    if dpkg --audit 2>/dev/null | grep -q .; then
+        warn "dpkg has unfinished package configuration from a previous apt run; repairing it first..."
+        DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+    fi
+}
+
+run_apt_get() {
+    wait_for_apt_lock
+    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 "$@"
+}
+
 # Check a binary; install apt packages only if it is missing.
 # Note: we deliberately do NOT redirect stderr to /dev/null on apt-get install
 # — silent failures here are nearly impossible to debug (the user just sees
@@ -224,8 +237,8 @@ apt_install() {
         ok "$label already installed  ($($cmd --version 2>&1 | head -1))"
     else
         info "Installing $label…"
-        wait_for_apt_lock
-        apt-get install -y -qq "$@"
+        recover_dpkg_if_needed
+        run_apt_get install -y -qq "$@"
         ok "$label installed"
     fi
 }
@@ -233,12 +246,14 @@ apt_install() {
 install_system_deps() {
     section "Checking system packages"
     export DEBIAN_FRONTEND=noninteractive
-    wait_for_apt_lock
-    apt-get update -qq
+    recover_dpkg_if_needed
+    run_apt_get update -qq
 
     apt_install python3  "Python 3" python3 python3-pip python3-venv
     apt_install git      "Git"      git
     apt_install curl     "curl"     curl wget
+    apt_install update-ca-certificates "CA certificates" ca-certificates
+    apt_install gpg      "GnuPG"    gnupg
     apt_install nginx    "Nginx"    nginx
     apt_install certbot  "Certbot"  certbot python3-certbot-nginx
 
@@ -249,8 +264,8 @@ install_system_deps() {
         ok "mysql-client already installed  ($(mysqldump --version | head -1))"
     else
         info "Installing mysql-client (for mysqldump/mysql CLI)…"
-        wait_for_apt_lock
-        apt-get install -y -qq mysql-client
+        recover_dpkg_if_needed
+        run_apt_get install -y -qq mysql-client
         ok "mysql-client installed"
     fi
 
@@ -258,8 +273,8 @@ install_system_deps() {
         ok "build-essential already installed  (gcc $(gcc --version | head -1 | awk '{print $NF}'))"
     else
         info "Installing build-essential…"
-        wait_for_apt_lock
-        apt-get install -y -qq build-essential
+        recover_dpkg_if_needed
+        run_apt_get install -y -qq build-essential
         ok "build-essential installed"
     fi
 }
@@ -309,8 +324,8 @@ install_mysql_server_if_wanted() {
     fi
 
     info "Installing MySQL server (this can take a minute)…"
-    wait_for_apt_lock
-    apt-get install -y -qq mysql-server
+    recover_dpkg_if_needed
+    run_apt_get install -y -qq mysql-server
     systemctl enable --now mysql 2>/dev/null || systemctl enable --now mariadb 2>/dev/null || true
     ok "MySQL server installed and started. Run 'sudo mysql_secure_installation' to lock it down."
 }
@@ -328,8 +343,21 @@ install_node() {
     else
         info "Node.js not found — installing v$NODE_MAJOR…"
     fi
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - -qq 2>/dev/null
-    apt-get install -y -qq nodejs 2>/dev/null
+
+    recover_dpkg_if_needed
+    local setup_url setup_script
+    setup_url="https://deb.nodesource.com/setup_${NODE_MAJOR}.x"
+    setup_script="$(mktemp)"
+    info "Fetching NodeSource setup script for Node.js v$NODE_MAJOR…"
+    curl --connect-timeout 20 --max-time 300 --retry 3 --retry-delay 5 -fsSL "$setup_url" -o "$setup_script"
+
+    info "Configuring NodeSource apt repository…"
+    bash "$setup_script" -qq
+    rm -f "$setup_script"
+
+    recover_dpkg_if_needed
+    run_apt_get install -y -qq nodejs
+    command -v node &>/dev/null || die "Node.js install finished but 'node' is still not on PATH. See $INSTALL_LOG for apt output."
     ok "Node.js $(node -v) installed"
 }
 
