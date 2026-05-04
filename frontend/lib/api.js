@@ -183,6 +183,7 @@ export const apiClient = {
   listDbConnections: () => api.get('/api/databases/connections'),
   createDbConnection: (data) => api.post('/api/databases/connections', data),
   updateDbConnection: (id, data) => api.put(`/api/databases/connections/${id}`, data),
+  revealDbConnectionPassword: (id) => api.post(`/api/databases/connections/${id}/password`),
   deleteDbConnection: (id) => api.delete(`/api/databases/connections/${id}`),
   testDbConnection: (id) => api.post(`/api/databases/connections/${id}/test`),
   listDatabases: (id) => api.get(`/api/databases/connections/${id}/databases`),

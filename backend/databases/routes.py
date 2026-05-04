@@ -338,6 +338,18 @@ def api_db_connections_update(conn_id):
     return jsonify({'connection': conn.to_dict()})
 
 
+@bp.route('/api/databases/connections/<int:conn_id>/password', methods=['POST'])
+@login_required
+def api_db_connections_reveal_password(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    return jsonify({'password': _decrypt_password(conn.password_encrypted)})
+
+
 @bp.route('/api/databases/connections/<int:conn_id>', methods=['DELETE'])
 @login_required
 def api_db_connections_delete(conn_id):

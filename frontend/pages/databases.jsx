@@ -4,7 +4,7 @@ import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
   CheckCircle2, XCircle, AlertTriangle, Save, Pencil, Calendar, Table as TableIcon,
   ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText, Search, X,
-  UploadCloud, RotateCcw,
+  UploadCloud, RotateCcw, EyeOff,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
@@ -231,6 +231,7 @@ export default function DatabasesPage() {
   const [error, setError] = useState('')
   const [activeId, setActiveId] = useState(initialUi.activeId || null)
   const [showAddForm, setShowAddForm] = useState(false)
+  const [editingConnection, setEditingConnection] = useState(null)
   const [panelTab, setPanelTab] = useState(initialUi.panelTab || 'browse')
   const [openTableTabs, setOpenTableTabs] = useState(Array.isArray(initialUi.openTableTabs) ? initialUi.openTableTabs : [])
   const [browseSelection, setBrowseSelection] = useState(initialUi.browseSelection || null)
@@ -372,7 +373,7 @@ export default function DatabasesPage() {
           </div>
           <button
             type="button"
-            onClick={() => setShowAddForm(true)}
+            onClick={() => { setEditingConnection(null); setShowAddForm(true) }}
             className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold"
           >
             <Plus className="w-3.5 h-3.5" /> New connection
@@ -397,13 +398,19 @@ export default function DatabasesPage() {
           </div>
         )}
 
-        {showAddForm && (
+        {(showAddForm || editingConnection) && (
           <ConnectionForm
-            onCancel={() => setShowAddForm(false)}
+            connection={editingConnection}
+            onCancel={() => { setShowAddForm(false); setEditingConnection(null) }}
             onSaved={(c) => {
-              setConnections((prev) => [...prev, c].sort((a, b) => a.name.localeCompare(b.name)))
+              setConnections((prev) => {
+                const exists = prev.some((item) => item.id === c.id)
+                const next = exists ? prev.map((item) => (item.id === c.id ? c : item)) : [...prev, c]
+                return next.sort((a, b) => a.name.localeCompare(b.name))
+              })
               setActiveId(c.id)
               setShowAddForm(false)
+              setEditingConnection(null)
             }}
           />
         )}
@@ -424,6 +431,7 @@ export default function DatabasesPage() {
               onOpenTableFolder={onOpenTableFolder}
               onRoutineInspect={onRoutineInspect}
               onDeleted={onConnectionDeleted}
+              onEdit={(connection) => { setShowAddForm(false); setEditingConnection(connection) }}
               onRefresh={refresh}
             />
             {active && (
@@ -468,6 +476,7 @@ function SchemaNavigator({
   onOpenTableFolder,
   onRoutineInspect,
   onDeleted,
+  onEdit,
   onRefresh,
 }) {
   const dialog = useDialog()
@@ -680,6 +689,14 @@ function SchemaNavigator({
                       className="text-[11px] text-accent hover:underline disabled:opacity-50"
                     >
                       Test
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); onEdit(c) }}
+                      disabled={busyId === c.id}
+                      className="text-[11px] text-blue-300 hover:underline disabled:opacity-50"
+                    >
+                      Edit
                     </button>
                     <button
                       type="button"
@@ -3347,15 +3364,24 @@ function ScheduleTab({ connection }) {
 
 // ── Connection form (used for new only — edit later) ────────────
 
-function ConnectionForm({ onCancel, onSaved }) {
+function ConnectionForm({ connection = null, onCancel, onSaved }) {
+  const isEdit = !!connection
   const [defaultHost, setDefaultHost] = useState('127.0.0.1')
-  const [data, setData] = useState({
-    name: '', host: '', port: 3306, username: 'root', password: '', default_database: '',
-  })
+  const [data, setData] = useState(() => ({
+    name: connection?.name || '',
+    host: connection?.host || '',
+    port: connection?.port || 3306,
+    username: connection?.username || 'root',
+    password: '',
+    default_database: connection?.default_database || '',
+  }))
   const [busy, setBusy] = useState(false)
+  const [revealing, setRevealing] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
+    if (isEdit) return
     // Best-effort default the host to the server's external IP
     fetch('/api/system/stats').then((r) => r.json()).then((s) => {
       const ip = s?.public_ip || s?.host || ''
@@ -3365,18 +3391,55 @@ function ConnectionForm({ onCancel, onSaved }) {
       }
     }).catch(() => {})
     // eslint-disable-next-line
-  }, [])
+  }, [isEdit])
+
+  useEffect(() => {
+    setData({
+      name: connection?.name || '',
+      host: connection?.host || '',
+      port: connection?.port || 3306,
+      username: connection?.username || 'root',
+      password: '',
+      default_database: connection?.default_database || '',
+    })
+    setShowPassword(false)
+    setError('')
+  }, [connection])
+
+  const revealPassword = async () => {
+    if (!isEdit || data.password) {
+      setShowPassword((v) => !v)
+      return
+    }
+    setRevealing(true)
+    setError('')
+    try {
+      const res = await apiClient.revealDbConnectionPassword(connection.id)
+      setData((d) => ({ ...d, password: res.data.password || '' }))
+      setShowPassword(true)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not reveal saved password')
+    } finally {
+      setRevealing(false)
+    }
+  }
 
   const submit = async (e) => {
     e.preventDefault()
     setBusy(true)
     setError('')
     try {
-      const res = await apiClient.createDbConnection({
-        ...data,
+      const payload = {
+        name: data.name,
         host: data.host || defaultHost,
         port: Number(data.port) || 3306,
-      })
+        username: data.username,
+        default_database: data.default_database,
+      }
+      if (!isEdit || data.password) payload.password = data.password
+      const res = isEdit
+        ? await apiClient.updateDbConnection(connection.id, payload)
+        : await apiClient.createDbConnection(payload)
       onSaved(res.data.connection)
     } catch (err) {
       setError(err.response?.data?.error || 'Save failed')
@@ -3387,7 +3450,7 @@ function ConnectionForm({ onCancel, onSaved }) {
 
   return (
     <form onSubmit={submit} className="rounded border border-gray-700 bg-secondary p-5 mb-4 max-w-xl">
-      <h2 className="text-white font-semibold mb-3">New connection</h2>
+      <h2 className="text-white font-semibold mb-3">{isEdit ? `Edit ${connection.name}` : 'New connection'}</h2>
       <div className="grid grid-cols-2 gap-3">
         <label className="text-sm text-gray-300 col-span-2">
           Name
@@ -3427,13 +3490,25 @@ function ConnectionForm({ onCancel, onSaved }) {
           />
         </label>
         <label className="text-sm text-gray-300 col-span-2">
-          Password
-          <input
-            type="password"
-            value={data.password}
-            onChange={(e) => setData((d) => ({ ...d, password: e.target.value }))}
-            className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1 text-white"
-          />
+          Password {isEdit && <span className="text-gray-500">(leave blank to keep)</span>}
+          <div className="mt-1 flex">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              value={data.password}
+              onChange={(e) => setData((d) => ({ ...d, password: e.target.value }))}
+              className="w-full bg-primary border border-gray-700 rounded-l px-2 py-1 text-white"
+              placeholder={isEdit ? 'Saved password' : ''}
+            />
+            <button
+              type="button"
+              onClick={revealPassword}
+              disabled={revealing}
+              className="px-2 bg-primary border border-l-0 border-gray-700 rounded-r text-gray-300 hover:text-white hover:bg-gray-700 disabled:opacity-50"
+              title={showPassword ? 'Hide password' : isEdit && !data.password ? 'Reveal saved password' : 'Show password'}
+            >
+              {revealing ? <Loader2 className="w-4 h-4 animate-spin" /> : showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
         </label>
         <label className="text-sm text-gray-300 col-span-2">
           Default database (optional)
@@ -3455,8 +3530,8 @@ function ConnectionForm({ onCancel, onSaved }) {
           disabled={busy}
           className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
         >
-          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          Create connection
+          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : isEdit ? <Save className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+          {isEdit ? 'Save connection' : 'Create connection'}
         </button>
         <button
           type="button"
