@@ -2781,8 +2781,10 @@ function RestoreTab({ connection }) {
     const compatMsg = form.mariadb_mysql_compat
       ? ' MariaDB -> MySQL compatibility cleanup will be applied while streaming the dump.'
       : ''
-    const fastMsg = form.fast_restore && !form.mariadb_mysql_compat
-      ? ' Fast import will stream the SQL directly with relaxed checks for speed.'
+    const fastMsg = form.fast_restore
+      ? form.mariadb_mysql_compat
+        ? ' Fast import will run after compatibility cleanup with relaxed checks for speed.'
+        : ' Fast import will stream the SQL directly with relaxed checks for speed.'
       : ''
     const msg = targetExists
       ? `Restore into existing database "${target}"? Ascend will take a safety backup first, then ${form.replace_existing ? 'replace it' : 'import over it'}.${compatMsg}${fastMsg}`
@@ -2814,7 +2816,7 @@ function RestoreTab({ connection }) {
         collation: form.collation.trim() || 'utf8mb4_general_ci',
         replace_existing: shouldReplace,
         mariadb_mysql_compat: !!form.mariadb_mysql_compat,
-        fast_restore: !!form.fast_restore && !form.mariadb_mysql_compat,
+        fast_restore: !!form.fast_restore,
         confirm_text: shouldReplace ? target : '',
       })
       setJob(res.data.job)
@@ -2887,7 +2889,7 @@ function RestoreTab({ connection }) {
           <input
             type="checkbox"
             checked={!!form.mariadb_mysql_compat}
-            onChange={(e) => setForm((f) => ({ ...f, mariadb_mysql_compat: e.target.checked, fast_restore: e.target.checked ? false : f.fast_restore }))}
+            onChange={(e) => setForm((f) => ({ ...f, mariadb_mysql_compat: e.target.checked, fast_restore: e.target.checked ? true : f.fast_restore }))}
             className="mt-0.5"
           />
           <span>
@@ -2897,18 +2899,17 @@ function RestoreTab({ connection }) {
             </span>
           </span>
         </label>
-        <label className={`md:col-span-2 flex items-start gap-2 rounded border p-3 text-sm ${form.mariadb_mysql_compat ? 'border-gray-700 bg-primary/30 text-gray-500' : 'border-blue-500/30 bg-blue-500/10 text-blue-100'}`}>
+        <label className="md:col-span-2 flex items-start gap-2 rounded border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-100">
           <input
             type="checkbox"
-            checked={!!form.fast_restore && !form.mariadb_mysql_compat}
-            disabled={!!form.mariadb_mysql_compat}
+            checked={!!form.fast_restore}
             onChange={(e) => setForm((f) => ({ ...f, fast_restore: e.target.checked }))}
             className="mt-0.5"
           />
           <span>
             Fast import
-            <span className={`block mt-1 text-xs ${form.mariadb_mysql_compat ? 'text-gray-500' : 'text-blue-100/80'}`}>
-              Streams the SQL file in large chunks and temporarily relaxes foreign key, unique, and autocommit checks. Disabled when MariaDB cleanup is enabled.
+            <span className="block mt-1 text-xs text-blue-100/80">
+              Temporarily relaxes foreign key, unique, and autocommit checks. With MariaDB cleanup enabled, Ascend cleans each line first, then imports it through the fast restore session.
             </span>
           </span>
         </label>

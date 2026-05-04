@@ -213,10 +213,12 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
             total = max(path.stat().st_size, 1)
             done = 0
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-            use_fast_restore = bool(fast_restore) and not mariadb_mysql_compat
+            use_fast_restore = bool(fast_restore)
             progress_step = 8 * 1024 * 1024
             last_progress_done = 0
             phase = (
+                'Fast importing dump with MariaDB -> MySQL cleanup'
+                if use_fast_restore and mariadb_mysql_compat else
                 'Fast importing dump'
                 if use_fast_restore else
                 'Importing dump with MariaDB -> MySQL cleanup'
@@ -237,6 +239,20 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
                     if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
                         raise
                     pipe_closed_early = True
+            if mariadb_mysql_compat:
+                compat_sql = (
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_TRANS_TABLES', '');\n"
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_ALL_TABLES', '');\n"
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_DATE', '');\n"
+                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_IN_DATE', '');\n"
+                ).encode('utf-8')
+                try:
+                    proc.stdin.write(compat_sql)
+                except (BrokenPipeError, OSError) as exc:
+                    if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
+                        raise
+                    pipe_closed_early = True
+            if use_fast_restore and not mariadb_mysql_compat:
                 with open(path, 'rb') as fh:
                     while not pipe_closed_early:
                         chunk = fh.read(1024 * 1024)
@@ -253,27 +269,7 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
                         if done == total or done - last_progress_done >= progress_step:
                             _restore_job_update(job_id, progress=20 + int(min(done / total, 1) * 75))
                             last_progress_done = done
-                if not pipe_closed_early:
-                    try:
-                        proc.stdin.write(b'\nCOMMIT;\nSET SESSION autocommit=1;\nSET SESSION unique_checks=1;\nSET SESSION foreign_key_checks=1;\n')
-                    except (BrokenPipeError, OSError) as exc:
-                        if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
-                            raise
-                        pipe_closed_early = True
             else:
-                if mariadb_mysql_compat:
-                    compat_sql = (
-                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_TRANS_TABLES', '');\n"
-                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_ALL_TABLES', '');\n"
-                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_DATE', '');\n"
-                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_IN_DATE', '');\n"
-                    ).encode('utf-8')
-                    try:
-                        proc.stdin.write(compat_sql)
-                    except (BrokenPipeError, OSError) as exc:
-                        if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
-                            raise
-                        pipe_closed_early = True
                 with open(path, 'rb') as fh:
                     for line in fh:
                         done += len(line)
@@ -290,6 +286,13 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
                             last_progress_done = done
                         if pipe_closed_early:
                             break
+            if use_fast_restore and not pipe_closed_early:
+                try:
+                    proc.stdin.write(b'\nCOMMIT;\nSET SESSION autocommit=1;\nSET SESSION unique_checks=1;\nSET SESSION foreign_key_checks=1;\n')
+                except (BrokenPipeError, OSError) as exc:
+                    if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
+                        raise
+                    pipe_closed_early = True
             try:
                 proc.stdin.close()
             except (BrokenPipeError, OSError):
@@ -323,7 +326,7 @@ def start_restore_job(conn, backup_id, target_database, collation, replace_exist
         'collation': collation,
         'replace_existing': bool(replace_existing),
         'mariadb_mysql_compat': bool(mariadb_mysql_compat),
-        'fast_restore': bool(fast_restore) and not bool(mariadb_mysql_compat),
+        'fast_restore': bool(fast_restore),
         'status': 'queued',
         'phase': 'Queued',
         'progress': 0,
