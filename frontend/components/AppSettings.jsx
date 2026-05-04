@@ -7,6 +7,18 @@ import { useDialog } from '@/lib/dialog'
 
 const PHP_PUBLIC_DIR_PRESETS = ['public', 'web', 'frontend/web', 'backend/web']
 
+function splitPhpPublicSubdirectory(subdirectory) {
+  const raw = (subdirectory || '').trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  if (!raw) return null
+  const publicPath = PHP_PUBLIC_DIR_PRESETS
+    .slice()
+    .sort((a, b) => b.length - a.length)
+    .find((preset) => raw === preset || raw.endsWith(`/${preset}`))
+  if (!publicPath) return null
+  const rootPath = raw === publicPath ? '' : raw.slice(0, -publicPath.length).replace(/\/+$/g, '')
+  return { rootPath, publicPath }
+}
+
 export default function AppSettings({ app, onUpdate }) {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
@@ -204,16 +216,16 @@ export default function AppSettings({ app, onUpdate }) {
     setWebhookInfo(null)
     try {
       const payload = { ...formData }
-      const subdirAsPublicDir = payload.app_type === 'php' && PHP_PUBLIC_DIR_PRESETS.includes((payload.subdirectory || '').trim())
-      if (subdirAsPublicDir) {
-        payload.php_public_path = (payload.subdirectory || '').trim()
-        payload.subdirectory = ''
+      const splitPublicDir = payload.app_type === 'php' ? splitPhpPublicSubdirectory(payload.subdirectory) : null
+      if (splitPublicDir) {
+        payload.php_public_path = splitPublicDir.publicPath
+        payload.subdirectory = splitPublicDir.rootPath
       }
       const res = await apiClient.updateApp(app.id, {
         ...payload,
         app_port: ['php', 'static'].includes(payload.app_type) ? null : (payload.app_port ? parseInt(payload.app_port, 10) : null),
       })
-      setFormData((prev) => subdirAsPublicDir ? { ...prev, subdirectory: '', php_public_path: payload.php_public_path } : prev)
+      setFormData((prev) => splitPublicDir ? { ...prev, subdirectory: payload.subdirectory, php_public_path: payload.php_public_path } : prev)
       setSaved(true)
       if (res.data.github_webhook) setWebhookInfo(res.data.github_webhook)
       if (onUpdate) onUpdate(res.data)

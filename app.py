@@ -3011,6 +3011,17 @@ def _write_app_env(app_row, deploy_dir, log):
         log.write("  .env written\n")
 
 
+def _php_composer_dir(app_row, deploy_dir):
+    if (deploy_dir / 'composer.json').exists():
+        return deploy_dir
+    public_path = _php_public_path(app_row)
+    if public_path:
+        parent = (deploy_dir / public_path).parent
+        if parent != deploy_dir and (parent / 'composer.json').exists():
+            return parent
+    return deploy_dir
+
+
 def _run_php_build(app_row, deploy_dir, log):
     version = (app_row.php_version or '').strip() or 'system default'
     public_dir = _php_source_public_dir(app_row)
@@ -3018,10 +3029,11 @@ def _run_php_build(app_row, deploy_dir, log):
     log.write(f"  Source web root: {public_dir}\n")
     log.write(f"  PHP-FPM socket: {_php_fpm_socket(app_row)}\n")
     composer_enabled = app_row.composer_install is not False
-    if composer_enabled and (deploy_dir / 'composer.json').exists():
+    composer_dir = _php_composer_dir(app_row, deploy_dir)
+    if composer_enabled and (composer_dir / 'composer.json').exists():
         command = (app_row.composer_command or 'composer install --no-dev --optimize-autoloader').strip()
-        log.write(f"  Running Composer: {command}\n")
-        if not run_cmd(command, log, cwd=deploy_dir, shell=True):
+        log.write(f"  Running Composer in {composer_dir}: {command}\n")
+        if not run_cmd(command, log, cwd=composer_dir, shell=True):
             raise RuntimeError("Composer install failed")
     elif composer_enabled:
         log.write("  composer.json not found; skipping Composer.\n")
