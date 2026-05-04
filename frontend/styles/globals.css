@@ -264,16 +264,19 @@ body {
 [data-theme='daylight'] .text-blue-300,
 [data-theme='daylight'] .text-blue-400,
 [data-theme='daylight'] .text-blue-500,
+[data-theme='daylight'] .text-blue-100\/80,
 [data-theme='mint'] .text-blue-100,
 [data-theme='mint'] .text-blue-200,
 [data-theme='mint'] .text-blue-300,
 [data-theme='mint'] .text-blue-400,
 [data-theme='mint'] .text-blue-500,
+[data-theme='mint'] .text-blue-100\/80,
 [data-theme='paper'] .text-blue-100,
 [data-theme='paper'] .text-blue-200,
 [data-theme='paper'] .text-blue-300,
 [data-theme='paper'] .text-blue-400,
-[data-theme='paper'] .text-blue-500 {
+[data-theme='paper'] .text-blue-500,
+[data-theme='paper'] .text-blue-100\/80 {
   color: rgb(29 78 216) !important;
 }
 

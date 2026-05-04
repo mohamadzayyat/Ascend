@@ -163,7 +163,7 @@ def _rewrite_dump_line_for_target(line, target_db, charset, collation, mariadb_m
     return line
 
 
-def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, replace_existing, mariadb_mysql_compat):
+def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, replace_existing, mariadb_mysql_compat, fast_restore):
     with _app.app_context():
         conn = _db.session.get(_DatabaseConnection, conn_id)
         archive = _db.session.get(_BackupArchive, backup_id)
@@ -213,37 +213,83 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
             total = max(path.stat().st_size, 1)
             done = 0
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-            phase = 'Importing dump with MariaDB -> MySQL cleanup' if mariadb_mysql_compat else 'Importing dump'
+            use_fast_restore = bool(fast_restore) and not mariadb_mysql_compat
+            progress_step = 8 * 1024 * 1024
+            last_progress_done = 0
+            phase = (
+                'Fast importing dump'
+                if use_fast_restore else
+                'Importing dump with MariaDB -> MySQL cleanup'
+                if mariadb_mysql_compat else
+                'Importing dump'
+            )
             _restore_job_update(job_id, phase=phase, progress=20)
             pipe_closed_early = False
-            if mariadb_mysql_compat:
-                compat_sql = (
-                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_TRANS_TABLES', '');\n"
-                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_ALL_TABLES', '');\n"
-                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_DATE', '');\n"
-                    "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_IN_DATE', '');\n"
+            if use_fast_restore:
+                fast_sql = (
+                    "SET SESSION foreign_key_checks=0;\n"
+                    "SET SESSION unique_checks=0;\n"
+                    "SET SESSION autocommit=0;\n"
                 ).encode('utf-8')
                 try:
-                    proc.stdin.write(compat_sql)
+                    proc.stdin.write(fast_sql)
                 except (BrokenPipeError, OSError) as exc:
                     if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
                         raise
                     pipe_closed_early = True
-            with open(path, 'rb') as fh:
-                for line in fh:
-                    done += len(line)
-                    out_line = _rewrite_dump_line_for_target(line, target_database, charset, collation, mariadb_mysql_compat)
-                    if out_line and not pipe_closed_early:
+                with open(path, 'rb') as fh:
+                    while not pipe_closed_early:
+                        chunk = fh.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        done += len(chunk)
                         try:
-                            proc.stdin.write(out_line)
+                            proc.stdin.write(chunk)
                         except (BrokenPipeError, OSError) as exc:
                             if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
                                 raise
                             pipe_closed_early = True
-                    if done == total or done % (512 * 1024) < len(line):
-                        _restore_job_update(job_id, progress=20 + int(min(done / total, 1) * 75))
-                    if pipe_closed_early:
-                        break
+                            break
+                        if done == total or done - last_progress_done >= progress_step:
+                            _restore_job_update(job_id, progress=20 + int(min(done / total, 1) * 75))
+                            last_progress_done = done
+                if not pipe_closed_early:
+                    try:
+                        proc.stdin.write(b'\nCOMMIT;\nSET SESSION autocommit=1;\nSET SESSION unique_checks=1;\nSET SESSION foreign_key_checks=1;\n')
+                    except (BrokenPipeError, OSError) as exc:
+                        if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
+                            raise
+                        pipe_closed_early = True
+            else:
+                if mariadb_mysql_compat:
+                    compat_sql = (
+                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_TRANS_TABLES', '');\n"
+                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'STRICT_ALL_TABLES', '');\n"
+                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_DATE', '');\n"
+                        "SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_ZERO_IN_DATE', '');\n"
+                    ).encode('utf-8')
+                    try:
+                        proc.stdin.write(compat_sql)
+                    except (BrokenPipeError, OSError) as exc:
+                        if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
+                            raise
+                        pipe_closed_early = True
+                with open(path, 'rb') as fh:
+                    for line in fh:
+                        done += len(line)
+                        out_line = _rewrite_dump_line_for_target(line, target_database, charset, collation, mariadb_mysql_compat)
+                        if out_line and not pipe_closed_early:
+                            try:
+                                proc.stdin.write(out_line)
+                            except (BrokenPipeError, OSError) as exc:
+                                if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != 32:
+                                    raise
+                                pipe_closed_early = True
+                        if done == total or done - last_progress_done >= progress_step:
+                            _restore_job_update(job_id, progress=20 + int(min(done / total, 1) * 75))
+                            last_progress_done = done
+                        if pipe_closed_early:
+                            break
             try:
                 proc.stdin.close()
             except (BrokenPipeError, OSError):
@@ -261,7 +307,7 @@ def _run_restore_job(job_id, conn_id, backup_id, target_database, collation, rep
             _restore_job_update(job_id, status='failed', phase='Restore failed', progress=100, error=str(exc)[:2000], completed_at=_iso_utc(datetime.now(timezone.utc)), safety_backup_id=safety_id)
 
 
-def start_restore_job(conn, backup_id, target_database, collation, replace_existing=True, mariadb_mysql_compat=False):
+def start_restore_job(conn, backup_id, target_database, collation, replace_existing=True, mariadb_mysql_compat=False, fast_restore=False):
     backup_id = int(backup_id)
     target_database = _mysql_ident(target_database, 'database name')
     collation = _mysql_collation(collation or 'utf8mb4_general_ci')
@@ -277,6 +323,7 @@ def start_restore_job(conn, backup_id, target_database, collation, replace_exist
         'collation': collation,
         'replace_existing': bool(replace_existing),
         'mariadb_mysql_compat': bool(mariadb_mysql_compat),
+        'fast_restore': bool(fast_restore) and not bool(mariadb_mysql_compat),
         'status': 'queued',
         'phase': 'Queued',
         'progress': 0,
@@ -288,7 +335,7 @@ def start_restore_job(conn, backup_id, target_database, collation, replace_exist
     _restore_job_persist(job_id, job)
     threading.Thread(
         target=_run_restore_job,
-        args=[job_id, conn.id, backup_id, target_database, collation, bool(replace_existing), bool(mariadb_mysql_compat)],
+        args=[job_id, conn.id, backup_id, target_database, collation, bool(replace_existing), bool(mariadb_mysql_compat), bool(fast_restore)],
         daemon=True,
     ).start()
     return job

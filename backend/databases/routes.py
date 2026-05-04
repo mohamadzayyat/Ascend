@@ -1869,6 +1869,7 @@ def api_db_restore_start(conn_id):
             data.get('collation') or 'utf8mb4_general_ci',
             bool(data.get('replace_existing', True)),
             bool(data.get('mariadb_mysql_compat', False)),
+            bool(data.get('fast_restore', False)),
         )
     except LookupError as exc:
         return jsonify({'error': str(exc)}), 404
