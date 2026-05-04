@@ -227,6 +227,40 @@ run_apt_get() {
     DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 "$@"
 }
 
+python_venv_ready() {
+    local probe_dir
+    probe_dir="$(mktemp -d)"
+    if python3 -m venv "$probe_dir" >/dev/null 2>&1; then
+        rm -rf "$probe_dir"
+        return 0
+    fi
+    rm -rf "$probe_dir"
+    return 1
+}
+
+ensure_python_venv() {
+    if python_venv_ready; then
+        ok "Python venv support already installed"
+        return
+    fi
+
+    local py_minor venv_pkg
+    py_minor=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    venv_pkg="python${py_minor}-venv"
+    if apt-cache show "$venv_pkg" >/dev/null 2>&1; then
+        warn "Python venv support is missing; installing $venv_pkg..."
+        recover_dpkg_if_needed
+        run_apt_get install -y -qq "$venv_pkg"
+    else
+        warn "Python venv support is missing; installing python3-venv..."
+        recover_dpkg_if_needed
+        run_apt_get install -y -qq python3-venv
+    fi
+
+    python_venv_ready || die "Python venv support is still unavailable after installation. Try: apt install ${venv_pkg} python3-venv"
+    ok "Python venv support installed"
+}
+
 # Check a binary; install apt packages only if it is missing.
 # Note: we deliberately do NOT redirect stderr to /dev/null on apt-get install
 # — silent failures here are nearly impossible to debug (the user just sees
@@ -249,7 +283,9 @@ install_system_deps() {
     recover_dpkg_if_needed
     run_apt_get update -qq
 
-    apt_install python3  "Python 3" python3 python3-pip python3-venv
+    apt_install python3  "Python 3" python3
+    apt_install pip3     "pip"      python3-pip
+    ensure_python_venv
     apt_install git      "Git"      git
     apt_install curl     "curl"     curl wget
     apt_install update-ca-certificates "CA certificates" ca-certificates
