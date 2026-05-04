@@ -3868,7 +3868,9 @@ def _nginx_app_route_markers(app_row):
 
 def _cleanup_stale_nginx_sites_for_app(app_row, current_config_path, current_enabled_path, log_file):
     markers = _nginx_app_route_markers(app_row)
-    if not markers:
+    server_names = _app_server_names(app_row) or [app_row.domain]
+    server_names = [name for name in server_names if name]
+    if not markers and not server_names:
         return
     current_paths = {Path(current_config_path).resolve(strict=False), Path(current_enabled_path).resolve(strict=False)}
     candidates = []
@@ -3883,9 +3885,12 @@ def _cleanup_stale_nginx_sites_for_app(app_row, current_config_path, current_ena
             if resolved in current_paths:
                 continue
             text = candidate.read_text(encoding='utf-8', errors='ignore')
-            if not any(marker in text for marker in markers):
-                continue
-            if app_row.domain and re.search(rf'\bserver_name\s+[^;]*\b{re.escape(app_row.domain)}\b', text):
+            has_app_marker = any(marker in text for marker in markers)
+            has_same_server_name = any(
+                re.search(rf'\bserver_name\s+[^;]*\b{re.escape(name)}\b', text)
+                for name in server_names
+            )
+            if not has_app_marker and not has_same_server_name:
                 continue
             candidate.unlink()
             removed.append(str(candidate))
@@ -3940,8 +3945,11 @@ def setup_nginx_config(app_row, log_file):
         _cleanup_stale_nginx_sites_for_app(app_row, config_path, enabled_path, log_file)
 
         test = subprocess.run(['nginx', '-t'], capture_output=True)
+        test_stderr = test.stderr.decode('utf-8', errors='replace').strip()
+        if test.returncode == 0 and test_stderr:
+            log_file.write(f"  Nginx test warnings:\n{test_stderr}\n")
         if test.returncode != 0:
-            log_file.write(f"  Nginx test failed: {test.stderr.decode()}\n")
+            log_file.write(f"  Nginx test failed: {test_stderr}\n")
             # Roll back
             if backup_path and os.path.exists(backup_path):
                 with open(backup_path, 'rb') as src, open(config_path, 'wb') as dst:
