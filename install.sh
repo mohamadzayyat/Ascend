@@ -442,14 +442,20 @@ get_source() {
 
 setup_python() {
     section "Setting up Python environment"
+    ensure_python_venv
 
-    # Recreate venv if the python binary inside it is missing (broken venv)
-    if [[ -d "$INSTALL_DIR/venv" && ! -x "$INSTALL_DIR/venv/bin/python3" ]]; then
+    # Recreate venv if it is missing key binaries from a partial previous run.
+    if [[ -d "$INSTALL_DIR/venv" && ( ! -x "$INSTALL_DIR/venv/bin/python3" || ! -x "$INSTALL_DIR/venv/bin/pip" ) ]]; then
         warn "Broken virtual environment detected — recreating…"
         rm -rf "$INSTALL_DIR/venv"
     fi
 
-    python3 -m venv "$INSTALL_DIR/venv"
+    if ! python3 -m venv "$INSTALL_DIR/venv"; then
+        warn "Virtual environment creation failed; reinstalling Python venv support and retrying..."
+        rm -rf "$INSTALL_DIR/venv"
+        ensure_python_venv
+        python3 -m venv "$INSTALL_DIR/venv"
+    fi
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
     ok "Python dependencies installed"
