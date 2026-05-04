@@ -3429,8 +3429,11 @@ def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
         return False
 
 
-def _verify_http_challenge_route(domain, log_file):
-    """Check that public HTTP requests for this domain hit our Nginx vhost."""
+def _verify_http_challenge_route(domains, log_file):
+    """Check that public HTTP requests for these domains hit our Nginx vhost."""
+    if isinstance(domains, str):
+        domains = [domains]
+    domains = [d for d in (domains or []) if d]
     token = f"ascend-probe-{secrets.token_hex(8)}"
     body = f"ascend-ok-{secrets.token_hex(8)}"
     challenge_dir = ACME_WEBROOT / '.well-known' / 'acme-challenge'
@@ -3440,18 +3443,19 @@ def _verify_http_challenge_route(domain, log_file):
         challenge_dir.mkdir(parents=True, exist_ok=True)
         challenge_file.write_text(body, encoding='utf-8')
 
-        url = f'http://{domain}/.well-known/acme-challenge/{token}'
-        log_file.write(f"  Checking HTTP challenge route: {url}\n")
-        with _urlreq.urlopen(url, timeout=10) as resp:
-            returned = resp.read().decode('utf-8', errors='replace').strip()
-            status = getattr(resp, 'status', None) or resp.getcode()
+        for domain in domains:
+            url = f'http://{domain}/.well-known/acme-challenge/{token}'
+            log_file.write(f"  Checking HTTP challenge route: {url}\n")
+            with _urlreq.urlopen(url, timeout=10) as resp:
+                returned = resp.read().decode('utf-8', errors='replace').strip()
+                status = getattr(resp, 'status', None) or resp.getcode()
 
-        if status != 200 or returned != body:
-            log_file.write(
-                f"  HTTP challenge check failed: status={status}, "
-                f"expected={body!r}, got={returned[:200]!r}\n"
-            )
-            return False
+            if status != 200 or returned != body:
+                log_file.write(
+                    f"  HTTP challenge check failed for {domain}: status={status}, "
+                    f"expected={body!r}, got={returned[:200]!r}\n"
+                )
+                return False
 
         log_file.write("  HTTP challenge route is reachable.\n")
         return True
@@ -3746,9 +3750,9 @@ def _build_nginx_config(app_row, cert_info=None):
     )
     challenge = (
         f"    location ^~ /.well-known/acme-challenge/ {{\n"
-        f"        root {ACME_WEBROOT};\n"
+        f"        alias {ACME_WEBROOT / '.well-known' / 'acme-challenge'}/;\n"
         f"        default_type text/plain;\n"
-        f"        try_files $uri =404;\n"
+        f"        add_header Cache-Control no-store always;\n"
         f"    }}\n"
     )
     if _is_php_app(app_row):
@@ -3905,7 +3909,7 @@ def setup_nginx_config(app_row, log_file):
                     "challenge preflight because Cloudflare may return edge-layer responses. "
                     "Certbot will still verify issuance.\n"
                 )
-            elif not _verify_http_challenge_route(app_row.domain, log_file):
+            elif not _verify_http_challenge_route(server_names, log_file):
                 log_file.write(
                     "  SSL preflight failed: Let's Encrypt will not be able to reach "
                     "this domain over HTTP. Check DNS, firewall, port 80, and proxy settings.\n"
