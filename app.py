@@ -3843,6 +3843,48 @@ def _run_certbot_nginx(domains, log_file):
     return cert
 
 
+def _nginx_app_route_markers(app_row):
+    markers = []
+    if _is_php_app(app_row):
+        markers.append(f"root {str(_php_public_dir(app_row))};")
+    elif _is_static_app(app_row):
+        markers.append(f"root {str(_static_nginx_root(app_row))};")
+    elif app_row.app_port:
+        markers.append(f"proxy_pass http://127.0.0.1:{app_row.app_port};")
+    return markers
+
+
+def _cleanup_stale_nginx_sites_for_app(app_row, current_config_path, current_enabled_path, log_file):
+    markers = _nginx_app_route_markers(app_row)
+    if not markers:
+        return
+    current_paths = {Path(current_config_path).resolve(strict=False), Path(current_enabled_path).resolve(strict=False)}
+    candidates = []
+    for root in (Path('/etc/nginx/sites-enabled'), Path('/etc/nginx/sites-available')):
+        if root.exists():
+            candidates.extend([p for p in root.iterdir() if p.name != app_row.domain])
+
+    removed = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=False)
+            if resolved in current_paths:
+                continue
+            text = candidate.read_text(encoding='utf-8', errors='ignore')
+            if not any(marker in text for marker in markers):
+                continue
+            if app_row.domain and re.search(rf'\bserver_name\s+[^;]*\b{re.escape(app_row.domain)}\b', text):
+                continue
+            candidate.unlink()
+            removed.append(str(candidate))
+        except OSError:
+            continue
+        except Exception:
+            continue
+    if removed:
+        log_file.write(f"  Removed stale Nginx site(s): {', '.join(removed)}\n")
+
+
 def setup_nginx_config(app_row, log_file):
     """Write an Nginx virtual host and optionally obtain an SSL cert.
 
@@ -3882,6 +3924,8 @@ def setup_nginx_config(app_row, log_file):
 
         if not os.path.exists(enabled_path):
             os.symlink(config_path, enabled_path)
+
+        _cleanup_stale_nginx_sites_for_app(app_row, config_path, enabled_path, log_file)
 
         test = subprocess.run(['nginx', '-t'], capture_output=True)
         if test.returncode != 0:
