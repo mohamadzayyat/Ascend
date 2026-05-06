@@ -2103,7 +2103,7 @@ def _check_repo_subdirectory(user_id, github_url, branch, subdirectory, local_ba
         status, resp = _github_api('GET', f'/repos/{owner}/{repo}/contents/{encoded_path}?ref={_urlquote(ref, safe="")}', cred.token, timeout=15)
     except Exception as exc:
         return {'ok': False, 'path': normalized, 'branch': ref, 'error': f'GitHub check failed: {exc}'}
-    if status == 200 and isinstance(resp, dict) and resp.get('type') == 'dir':
+    if status == 200 and (isinstance(resp, list) or (isinstance(resp, dict) and resp.get('type') == 'dir')):
         return {'ok': True, 'path': normalized, 'source': 'github', 'branch': ref}
     if status == 200:
         return {'ok': False, 'path': normalized, 'branch': ref, 'error': f'"{normalized}" exists on branch {ref}, but it is not a directory.'}
