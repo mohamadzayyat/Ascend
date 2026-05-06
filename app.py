@@ -2082,8 +2082,11 @@ def _check_repo_subdirectory(user_id, github_url, branch, subdirectory, local_ba
         return {'ok': False, 'path': subdirectory, 'error': str(exc)}
 
     local = (local_base / normalized) if local_base else None
-    if local and local.exists() and local.is_dir():
-        return {'ok': True, 'path': normalized, 'source': 'local'}
+    try:
+        if local and local.exists() and local.is_dir():
+            return {'ok': True, 'path': normalized, 'source': 'local'}
+    except OSError as exc:
+        return {'ok': False, 'path': normalized, 'error': f'Could not check local {label} path: {exc}'}
 
     cred = GitHubCredential.query.filter_by(user_id=user_id).first()
     if not cred:
@@ -2091,11 +2094,19 @@ def _check_repo_subdirectory(user_id, github_url, branch, subdirectory, local_ba
     owner, repo = _parse_github_repo(github_url)
     if not owner or not repo:
         return {'ok': False, 'path': normalized, 'error': f'Could not parse the {label} GitHub URL.'}
-    ref = _normalize_deploy_branch({'github_branch': branch or 'main'}, branch)
+    try:
+        ref = _normalize_deploy_branch({'github_branch': branch or 'main'}, branch)
+    except ValueError as exc:
+        return {'ok': False, 'path': normalized, 'error': str(exc)}
     encoded_path = '/'.join(_urlquote(part, safe='') for part in normalized.split('/'))
-    status, resp = _github_api('GET', f'/repos/{owner}/{repo}/contents/{encoded_path}?ref={_urlquote(ref, safe="")}', cred.token, timeout=15)
+    try:
+        status, resp = _github_api('GET', f'/repos/{owner}/{repo}/contents/{encoded_path}?ref={_urlquote(ref, safe="")}', cred.token, timeout=15)
+    except Exception as exc:
+        return {'ok': False, 'path': normalized, 'branch': ref, 'error': f'GitHub check failed: {exc}'}
     if status == 200 and isinstance(resp, dict) and resp.get('type') == 'dir':
         return {'ok': True, 'path': normalized, 'source': 'github', 'branch': ref}
+    if status == 200:
+        return {'ok': False, 'path': normalized, 'branch': ref, 'error': f'"{normalized}" exists on branch {ref}, but it is not a directory.'}
     if status == 404:
         return {'ok': False, 'path': normalized, 'branch': ref, 'error': f'Subdirectory "{normalized}" was not found on branch {ref}.'}
     return {'ok': False, 'path': normalized, 'branch': ref, 'error': (resp or {}).get('message') or f'GitHub check failed ({status}).'}
@@ -2608,7 +2619,10 @@ def _github_api(method, path, token, body=None, timeout=10):
     try:
         with _urlreq.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode('utf-8', errors='replace') or 'null'
-            return resp.status, json.loads(raw)
+            try:
+                return resp.status, json.loads(raw)
+            except json.JSONDecodeError:
+                return resp.status, {'message': raw[:500] or 'GitHub returned a non-JSON response.'}
     except _urlerr.HTTPError as e:
         raw = (e.read() or b'').decode('utf-8', errors='replace')
         try:
@@ -2696,7 +2710,11 @@ def api_project_subdirectory_check(project_id):
         return jsonify({'error': 'Unauthorized'}), 403
     subdirectory = (request.args.get('path') or '').strip()
     branch = (request.args.get('branch') or project.github_branch or 'main').strip()
-    result = _check_project_subdirectory(project, subdirectory, branch)
+    try:
+        result = _check_project_subdirectory(project, subdirectory, branch)
+    except Exception as exc:
+        print(f'[subdirectory-check] project={project_id} path={subdirectory!r} failed: {exc}', file=sys.stderr)
+        return jsonify({'ok': False, 'path': subdirectory, 'error': f'Could not verify subdirectory: {exc}'}), 500
     return jsonify(result), (200 if result.get('ok') else 404)
 
 
@@ -2708,7 +2726,11 @@ def api_app_subdirectory_check(app_id):
         return jsonify({'error': 'Unauthorized'}), 403
     subdirectory = (request.args.get('path') or '').strip()
     branch = (request.args.get('branch') or app_row_branch(app_row) or 'main').strip()
-    result = _check_app_subdirectory(app_row, subdirectory, branch) if _project_is_multi_repo(app_row.project) else _check_project_subdirectory(app_row.project, subdirectory, branch)
+    try:
+        result = _check_app_subdirectory(app_row, subdirectory, branch) if _project_is_multi_repo(app_row.project) else _check_project_subdirectory(app_row.project, subdirectory, branch)
+    except Exception as exc:
+        print(f'[subdirectory-check] app={app_id} path={subdirectory!r} failed: {exc}', file=sys.stderr)
+        return jsonify({'ok': False, 'path': subdirectory, 'error': f'Could not verify subdirectory: {exc}'}), 500
     return jsonify(result), (200 if result.get('ok') else 404)
 
 

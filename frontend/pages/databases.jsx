@@ -4,7 +4,7 @@ import {
   Database, Plus, Trash2, Play, Download, RefreshCw, Loader2,
   CheckCircle2, XCircle, AlertTriangle, Save, Pencil, Calendar, Table as TableIcon,
   ChevronDown, ChevronRight, Folder, Server, Eye, Code2, ScrollText, Search, X,
-  UploadCloud, RotateCcw, EyeOff,
+  UploadCloud, RotateCcw, EyeOff, Copy,
 } from 'lucide-react'
 import { apiClient } from '@/lib/api'
 
@@ -969,19 +969,25 @@ function ConnectionPanel({
 // ── Searchable tables / views grid (opened from navigator folder) ─
 
 function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
+  const dialog = useDialog()
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
   const [q, setQ] = useState('')
+  const [selectedTables, setSelectedTables] = useState([])
+  const [busyAction, setBusyAction] = useState('')
 
-  useEffect(() => {
+  const loadItems = useCallback(() => {
     let c = false
     setLoading(true)
+    setError('')
     apiClient.getDatabaseSchema(connection.id, database)
       .then((res) => {
         if (c) return
         const raw = folder === 'tables' ? (res.data.tables || []) : (res.data.views || [])
         setItems(raw)
+        setSelectedTables((current) => current.filter((name) => raw.some((it) => it.name === name)))
         setError('')
       })
       .catch((err) => !c && setError(err.response?.data?.error || 'Failed to load'))
@@ -989,11 +995,94 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
     return () => { c = true }
   }, [connection.id, database, folder])
 
+  useEffect(() => {
+    return loadItems()
+  }, [loadItems])
+
+  useEffect(() => {
+    setSelectedTables([])
+    setMessage('')
+  }, [connection.id, database, folder])
+
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase()
     if (!s) return items
     return items.filter((it) => it.name.toLowerCase().includes(s))
   }, [items, q])
+
+  const selectedSet = useMemo(() => new Set(selectedTables), [selectedTables])
+  const selectableNames = useMemo(() => filtered.map((it) => it.name), [filtered])
+  const allFilteredSelected = selectableNames.length > 0 && selectableNames.every((name) => selectedSet.has(name))
+
+  const toggleTable = (name) => {
+    setSelectedTables((current) => current.includes(name)
+      ? current.filter((item) => item !== name)
+      : [...current, name])
+  }
+
+  const toggleFiltered = () => {
+    setSelectedTables((current) => {
+      const currentSet = new Set(current)
+      if (allFilteredSelected) {
+        return current.filter((name) => !selectableNames.includes(name))
+      }
+      selectableNames.forEach((name) => currentSet.add(name))
+      return [...currentSet]
+    })
+  }
+
+  const runSelectedAction = async (action) => {
+    if (!selectedTables.length || busyAction) return
+    setError('')
+    setMessage('')
+    const count = selectedTables.length
+    if (action === 'export') {
+      setBusyAction(action)
+      try {
+        const res = await apiClient.exportTables(connection.id, { database, tables: selectedTables })
+        const backup = res.data.backup
+        setMessage(`Exported ${count} table${count === 1 ? '' : 's'} to ${backup?.filename || 'a SQL backup'}.`)
+        if (backup?.id) window.location.href = apiClient.downloadDbBackupUrl(backup.id)
+      } catch (err) {
+        setError(err.response?.data?.error || 'Export failed')
+      } finally {
+        setBusyAction('')
+      }
+      return
+    }
+    const labels = {
+      copy: ['Copy selected tables?', 'Copy table'],
+      truncate: ['Truncate selected tables?', 'Truncate tables'],
+      delete: ['Delete selected tables?', 'Delete tables'],
+    }
+    const [title, confirmLabel] = labels[action] || labels.copy
+    const destructive = action === 'truncate' || action === 'delete'
+    const ok = await dialog.confirm({
+      title,
+      message: `${confirmLabel.replace(' tables', '').replace(' table', '')} ${count} selected table${count === 1 ? '' : 's'} in ${database}?\n\n${destructive ? 'This cannot be undone.' : 'Ascend will create new *_copy tables.'}`,
+      confirmLabel,
+      tone: destructive ? 'danger' : 'warning',
+    })
+    if (!ok) return
+    setBusyAction(action)
+    try {
+      const res = await apiClient.bulkTableAction(connection.id, { database, tables: selectedTables, action })
+      if (action === 'copy') {
+        const copied = res.data.copied || []
+        setMessage(`Copied ${copied.length || count} table${count === 1 ? '' : 's'}.`)
+      } else if (action === 'truncate') {
+        setMessage(`Truncated ${count} table${count === 1 ? '' : 's'}.`)
+      } else {
+        setMessage(`Deleted ${count} table${count === 1 ? '' : 's'}.`)
+        setSelectedTables([])
+      }
+      loadItems()
+    } catch (err) {
+      setError(err.response?.data?.error || `${confirmLabel} failed`)
+    } finally {
+      setBusyAction('')
+    }
+  }
 
   return (
     <div className="flex flex-col gap-3 h-full min-h-0">
@@ -1013,7 +1102,19 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
           className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600"
         />
       </div>
-      <p className="text-xs text-gray-500">Double-click a row to open it in a new tab (search inside data there).</p>
+      {folder === 'tables' ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-500">{selectedTables.length} selected</span>
+          <button type="button" onClick={() => runSelectedAction('copy')} disabled={!selectedTables.length || !!busyAction} title="Copy selected tables" className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1 disabled:opacity-40"><Copy className="w-3 h-3" /> Copy</button>
+          <button type="button" onClick={() => runSelectedAction('export')} disabled={!selectedTables.length || !!busyAction} title="Export selected tables" className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1 disabled:opacity-40">{busyAction === 'export' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />} Export</button>
+          <button type="button" onClick={() => runSelectedAction('truncate')} disabled={!selectedTables.length || !!busyAction} title="Truncate selected tables" className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-yellow-200 text-xs inline-flex items-center gap-1 disabled:opacity-40"><XCircle className="w-3 h-3" /> Truncate</button>
+          <button type="button" onClick={() => runSelectedAction('delete')} disabled={!selectedTables.length || !!busyAction} title="Delete selected tables" className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-red-300 text-xs inline-flex items-center gap-1 disabled:opacity-40"><Trash2 className="w-3 h-3" /> Delete</button>
+          {busyAction && busyAction !== 'export' && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500">Double-click a row to open it in a new tab (search inside data there).</p>
+      )}
+      {message && <div className="rounded border border-green-500/30 bg-green-500/10 px-3 py-2 text-green-300 text-xs">{message}</div>}
       {error && (
         <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>
       )}
@@ -1024,6 +1125,11 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
           <table className="w-full text-sm text-left">
             <thead className="bg-primary text-gray-300 sticky top-0">
               <tr>
+                {folder === 'tables' && (
+                  <th className="px-3 py-2 w-10">
+                    <input type="checkbox" checked={allFilteredSelected} onChange={toggleFiltered} aria-label="Select all visible tables" />
+                  </th>
+                )}
                 <th className="px-3 py-2">Name</th>
                 {folder === 'tables' && (
                   <>
@@ -1040,6 +1146,16 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
                   className="border-t border-gray-700 hover:bg-primary/40 cursor-default"
                   onDoubleClick={() => onOpenTableTab(database, it.name, folder === 'tables' ? 'table' : 'view')}
                 >
+                  {folder === 'tables' && (
+                    <td className="px-3 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedSet.has(it.name)}
+                        onChange={() => toggleTable(it.name)}
+                        aria-label={`Select ${it.name}`}
+                      />
+                    </td>
+                  )}
                   <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{it.name}</td>
                   {folder === 'tables' && (
                     <>
@@ -1050,7 +1166,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={folder === 'tables' ? 3 : 1} className="px-3 py-8 text-center text-gray-500 text-sm">No matches</td></tr>
+                <tr><td colSpan={folder === 'tables' ? 4 : 1} className="px-3 py-8 text-center text-gray-500 text-sm">No matches</td></tr>
               )}
             </tbody>
           </table>

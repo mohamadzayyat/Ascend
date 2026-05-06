@@ -88,6 +88,23 @@ def _qi(name):
     return f'`{name}`'
 
 
+def _selected_table_names(raw, *, max_count=100):
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('Select at least one table.')
+    tables = []
+    seen = set()
+    for value in raw:
+        name = str(value or '').strip()
+        if not _valid_identifier(name):
+            raise ValueError(f'Invalid table name: {name or "(blank)"}')
+        if name not in seen:
+            seen.add(name)
+            tables.append(name)
+    if len(tables) > max_count:
+        raise ValueError(f'Select {max_count} tables or fewer.')
+    return tables
+
+
 def _coerce_json_value(v):
     if v is None or isinstance(v, (str, int, float, bool)):
         return v
@@ -844,6 +861,182 @@ def api_db_table_create(conn_id):
     return jsonify({'ok': True, 'table': table, 'sql': sql, 'duration_ms': int((time.time() - started) * 1000)}), 201
 
 
+def _ensure_base_tables(cur, database, tables):
+    cur.execute("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = %s AND table_type = 'BASE TABLE'
+          AND table_name IN ({})
+    """.format(', '.join(['%s'] * len(tables))), tuple([database, *tables]))
+    found = {r[0] for r in cur.fetchall()}
+    missing = [t for t in tables if t not in found]
+    if missing:
+        raise ValueError(f'Table not found or not a base table: {missing[0]}')
+
+
+def _next_copy_table_name(cur, base):
+    stem = f'{base}_copy'
+    for n in range(1, 1000):
+        name = stem if n == 1 else f'{stem}_{n}'
+        if len(name) > 64:
+            suffix = '' if n == 1 else f'_{n}'
+            name = f'{base[:64 - len("_copy") - len(suffix)]}_copy{suffix}'
+        cur.execute('SHOW TABLES LIKE %s', (name,))
+        if not cur.fetchone():
+            return name
+    raise ValueError(f'Could not find an available copy name for {base}.')
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/tables/bulk', methods=['POST'])
+@login_required
+def api_db_tables_bulk(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    database = (data.get('database') or '').strip()
+    action = (data.get('action') or '').strip().lower()
+    if not _valid_identifier(database):
+        return jsonify({'error': 'Invalid database name.'}), 400
+    if action not in {'copy', 'truncate', 'delete'}:
+        return jsonify({'error': 'Unsupported bulk table action.'}), 400
+    try:
+        tables = _selected_table_names(data.get('tables'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    started = time.time()
+    executed = []
+    copied = []
+    try:
+        with client.cursor() as cur:
+            _ensure_base_tables(cur, database, tables)
+            if action == 'copy':
+                for table in tables:
+                    copy_name = _next_copy_table_name(cur, table)
+                    cur.execute(f'CREATE TABLE {_qi(copy_name)} LIKE {_qi(table)}')
+                    executed.append(f'CREATE TABLE {_qi(copy_name)} LIKE {_qi(table)}')
+                    affected = cur.execute(f'INSERT INTO {_qi(copy_name)} SELECT * FROM {_qi(table)}')
+                    executed.append(f'INSERT INTO {_qi(copy_name)} SELECT * FROM {_qi(table)}')
+                    copied.append({'source': table, 'copy': copy_name, 'rows': int(affected or 0)})
+            elif action == 'truncate':
+                for table in tables:
+                    cur.execute(f'TRUNCATE TABLE {_qi(table)}')
+                    executed.append(f'TRUNCATE TABLE {_qi(table)}')
+            elif action == 'delete':
+                for table in tables:
+                    cur.execute(f'DROP TABLE {_qi(table)}')
+                    executed.append(f'DROP TABLE {_qi(table)}')
+        client.commit()
+    except Exception as e:
+        try:
+            client.rollback()
+        except Exception:
+            pass
+        client.close()
+        return jsonify({'error': str(e), 'executed': executed, 'duration_ms': int((time.time() - started) * 1000)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({
+        'ok': True,
+        'action': action,
+        'tables': tables,
+        'copied': copied,
+        'sql': executed,
+        'duration_ms': int((time.time() - started) * 1000),
+    })
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/tables/export', methods=['POST'])
+@login_required
+def api_db_tables_export(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    database = (data.get('database') or '').strip()
+    if not _valid_identifier(database):
+        return jsonify({'error': 'Invalid database name.'}), 400
+    try:
+        tables = _selected_table_names(data.get('tables'), max_count=200)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+        try:
+            with client.cursor() as cur:
+                _ensure_base_tables(cur, database, tables)
+        finally:
+            client.close()
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+    backup_dir = _connection_backup_dir(conn)
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    base = _safe_dir_name(database if len(tables) != 1 else tables[0])
+    filepath = _unique_backup_path(backup_dir, f'{base}-tables', ts)
+    archive = BackupArchive(
+        connection_id=conn.id,
+        filename=filepath.name,
+        filepath=str(filepath),
+        triggered_by='table-export',
+        status='pending',
+    )
+    db.session.add(archive)
+    db.session.commit()
+
+    started = time.time()
+    try:
+        env, base_args = _mysqldump_env(conn)
+        argv = ['mysqldump', '--no-defaults', *base_args,
+                '--single-transaction', '--quick', '--routines', '--triggers',
+                '--default-character-set=utf8mb4', database, *tables]
+        with open(filepath, 'wb') as out:
+            proc = subprocess.run(argv, stdout=out, stderr=subprocess.PIPE, env=env, timeout=1800)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+        archive.size_bytes = filepath.stat().st_size
+        archive.status = 'success'
+        archive.error_message = f'Exported tables: {", ".join(tables[:20])}' + ('...' if len(tables) > 20 else '')
+    except FileNotFoundError:
+        archive.status = 'failed'
+        archive.error_message = 'mysqldump client is not installed on this server.'
+    except subprocess.TimeoutExpired:
+        archive.status = 'failed'
+        archive.error_message = 'Table export timed out after 30 minutes.'
+    except Exception as e:
+        archive.status = 'failed'
+        archive.error_message = str(e)[:1000]
+    finally:
+        archive.completed_at = datetime.now(timezone.utc)
+        archive.duration_seconds = int(time.time() - started)
+        if archive.status != 'success':
+            try:
+                if filepath.exists():
+                    filepath.unlink()
+            except OSError:
+                pass
+        db.session.commit()
+
+    if archive.status != 'success':
+        return jsonify({'error': archive.error_message, 'backup': archive.to_dict()}), 400
+    return jsonify({'ok': True, 'backup': archive.to_dict()})
+
+
 @bp.route('/api/databases/connections/<int:conn_id>/table-columns', methods=['POST'])
 @login_required
 def api_db_table_column_add(conn_id):
@@ -1523,9 +1716,26 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         if lock is None:
             print(f'[backup] skipped duplicate run for connection={conn.id} schedule={schedule_id}', file=sys.stderr)
             return None
+        databases = []
+        if target_database:
+            td = str(target_database).strip()
+            if re.fullmatch(r'[A-Za-z0-9_$]+', td):
+                databases = [td]
+        elif schedule_id is not None:
+            sched = db.session.get(BackupSchedule, schedule_id)
+            if sched:
+                td = (getattr(sched, 'target_database', None) or '').strip()
+                if td and re.fullmatch(r'[A-Za-z0-9_$]+', td):
+                    databases = [td]
+                elif sched.databases:
+                    try:
+                        databases = json.loads(sched.databases) or []
+                    except (TypeError, ValueError):
+                        databases = []
         backup_dir = _connection_backup_dir(conn)
         ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-        filepath = _unique_backup_path(backup_dir, _safe_dir_name(conn.name), ts)
+        backup_base_name = databases[0] if len(databases) == 1 else conn.name
+        filepath = _unique_backup_path(backup_dir, _safe_dir_name(backup_base_name), ts)
         filename = filepath.name
 
         archive = BackupArchive(
@@ -1556,22 +1766,6 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         argv = ['mysqldump', '--no-defaults', *base_args,
                 '--single-transaction', '--quick', '--routines', '--events',
                 '--triggers', '--default-character-set=utf8mb4']
-        databases = []
-        if target_database:
-            td = str(target_database).strip()
-            if re.fullmatch(r'[A-Za-z0-9_$]+', td):
-                databases = [td]
-        elif schedule_id is not None:
-            sched = db.session.get(BackupSchedule, schedule_id)
-            if sched:
-                td = (getattr(sched, 'target_database', None) or '').strip()
-                if td and re.fullmatch(r'[A-Za-z0-9_$]+', td):
-                    databases = [td]
-                elif sched.databases:
-                    try:
-                        databases = json.loads(sched.databases) or []
-                    except (TypeError, ValueError):
-                        databases = []
         if databases:
             argv += ['--databases', *databases]
         else:
