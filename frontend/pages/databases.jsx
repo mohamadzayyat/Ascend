@@ -1811,10 +1811,11 @@ function SqlTab({ connection, preferredDatabase = '', onDatabaseChange, pendingS
         {result && (
           <span className="text-xs text-gray-400">
             {result.rows.length > 0
-              ? `${result.rows.length} row(s) returned`
+              ? `${result.rows.length} row(s) returned${result.truncated ? `, limited to first ${result.max_rows || result.rows.length}` : ''}`
               : `${result.affected_rows} row(s) affected`} · {result.duration_ms} ms
           </span>
         )}
+        {running && <span className="text-xs text-gray-500">Running query...</span>}
       </div>
 
       {confirmation && (

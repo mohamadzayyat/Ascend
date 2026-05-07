@@ -97,6 +97,9 @@ def _run(cmd, timeout=4):
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace', timeout=timeout)
         return proc.returncode, (proc.stdout or '').strip(), (proc.stderr or '').strip()
+    except subprocess.TimeoutExpired:
+        label = ' '.join(str(part) for part in cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        return 124, '', f'Command timed out after {timeout} seconds: {label}'
     except Exception as exc:
         return 1, '', str(exc)
 
@@ -388,6 +391,39 @@ def _run_repair_steps(steps, timeout=45):
     return ok, results
 
 
+def _repair_crowdsec_bouncer():
+    results = []
+    systemctl = shutil.which('systemctl')
+    apt_get = shutil.which('apt-get')
+    installed = any(_systemd_unit_exists(name) for name in BOUNCER_SERVICE_CANDIDATES)
+    if apt_get and not installed:
+        ok, install_results = _run_repair_steps([
+            [apt_get, 'update'],
+            [apt_get, 'install', '-y', 'crowdsec-firewall-bouncer-iptables'],
+        ], timeout=180)
+        results.extend(install_results)
+        if not ok:
+            return False, results
+    if not systemctl:
+        results.append({'cmd': 'systemctl', 'returncode': 1, 'stdout': '', 'stderr': 'systemctl was not found.'})
+        return False, results
+    bouncer_unit = _first_existing_service(BOUNCER_SERVICE_CANDIDATES)
+    if not bouncer_unit or not _systemd_unit_exists(bouncer_unit):
+        results.append({
+            'cmd': 'detect CrowdSec firewall bouncer service',
+            'returncode': 1,
+            'stdout': '',
+            'stderr': 'CrowdSec firewall bouncer service was not found after install.',
+        })
+        return False, results
+    ok, service_results = _run_repair_steps([
+        [systemctl, 'enable', '--now', bouncer_unit],
+        [systemctl, 'restart', bouncer_unit],
+    ], timeout=45)
+    results.extend(service_results)
+    return ok, results
+
+
 def _tool_version(name, args):
     path = shutil.which(name)
     if not path:
@@ -460,7 +496,10 @@ def _crowdsec_decisions():
     cscli = shutil.which('cscli')
     if not cscli:
         return {'available': False, 'items': [], 'error': 'cscli is not installed.'}
-    rc, out, err = _run([cscli, 'decisions', 'list', '-o', 'json'], timeout=5)
+    service = _service_active('crowdsec.service')
+    if service.get('available') and not service.get('ok'):
+        return {'available': True, 'items': [], 'error': 'CrowdSec service is not running.'}
+    rc, out, err = _run([cscli, 'decisions', 'list', '-o', 'json'], timeout=20)
     if rc != 0:
         return {'available': True, 'items': [], 'error': err or out or 'Could not list CrowdSec decisions.'}
     try:
@@ -473,7 +512,7 @@ def _crowdsec_decisions():
         raw_items = parsed
     text_by_id = {}
     text_by_reason = {}
-    rc_text, out_text, _ = _run([cscli, 'decisions', 'list'], timeout=2)
+    rc_text, out_text, _ = _run([cscli, 'decisions', 'list'], timeout=5)
     if rc_text == 0 and out_text:
         ip_re = re.compile(r'(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])')
         for line in out_text.splitlines():
@@ -578,9 +617,12 @@ def _cached_crowdsec_decisions():
     state = _load_json(STATE_PATH, {})
     shared = state.get('crowdsec_decisions_cache') if isinstance(state.get('crowdsec_decisions_cache'), dict) else None
     if shared and cached is None:
-        _CROWDSEC_DECISIONS_CACHE['data'] = shared
-        _CROWDSEC_DECISIONS_CACHE['at'] = now_ts
-        cached = shared
+        if shared.get('error') and not shared.get('items'):
+            shared = None
+        else:
+            _CROWDSEC_DECISIONS_CACHE['data'] = shared
+            _CROWDSEC_DECISIONS_CACHE['at'] = now_ts
+            cached = shared
     with _CROWDSEC_DECISIONS_LOCK:
         if not _CROWDSEC_DECISIONS_RUNNING:
             _CROWDSEC_DECISIONS_RUNNING = True
@@ -589,6 +631,9 @@ def _cached_crowdsec_decisions():
                 global _CROWDSEC_DECISIONS_RUNNING
                 try:
                     data = _crowdsec_decisions()
+                    previous = _CROWDSEC_DECISIONS_CACHE.get('data')
+                    if data.get('error') and isinstance(previous, dict) and previous.get('items'):
+                        data = {**previous, 'error': '', 'refresh_error': data.get('error'), 'refreshing': False}
                     _CROWDSEC_DECISIONS_CACHE['at'] = time.monotonic()
                     _CROWDSEC_DECISIONS_CACHE['data'] = data
                     state = _load_json(STATE_PATH, {})
@@ -609,6 +654,43 @@ def _invalidate_crowdsec_decisions_cache():
     try:
         state = _load_json(STATE_PATH, {})
         state.pop('crowdsec_decisions_cache', None)
+        _write_json(STATE_PATH, state)
+    except Exception:
+        pass
+
+
+def _remove_crowdsec_decision_from_cache(decision_id='', value=''):
+    decision_id = str(decision_id or '').strip()
+    value = str(value or '').strip()
+
+    def filtered(data):
+        if not isinstance(data, dict):
+            data = {'available': True, 'items': [], 'error': ''}
+        items = data.get('items') if isinstance(data.get('items'), list) else []
+        kept = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            same_id = decision_id and str(item.get('id') or '').strip() == decision_id
+            same_value = value and str(item.get('value') or '').strip() == value
+            if same_id or same_value:
+                continue
+            kept.append(item)
+        return {**data, 'available': True, 'items': kept, 'error': '', 'refreshing': False}
+
+    now_ts = time.monotonic()
+    current = _CROWDSEC_DECISIONS_CACHE.get('data')
+    next_data = filtered(current)
+    _CROWDSEC_DECISIONS_CACHE['data'] = next_data
+    _CROWDSEC_DECISIONS_CACHE['at'] = now_ts
+    try:
+        state = _load_json(STATE_PATH, {})
+        shared = state.get('crowdsec_decisions_cache') if isinstance(state.get('crowdsec_decisions_cache'), dict) else None
+        if shared and (not current or not current.get('items')):
+            next_data = filtered(shared)
+            _CROWDSEC_DECISIONS_CACHE['data'] = next_data
+            _CROWDSEC_DECISIONS_CACHE['at'] = now_ts
+        state['crowdsec_decisions_cache'] = next_data
         _write_json(STATE_PATH, state)
     except Exception:
         pass
@@ -1146,31 +1228,31 @@ def api_security_crowdsec_decision_delete():
             if decision_id and value:
                 rc_ip, out_ip, err_ip = _run([cscli, 'decisions', 'delete', '--ip', value], timeout=10)
                 if rc_ip == 0:
-                    _invalidate_crowdsec_decisions_cache()
+                    _remove_crowdsec_decision_from_cache(decision_id, value)
                     _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed by IP fallback: {value}', {'id': decision_id, 'value': value, 'fallback': 'ip'})
                     return jsonify({'message': 'CrowdSec decision removed.', 'output': out_ip, 'fallback': 'ip'})
                 fallback_message = err_ip or out_ip or ''
                 if 'doesn\'t exist' in fallback_message or 'does not exist' in fallback_message or 'not found' in fallback_message.lower():
-                    _invalidate_crowdsec_decisions_cache()
+                    _remove_crowdsec_decision_from_cache(decision_id, value)
                     _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value}', {'id': decision_id, 'value': value, 'already_removed': True})
                     return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
                 return jsonify({'error': fallback_message or message}), 500
-            _invalidate_crowdsec_decisions_cache()
+            _remove_crowdsec_decision_from_cache(decision_id, value)
             _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value or decision_id}', {'id': decision_id, 'value': value, 'already_removed': True})
             return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
         if decision_id and value:
             rc_ip, out_ip, err_ip = _run([cscli, 'decisions', 'delete', '--ip', value], timeout=10)
             if rc_ip == 0:
-                _invalidate_crowdsec_decisions_cache()
+                _remove_crowdsec_decision_from_cache(decision_id, value)
                 _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed by IP fallback: {value}', {'id': decision_id, 'value': value, 'fallback': 'ip'})
                 return jsonify({'message': 'CrowdSec decision removed.', 'output': out_ip, 'fallback': 'ip'})
             ip_message = err_ip or out_ip or ''
             if 'doesn\'t exist' in ip_message or 'does not exist' in ip_message or 'not found' in ip_message.lower():
-                _invalidate_crowdsec_decisions_cache()
+                _remove_crowdsec_decision_from_cache(decision_id, value)
                 _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value}', {'id': decision_id, 'value': value, 'already_removed': True})
                 return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
         return jsonify({'error': message}), 500
-    _invalidate_crowdsec_decisions_cache()
+    _remove_crowdsec_decision_from_cache(decision_id, value)
     _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed: {value or decision_id}', {'id': decision_id, 'value': value})
     return jsonify({'message': 'CrowdSec decision removed.', 'output': out})
 
@@ -1378,20 +1460,6 @@ def api_security_repair():
     data = request.get_json(silent=True) or {}
     action = str(data.get('action') or '').strip()
     systemctl = shutil.which('systemctl')
-    apt_get = shutil.which('apt-get')
-    bouncer_unit = _first_existing_service(BOUNCER_SERVICE_CANDIDATES)
-    bouncer_steps = []
-    if apt_get and not any(_systemd_unit_exists(name) for name in BOUNCER_SERVICE_CANDIDATES):
-        bouncer_steps.extend([
-            [apt_get, 'update'],
-            [apt_get, 'install', '-y', 'crowdsec-firewall-bouncer-iptables'],
-        ])
-        bouncer_unit = _first_existing_service(BOUNCER_SERVICE_CANDIDATES)
-    if systemctl:
-        bouncer_steps.extend([
-            [systemctl, 'enable', '--now', bouncer_unit],
-            [systemctl, 'restart', bouncer_unit],
-        ])
     actions = {
         'clamav_restart_updates': {
             'label': 'Restart ClamAV updater',
@@ -1415,7 +1483,8 @@ def api_security_repair():
         },
         'crowdsec_bouncer_restart': {
             'label': 'Repair CrowdSec firewall bouncer',
-            'steps': bouncer_steps,
+            'steps': [],
+            'custom': 'crowdsec_bouncer',
         },
         'crowdsec_collections': {
             'label': 'Install core CrowdSec collections',
@@ -1472,6 +1541,13 @@ def api_security_repair():
         if not ok:
             return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
         return jsonify({'message': f'HTTP 401 brute-force rule {"turned on" if enable else "turned off"}.', 'results': results})
+    if spec.get('custom') == 'crowdsec_bouncer':
+        ok, results = _repair_crowdsec_bouncer()
+        status = 'ok' if ok else 'failed'
+        _audit_log('security.repair', status, spec['label'], {'action': action, 'results': results})
+        if not ok:
+            return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
+        return jsonify({'message': f'{spec["label"]} completed.', 'results': results})
     steps = [s for s in spec.get('steps') or [] if s and s[0]]
     if not steps:
         return jsonify({'error': 'This repair needs systemctl or the required tool, but it was not found.'}), 400

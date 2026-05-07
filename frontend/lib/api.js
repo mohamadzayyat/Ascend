@@ -235,7 +235,7 @@ export const apiClient = {
   runDbQuery: (id, sql, database, confirmDestructive = false) =>
     api.post(`/api/databases/connections/${id}/query`, {
       sql, database, confirm_destructive: confirmDestructive,
-    }),
+    }, { timeout: 20000 }),
   listDbBackups: (id) => api.get(`/api/databases/connections/${id}/backups`),
   runDbBackup: (id, targetDatabase = '') => api.post(`/api/databases/connections/${id}/backups/run`, { target_database: targetDatabase || '' }),
   downloadDbBackupFromUrl: (id, data) =>

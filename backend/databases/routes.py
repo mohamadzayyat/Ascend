@@ -169,6 +169,17 @@ def _open_mysql(conn, database=None):
     return pymysql.connect(**kwargs)
 
 
+def _apply_query_runner_limits(cur, max_seconds=15):
+    """Best-effort server-side timeout for ad-hoc SQL runner statements."""
+    try:
+        cur.execute('SET SESSION MAX_EXECUTION_TIME=%s', (int(max_seconds * 1000),))
+    except Exception:
+        try:
+            cur.execute('SET SESSION max_statement_time=%s', (int(max_seconds),))
+        except Exception:
+            pass
+
+
 def _mysqldump_env(conn):
     """Build env + argv prefix for invoking mysqldump/mysql without leaking
     the password on the command line (uses MYSQL_PWD env var)."""
@@ -1547,6 +1558,7 @@ def api_db_query(conn_id):
     confirm_destructive = bool(data.get('confirm_destructive'))
     if not sql:
         return jsonify({'error': 'sql is required.'}), 400
+    max_rows = 1000
 
     # Detect risky statements unless the caller explicitly confirmed
     if not confirm_destructive:
@@ -1569,12 +1581,16 @@ def api_db_query(conn_id):
     started = time.time()
     try:
         with client.cursor() as cur:
+            _apply_query_runner_limits(cur)
             affected = cur.execute(sql)
             rows = []
             cols = []
+            truncated = False
             if cur.description:
                 cols = [d[0] for d in cur.description]
-                rows = [list(r) for r in cur.fetchall()]
+                fetched = cur.fetchmany(max_rows + 1)
+                truncated = len(fetched) > max_rows
+                rows = [list(r) for r in fetched[:max_rows]]
         client.commit()
     except Exception as e:
         client.close()
@@ -1593,6 +1609,8 @@ def api_db_query(conn_id):
         'columns': cols,
         'rows': [[_coerce(c) for c in r] for r in rows],
         'affected_rows': int(affected or 0),
+        'truncated': truncated,
+        'max_rows': max_rows,
         'duration_ms': int((time.time() - started) * 1000),
     })
 

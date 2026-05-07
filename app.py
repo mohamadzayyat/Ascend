@@ -3640,6 +3640,72 @@ def _php_public_dir(app_row):
     return public_dir
 
 
+def _php_mutable_paths(app_row):
+    public_path = _php_public_path(app_row)
+    paths = {
+        'storage',
+        'var',
+        'runtime',
+        'uploads',
+        'upload',
+        'userfiles',
+        'media',
+        'files',
+        'wp-content/uploads',
+    }
+    if public_path:
+        for name in ('uploads', 'upload', 'userfiles', 'media', 'files', 'storage'):
+            paths.add(f'{public_path}/{name}')
+    for base in ('public', 'web', 'frontend/web', 'backend/web'):
+        for name in ('uploads', 'upload', 'userfiles', 'media', 'files'):
+            paths.add(f'{base}/{name}')
+    return sorted(paths)
+
+
+def _backup_php_mutable_paths(app_row, target, backup_root, log):
+    preserved = []
+    for rel in _php_mutable_paths(app_row):
+        source = target / rel
+        if not source.exists() and not source.is_symlink():
+            continue
+        backup = backup_root / rel
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source.is_dir() and not source.is_symlink():
+                shutil.copytree(source, backup, symlinks=True)
+            elif source.is_symlink():
+                os.symlink(os.readlink(source), backup)
+            else:
+                shutil.copy2(source, backup)
+            preserved.append(rel)
+        except Exception as exc:
+            log.write(f"  Warning: could not preserve {source}: {exc}\n")
+    return preserved
+
+
+def _restore_php_mutable_paths(target, backup_root, preserved, log):
+    for rel in preserved:
+        source = backup_root / rel
+        dest = target / rel
+        if not source.exists() and not source.is_symlink():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if source.is_dir() and not source.is_symlink():
+                shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)
+            elif source.is_symlink():
+                if dest.exists() or dest.is_symlink():
+                    if dest.is_dir() and not dest.is_symlink():
+                        shutil.rmtree(dest)
+                    else:
+                        dest.unlink()
+                os.symlink(os.readlink(source), dest)
+            else:
+                shutil.copy2(source, dest)
+        except Exception as exc:
+            log.write(f"  Warning: could not restore preserved {rel}: {exc}\n")
+
+
 def _publish_php_app(app_row, log):
     source = _app_deploy_dir(app_row)
     source_public = _php_source_public_dir(app_row)
@@ -3648,14 +3714,20 @@ def _publish_php_app(app_row, log):
     target = _php_runtime_root(app_row)
     if os.name == 'nt':
         return source
-    if target.exists():
-        shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        source,
-        target,
-        ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
-    )
+    with tempfile.TemporaryDirectory(prefix=f'.{target.name}-preserve-', dir=str(target.parent)) as tmp:
+        backup_root = Path(tmp)
+        preserved = _backup_php_mutable_paths(app_row, target, backup_root, log) if target.exists() else []
+        if preserved:
+            log.write(f"  Preserving runtime data: {', '.join(preserved)}\n")
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
+        )
+        _restore_php_mutable_paths(target, backup_root, preserved, log)
     try:
         subprocess.run(['chmod', '-R', 'a+rX', str(target)], capture_output=True, timeout=30)
         for writable in ('runtime', 'web/assets', 'frontend/runtime', 'frontend/web/assets', 'backend/runtime', 'backend/web/assets'):
