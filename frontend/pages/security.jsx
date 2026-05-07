@@ -242,6 +242,8 @@ export default function SecurityPage() {
       item.origin,
       item.type,
       item.blocked_by,
+      item.country,
+      item.country_code,
     ].some((value) => asText(value, '').toLowerCase().includes(query)))
   }, [crowdsecDecisions, blocksSearch])
   const pagedDecisions = filteredDecisions.slice(blocksPage * PAGE_SIZE, (blocksPage + 1) * PAGE_SIZE)
@@ -498,6 +500,28 @@ export default function SecurityPage() {
       await load({ quiet: true })
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to remove CrowdSec decision')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const unblockAllDecisions = async () => {
+    if (!crowdsecDecisions.length) return
+    const ok = await dialog.confirm({
+      title: 'Remove all IP blocks?',
+      message: `Remove all ${crowdsecDecisions.length} active CrowdSec block(s)? This will unblock every listed source.`,
+      confirmLabel: 'Unblock all',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setBusy('unblock-all')
+    setError('')
+    try {
+      const { data } = await apiClient.deleteAllCrowdSecDecisions(crowdsecDecisions.map((item) => ({ id: item.id, value: item.value })))
+      setMessage(data.message || 'All CrowdSec blocks removed')
+      await load({ quiet: true })
+    } catch (e) {
+      setError(e.response?.data?.error || e.response?.data?.message || 'Failed to remove all CrowdSec decisions')
     } finally {
       setBusy('')
     }
@@ -1036,22 +1060,27 @@ export default function SecurityPage() {
                     <h2 className="text-white font-semibold text-lg inline-flex items-center gap-2"><Ban className="w-5 h-5 text-accent" /> Active IP Blocks</h2>
                     <p className="text-gray-500 text-sm mt-1">These are active CrowdSec decisions. Removing one unblocks the IP.</p>
                   </div>
-                  <label className="relative w-full sm:w-80">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
-                    <input
-                      value={blocksSearch}
-                      onChange={(e) => setBlocksSearch(e.target.value)}
-                      placeholder="Search IP, reason, decision..."
-                      className="w-full rounded border border-gray-700 bg-primary px-9 py-2 text-sm text-white placeholder-gray-500 focus:border-accent focus:outline-none"
-                    />
-                  </label>
+                  <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                    <button onClick={unblockAllDecisions} disabled={busy === 'unblock-all' || !crowdsecDecisions.length} className="inline-flex items-center gap-2 rounded border border-red-500/40 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50">
+                      {busy === 'unblock-all' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Unblock all
+                    </button>
+                    <label className="relative w-full sm:w-80">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
+                      <input
+                        value={blocksSearch}
+                        onChange={(e) => setBlocksSearch(e.target.value)}
+                        placeholder="Search IP, country, reason..."
+                        className="w-full rounded border border-gray-700 bg-primary px-9 py-2 text-sm text-white placeholder-gray-500 focus:border-accent focus:outline-none"
+                      />
+                    </label>
+                  </div>
                 </div>
                 {tools.crowdsec_decisions?.error && <div className="mx-5 mt-5 rounded border border-yellow-500/30 bg-yellow-500/10 p-3 text-yellow-200 text-sm">{tools.crowdsec_decisions.error}</div>}
                 {crowdsecDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No active IP blocks right now.</div> : filteredDecisions.length === 0 ? <div className="p-8 text-center text-gray-500 text-sm">No IP blocks match your search.</div> : (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-left min-w-[900px]">
-                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked IP</th><th className="px-4 py-3">Decision</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Blocked at</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
-                      <tbody className="divide-y divide-gray-700/70">{pagedDecisions.map((item, idx) => <tr key={`${asText(item.id || item.value, idx)}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value ? asText(item.value) : <span className="text-yellow-200">IP unavailable</span>}</td><td className="px-4 py-3 text-gray-300">#{asText(item.id)}</td><td className="px-4 py-3 text-gray-300">{asText(item.reason || item.scenario)}</td><td className="px-4 py-3 text-gray-400">{formatMaybeDate(item.blocked_at || item.created_at)}</td><td className="px-4 py-3 text-gray-400">{asText(item.until || item.duration)}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${asText(item.value || item.id)}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
+                    <table className="w-full text-sm text-left min-w-[1000px]">
+                      <thead className="bg-primary/60 text-gray-400"><tr><th className="px-4 py-3">Blocked IP</th><th className="px-4 py-3">Country</th><th className="px-4 py-3">Decision</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Blocked at</th><th className="px-4 py-3">Until</th><th className="px-4 py-3"></th></tr></thead>
+                      <tbody className="divide-y divide-gray-700/70">{pagedDecisions.map((item, idx) => <tr key={`${asText(item.id || item.value, idx)}-${idx}`}><td className="px-4 py-3 text-white font-mono">{item.value ? asText(item.value) : <span className="text-yellow-200">IP unavailable</span>}</td><td className="px-4 py-3 text-gray-300">{item.country ? <span>{asText(item.country)} <span className="text-gray-500">{asText(item.country_code)}</span></span> : <span className="text-gray-600">Unknown</span>}</td><td className="px-4 py-3 text-gray-300">#{asText(item.id)}</td><td className="px-4 py-3 text-gray-300">{asText(item.reason || item.scenario)}</td><td className="px-4 py-3 text-gray-400">{formatMaybeDate(item.blocked_at || item.created_at)}</td><td className="px-4 py-3 text-gray-400">{asText(item.until || item.duration)}</td><td className="px-4 py-3 text-right"><button onClick={() => unblockDecision(item)} disabled={busy === `unblock-${asText(item.value || item.id)}`} className="px-2 py-1 border border-gray-600 rounded text-gray-200 hover:bg-primary disabled:opacity-50">Unblock</button></td></tr>)}</tbody>
                     </table>
                     <Pager page={blocksPage} total={filteredDecisions.length} onPage={setBlocksPage} />
                   </div>

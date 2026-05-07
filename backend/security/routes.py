@@ -8,6 +8,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +38,7 @@ _AUTO_SSH_BLOCK_RUNNING = False
 
 STATUS_CROWDSEC_CACHE_SECONDS = 20
 AUTO_SSH_BLOCK_INTERVAL_SECONDS = 300
+CROWDSEC_GEO_CACHE_SECONDS = 7 * 24 * 60 * 60
 
 THREAT_RE = re.compile(
     r'(getxmrig|xmrig|c3pool|stratum\+(?:tcp|ssl)://|auto\.c3pool\.org|80\.13\.111\.125|/root/\.config/\.logrotate|\.logrotate)',
@@ -603,6 +606,7 @@ def _crowdsec_decisions():
             'scenario': scalar(pick(item, 'scenario', 'Scenario')),
             'raw': item,
         })
+    items = _enrich_crowdsec_decision_countries(items)
     return {'available': True, 'items': items, 'error': ''}
 
 
@@ -659,6 +663,78 @@ def _invalidate_crowdsec_decisions_cache():
         pass
 
 
+def _crowdsec_geo_cache(state=None):
+    state = state if isinstance(state, dict) else _load_json(STATE_PATH, {})
+    cache = state.get('crowdsec_geo_cache')
+    return cache if isinstance(cache, dict) else {}
+
+
+def _lookup_ip_countries(ips):
+    ips = [ip for ip in dict.fromkeys(str(ip or '').strip() for ip in ips) if _valid_public_ip(ip)]
+    if not ips:
+        return {}
+    payload = json.dumps(ips[:100]).encode('utf-8')
+    req = urllib.request.Request(
+        'http://ip-api.com/batch?fields=status,message,country,countryCode,query',
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode('utf-8', errors='replace') or '[]')
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return {}
+    rows = data if isinstance(data, list) else []
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('status') != 'success':
+            continue
+        ip = str(row.get('query') or '').strip()
+        if not ip:
+            continue
+        out[ip] = {
+            'country': str(row.get('country') or '').strip(),
+            'country_code': str(row.get('countryCode') or '').strip(),
+            'checked_at': _now(),
+        }
+    return out
+
+
+def _enrich_crowdsec_decision_countries(items):
+    if not items:
+        return items
+    state = _load_json(STATE_PATH, {})
+    cache = _crowdsec_geo_cache(state)
+    now_ts = time.time()
+    missing = []
+    for item in items:
+        ip = str((item or {}).get('value') or '').strip()
+        cached = cache.get(ip) if ip else None
+        try:
+            checked_at = datetime.fromisoformat(str((cached or {}).get('checked_at') or '').replace('Z', '+00:00')).timestamp()
+        except Exception:
+            checked_at = 0
+        if ip and _valid_public_ip(ip) and (not cached or now_ts - checked_at > CROWDSEC_GEO_CACHE_SECONDS):
+            missing.append(ip)
+    if missing:
+        found = _lookup_ip_countries(missing)
+        if found:
+            cache.update(found)
+            state['crowdsec_geo_cache'] = cache
+            try:
+                _write_json(STATE_PATH, state)
+            except Exception:
+                pass
+    for item in items:
+        ip = str((item or {}).get('value') or '').strip()
+        geo = cache.get(ip) if ip else None
+        if isinstance(geo, dict):
+            item['country'] = geo.get('country') or ''
+            item['country_code'] = geo.get('country_code') or ''
+    return items
+
+
 def _remove_crowdsec_decision_from_cache(decision_id='', value=''):
     decision_id = str(decision_id or '').strip()
     value = str(value or '').strip()
@@ -694,6 +770,43 @@ def _remove_crowdsec_decision_from_cache(decision_id='', value=''):
         _write_json(STATE_PATH, state)
     except Exception:
         pass
+
+
+def _clear_crowdsec_decisions_cache():
+    data = {'available': True, 'items': [], 'error': '', 'refreshing': False}
+    _CROWDSEC_DECISIONS_CACHE['data'] = data
+    _CROWDSEC_DECISIONS_CACHE['at'] = time.monotonic()
+    try:
+        state = _load_json(STATE_PATH, {})
+        state['crowdsec_decisions_cache'] = data
+        _write_json(STATE_PATH, state)
+    except Exception:
+        pass
+
+
+def _delete_crowdsec_decision(cscli, decision_id='', value=''):
+    decision_id = str(decision_id or '').strip()
+    value = str(value or '').strip()
+    attempts = []
+    if value:
+        attempts.append([cscli, 'decisions', 'delete', '--ip', value])
+    if decision_id:
+        attempts.append([cscli, 'decisions', 'delete', '--id', decision_id])
+    last = {'returncode': 1, 'stdout': '', 'stderr': 'Decision id or IP value is required.'}
+    not_found = False
+    for cmd in attempts:
+        rc, out, err = _run(cmd, timeout=10)
+        last = {'cmd': ' '.join(cmd), 'returncode': rc, 'stdout': out, 'stderr': err}
+        if rc == 0:
+            return True, last
+        message = err or out or ''
+        if 'doesn\'t exist' in message or 'does not exist' in message or 'not found' in message.lower():
+            not_found = True
+            continue
+        return False, last
+    if not_found:
+        return True, {**last, 'already_removed': True}
+    return False, last
 
 
 def _valid_public_ip(value):
@@ -1215,46 +1328,77 @@ def api_security_crowdsec_decision_delete():
     cscli = shutil.which('cscli')
     if not cscli:
         return jsonify({'error': 'cscli is not installed.'}), 400
-    if decision_id:
-        cmd = [cscli, 'decisions', 'delete', '--id', decision_id]
-    elif value:
-        cmd = [cscli, 'decisions', 'delete', '--ip', value]
-    else:
+    if not decision_id and not value:
         return jsonify({'error': 'Decision id or IP value is required.'}), 400
-    rc, out, err = _run(cmd, timeout=10)
-    if rc != 0:
-        message = err or out or 'Could not delete CrowdSec decision.'
-        if 'doesn\'t exist' in message or 'does not exist' in message or 'not found' in message.lower():
-            if decision_id and value:
-                rc_ip, out_ip, err_ip = _run([cscli, 'decisions', 'delete', '--ip', value], timeout=10)
-                if rc_ip == 0:
-                    _remove_crowdsec_decision_from_cache(decision_id, value)
-                    _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed by IP fallback: {value}', {'id': decision_id, 'value': value, 'fallback': 'ip'})
-                    return jsonify({'message': 'CrowdSec decision removed.', 'output': out_ip, 'fallback': 'ip'})
-                fallback_message = err_ip or out_ip or ''
-                if 'doesn\'t exist' in fallback_message or 'does not exist' in fallback_message or 'not found' in fallback_message.lower():
-                    _remove_crowdsec_decision_from_cache(decision_id, value)
-                    _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value}', {'id': decision_id, 'value': value, 'already_removed': True})
-                    return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
-                return jsonify({'error': fallback_message or message}), 500
-            _remove_crowdsec_decision_from_cache(decision_id, value)
-            _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value or decision_id}', {'id': decision_id, 'value': value, 'already_removed': True})
-            return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
-        if decision_id and value:
-            rc_ip, out_ip, err_ip = _run([cscli, 'decisions', 'delete', '--ip', value], timeout=10)
-            if rc_ip == 0:
-                _remove_crowdsec_decision_from_cache(decision_id, value)
-                _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed by IP fallback: {value}', {'id': decision_id, 'value': value, 'fallback': 'ip'})
-                return jsonify({'message': 'CrowdSec decision removed.', 'output': out_ip, 'fallback': 'ip'})
-            ip_message = err_ip or out_ip or ''
-            if 'doesn\'t exist' in ip_message or 'does not exist' in ip_message or 'not found' in ip_message.lower():
-                _remove_crowdsec_decision_from_cache(decision_id, value)
-                _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision already gone: {value}', {'id': decision_id, 'value': value, 'already_removed': True})
-                return jsonify({'message': 'CrowdSec decision was already removed.', 'already_removed': True})
-        return jsonify({'error': message}), 500
+    ok, result = _delete_crowdsec_decision(cscli, decision_id, value)
+    if not ok:
+        message = result.get('stderr') or result.get('stdout') or 'Could not delete CrowdSec decision.'
+        _audit_log('security.crowdsec_decision_deleted', 'failed', message, {'id': decision_id, 'value': value, 'result': result})
+        return jsonify({'error': message, 'result': result}), 500
     _remove_crowdsec_decision_from_cache(decision_id, value)
-    _audit_log('security.crowdsec_decision_deleted', 'ok', f'CrowdSec decision removed: {value or decision_id}', {'id': decision_id, 'value': value})
-    return jsonify({'message': 'CrowdSec decision removed.', 'output': out})
+    already = bool(result.get('already_removed'))
+    message = 'CrowdSec decision was already removed.' if already else 'CrowdSec decision removed.'
+    _audit_log('security.crowdsec_decision_deleted', 'ok', f'{message} {value or decision_id}', {'id': decision_id, 'value': value, 'result': result})
+    return jsonify({'message': message, 'output': result.get('stdout') or '', 'already_removed': already, 'result': result})
+
+
+@bp.route('/api/security/crowdsec/decisions/all', methods=['DELETE'])
+@login_required
+def api_security_crowdsec_decisions_delete_all():
+    gate = _admin_required()
+    if gate:
+        return gate
+    cscli = shutil.which('cscli')
+    if not cscli:
+        return jsonify({'error': 'cscli is not installed.'}), 400
+    data = request.get_json(silent=True) or {}
+    raw = data.get('decisions') if isinstance(data.get('decisions'), list) else []
+    decisions = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        decision_id = str(item.get('id') or '').strip()
+        value = str(item.get('value') or '').strip()
+        if decision_id or value:
+            decisions.append({'id': decision_id, 'value': value})
+    if not decisions:
+        cached = _CROWDSEC_DECISIONS_CACHE.get('data')
+        if not isinstance(cached, dict):
+            state = _load_json(STATE_PATH, {})
+            cached = state.get('crowdsec_decisions_cache') if isinstance(state.get('crowdsec_decisions_cache'), dict) else {}
+        for item in cached.get('items') or []:
+            if isinstance(item, dict) and (item.get('id') or item.get('value')):
+                decisions.append({'id': str(item.get('id') or '').strip(), 'value': str(item.get('value') or '').strip()})
+    if not decisions:
+        _clear_crowdsec_decisions_cache()
+        return jsonify({'message': 'No active CrowdSec decisions to remove.', 'removed': 0, 'failed': 0, 'results': []})
+
+    seen = set()
+    unique = []
+    for item in decisions:
+        key = (item.get('id') or '', item.get('value') or '')
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+
+    results = []
+    removed = 0
+    failed = 0
+    for item in unique:
+        ok, result = _delete_crowdsec_decision(cscli, item.get('id'), item.get('value'))
+        row = {**item, **result, 'ok': ok}
+        results.append(row)
+        if ok:
+            removed += 1
+            _remove_crowdsec_decision_from_cache(item.get('id'), item.get('value'))
+        else:
+            failed += 1
+    if failed == 0:
+        _clear_crowdsec_decisions_cache()
+    _audit_log('security.crowdsec_decisions_deleted_all', 'ok' if failed == 0 else 'failed', f'Bulk CrowdSec unblock removed {removed}, failed {failed}', {'removed': removed, 'failed': failed})
+    status_code = 200 if failed == 0 else 500
+    return jsonify({'message': f'Removed {removed} CrowdSec block(s).', 'removed': removed, 'failed': failed, 'results': results}), status_code
 
 
 @bp.route('/api/security/ssh-failures')

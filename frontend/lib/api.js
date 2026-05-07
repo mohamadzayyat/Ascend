@@ -120,6 +120,7 @@ export const apiClient = {
   startCrowdSecInstall: () => api.post('/api/security/crowdsec/install/start'),
   repairSecurity: (action) => api.post('/api/security/repair', { action }, { timeout: 240000 }),
   deleteCrowdSecDecision: (decision) => api.delete('/api/security/crowdsec/decisions', { data: decision || {} }),
+  deleteAllCrowdSecDecisions: (decisions = []) => api.delete('/api/security/crowdsec/decisions/all', { data: { decisions }, timeout: 120000 }),
   getSshFailures: (limit = 500) => api.get('/api/security/ssh-failures', { params: { limit } }),
   blockCrowdSecIp: (ip, duration = '24h', reason = '') => api.post('/api/security/crowdsec/block', { ip, duration, reason }),
   blockRepeatSshAttackers: (threshold = 5, duration = '24h') => api.post('/api/security/ssh-failures/block-repeat', { threshold, duration }, { timeout: 120000 }),
