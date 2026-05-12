@@ -717,30 +717,44 @@ export default function AppFileManager({
   }
 
   const copyEntry = (entry) => {
-    setClipboard({ mode: 'copy', path: entry.path, name: entry.name, is_dir: entry.is_dir })
+    setClipboard({ mode: 'copy', items: [{ path: entry.path, name: entry.name, is_dir: entry.is_dir }] })
     flash(`Copied ${entry.name}`)
   }
 
   const cutEntry = (entry) => {
-    setClipboard({ mode: 'cut', path: entry.path, name: entry.name, is_dir: entry.is_dir })
+    setClipboard({ mode: 'cut', items: [{ path: entry.path, name: entry.name, is_dir: entry.is_dir }] })
     flash(`Cut ${entry.name}`)
   }
 
   const pasteClipboardTo = async (targetPath = path) => {
     if (!clipboard) return
-    const destination = joinPath(targetPath, clipboard.name)
-    if (destination === clipboard.path) {
-      setError('Already in this folder')
+    const items = clipboard.items || (clipboard.path ? [clipboard] : [])
+    if (!items.length) return
+
+    const blocked = items.find((item) => {
+      const destination = joinPath(targetPath, item.name)
+      return destination === item.path || (item.is_dir && targetPath.startsWith(`${item.path}/`))
+    })
+    if (blocked) {
+      setError(`Cannot paste ${blocked.name} into itself or one of its folders`)
       return
     }
+
     try {
+      for (const item of items) {
+        const destination = joinPath(targetPath, item.name)
+        if (clipboard.mode === 'cut') {
+          await api.rename(item.path, destination)
+        } else {
+          await api.copy(item.path, destination)
+        }
+      }
       if (clipboard.mode === 'cut') {
-        await api.rename(clipboard.path, destination)
         setClipboard(null)
-        flash(`Moved ${clipboard.name}`)
+        setSelected(new Set())
+        flash(`Moved ${items.length} item(s)`)
       } else {
-        await api.copy(clipboard.path, destination)
-        flash(`Pasted ${clipboard.name}`)
+        flash(`Pasted ${items.length} item(s)`)
       }
       load()
     } catch (err) {
@@ -1031,6 +1045,19 @@ export default function AppFileManager({
     }
   }
 
+  const bulkCut = () => {
+    if (!selectedEntries.length) return
+    setClipboard({
+      mode: 'cut',
+      items: selectedEntries.map((entry) => ({
+        path: entry.path,
+        name: entry.name,
+        is_dir: entry.is_dir,
+      })),
+    })
+    flash(`Cut ${selectedEntries.length} item(s)`)
+  }
+
   const bulkDownloadZip = async () => {
     if (!selectedEntries.length) return
     try {
@@ -1175,7 +1202,7 @@ export default function AppFileManager({
             onClick={() => pasteClipboardTo(path)}
             disabled={!clipboard}
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
-            title={clipboard ? `Paste ${clipboard.name}` : 'Copy or cut something first'}
+            title={clipboard ? 'Paste clipboard item(s)' : 'Copy or cut something first'}
           >
             <ClipboardPaste className="w-4 h-4" /> Paste
           </button>
@@ -1446,6 +1473,13 @@ export default function AppFileManager({
             </button>
             <button
               type="button"
+              onClick={bulkCut}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <Scissors className="w-4 h-4" /> Cut
+            </button>
+            <button
+              type="button"
               onClick={bulkDelete}
               className="inline-flex items-center gap-1 px-3 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-red-300 text-sm"
             >
@@ -1459,7 +1493,11 @@ export default function AppFileManager({
         <div className="mb-4 flex items-center justify-between gap-3 flex-wrap rounded border border-gray-700 bg-primary/40 px-4 py-3">
           <div className="text-sm text-gray-200">
             {clipboard.mode === 'cut' ? 'Cut' : 'Copied'}:{' '}
-            <span className="font-mono text-xs">{clipboard.path}</span>
+            <span className="font-mono text-xs">
+              {(clipboard.items?.length || 0) > 1
+                ? `${clipboard.items.length} item(s)`
+                : (clipboard.items?.[0]?.path || clipboard.path)}
+            </span>
           </div>
           <div className="flex items-center gap-2">
             <button
