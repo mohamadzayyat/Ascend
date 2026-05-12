@@ -138,6 +138,29 @@ function formatTime(iso) {
   }
 }
 
+function browserTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'your PC time'
+  } catch {
+    return 'your PC time'
+  }
+}
+
+function formatPcTime(iso) {
+  if (!iso) return '-'
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
 function joinPath(base, name) {
   if (!base) return name
   return `${base}/${name}`
@@ -311,6 +334,7 @@ export default function AppFileManager({
   const [shareLink, setShareLink] = useState(null)
   const [backupSchedulesOpen, setBackupSchedulesOpen] = useState(false)
   const [backupSchedules, setBackupSchedules] = useState([])
+  const [backupServerTimezone, setBackupServerTimezone] = useState('UTC')
   const [backupSchedulesLoading, setBackupSchedulesLoading] = useState(false)
   const [backupSchedulesError, setBackupSchedulesError] = useState('')
   const [editingScheduleId, setEditingScheduleId] = useState(null)
@@ -321,6 +345,7 @@ export default function AppFileManager({
   const editorStorageKey = `ascend:file-editor:${scopeKey}`
   const dialog = useDialog()
   const currentScope = useMemo(() => scopeFromKey(scopeKey), [scopeKey])
+  const pcTimezone = useMemo(() => browserTimezone(), [])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -412,6 +437,7 @@ export default function AppFileManager({
     try {
       const res = await api.listBackupSchedules()
       const rows = Array.isArray(res.data) ? res.data : (res.data?.schedules || [])
+      if (!Array.isArray(res.data) && res.data?.server_timezone) setBackupServerTimezone(res.data.server_timezone)
       setBackupSchedules(rows)
     } catch (err) {
       setBackupSchedulesError(err.response?.data?.error || 'Failed to load backup schedules')
@@ -960,6 +986,24 @@ export default function AppFileManager({
     }
   }
 
+  const runBackupScheduleNow = async (row) => {
+    setScheduleBusyId(row.id)
+    setBackupSchedulesError('')
+    try {
+      const res = await api.runBackupSchedule(row.id)
+      const archive = res.data.archive
+      flash(`Test backup created: ${archive?.backup_name || row.source_path}`)
+      await loadBackupSchedules()
+      load()
+    } catch (err) {
+      const archive = err.response?.data?.archive
+      setBackupSchedulesError(archive?.error_message || err.response?.data?.error || 'Test backup failed')
+      await loadBackupSchedules()
+    } finally {
+      setScheduleBusyId(null)
+    }
+  }
+
   const toggleSelection = (entry, checked) => {
     setSelected((prev) => {
       const next = new Set(prev)
@@ -1205,6 +1249,9 @@ export default function AppFileManager({
                   {scopedBackupSchedules.map((row) => {
                     const editing = editingScheduleId === row.id
                     const draft = scheduleDrafts[row.id] || scheduleDraftFromRow(row)
+                    const daily = Number(editing ? draft.every_hours : row.every_hours) === 24
+                    const tzLabel = row.schedule_timezone || backupServerTimezone || 'UTC'
+                    const nextRun = row.enabled && row.next_run_at ? formatPcTime(row.next_run_at) : ''
                     return (
                       <tr key={row.id} className="border-t border-gray-800 align-top">
                         <td className="px-4 py-3">
@@ -1251,8 +1298,9 @@ export default function AppFileManager({
                                   min="0"
                                   max="23"
                                   value={draft.at_hour}
+                                  disabled={!daily}
                                   onChange={(e) => patchScheduleDraft(row.id, { at_hour: e.target.value })}
-                                  className="ml-1 w-14 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
+                                  className="ml-1 w-14 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent disabled:opacity-40"
                                 />
                                 :
                                 <input
@@ -1278,14 +1326,20 @@ export default function AppFileManager({
                               <input
                                 value={draft.schedule_timezone}
                                 onChange={(e) => patchScheduleDraft(row.id, { schedule_timezone: e.target.value })}
-                                placeholder="UTC"
+                                placeholder={backupServerTimezone || 'UTC'}
                                 className="w-28 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-xs text-white outline-none focus:border-accent"
                               />
                             </div>
                           ) : (
                             <div className="text-gray-300">
-                              Every {row.every_hours}h at {String(row.at_hour || 0).padStart(2, '0')}:{String(row.at_minute || 0).padStart(2, '0')}
-                              <div className="text-xs text-gray-500">Keep {row.retention_days} day(s) {row.schedule_timezone || 'UTC'}</div>
+                              {Number(row.every_hours) === 24
+                                ? `Daily at ${String(row.at_hour || 0).padStart(2, '0')}:${String(row.at_minute || 0).padStart(2, '0')}`
+                                : `Every ${row.every_hours}h near minute ${String(row.at_minute || 0).padStart(2, '0')}`}
+                              <div className="text-xs text-gray-500">Keep {row.retention_days} day(s) {tzLabel}</div>
+                              <div className="text-xs text-green-300 mt-1">
+                                {row.enabled ? (nextRun ? `Next: ${nextRun}` : 'Next: pending scheduler') : 'Schedule paused'}
+                              </div>
+                              {row.enabled && nextRun && <div className="text-[10px] text-gray-500">{pcTimezone}</div>}
                             </div>
                           )}
                         </td>
@@ -1331,14 +1385,25 @@ export default function AppFileManager({
                                 </button>
                               </>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => editBackupSchedule(row)}
-                                className="p-1.5 rounded text-gray-300 hover:bg-gray-700 hover:text-white"
-                                title="Edit schedule"
-                              >
-                                <Edit3 className="w-4 h-4" />
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => runBackupScheduleNow(row)}
+                                  disabled={scheduleBusyId === row.id}
+                                  className="px-2 py-1 rounded text-xs text-green-200 hover:bg-green-500/15 disabled:opacity-50"
+                                  title="Run a test backup now"
+                                >
+                                  {scheduleBusyId === row.id ? 'Running' : 'Test'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => editBackupSchedule(row)}
+                                  className="p-1.5 rounded text-gray-300 hover:bg-gray-700 hover:text-white"
+                                  title="Edit schedule"
+                                >
+                                  <Edit3 className="w-4 h-4" />
+                                </button>
+                              </>
                             )}
                             <button
                               type="button"

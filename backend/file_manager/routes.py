@@ -13,7 +13,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Blueprint, after_this_request, jsonify, request, send_file, session
+from flask import Blueprint, after_this_request, has_app_context, jsonify, request, send_file, session
 from flask_login import current_user, login_required
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -1236,12 +1236,62 @@ def register_fm_scheduler(flask_app):
 def _get_iana_zone(tz_name):
     """Resolve IANA timezone name to ZoneInfo."""
     from zoneinfo import ZoneInfo
+    s = (tz_name or 'UTC').strip().replace('\\', '/')
     try:
-        if not tz_name or not tz_name.strip():
-            return ZoneInfo('UTC')
-        return ZoneInfo(tz_name.strip())
+        return ZoneInfo(s or 'UTC')
     except Exception:
         return ZoneInfo('UTC')
+
+
+def _server_timezone_name():
+    """Best-effort IANA timezone for the Ascend host."""
+    tz = (os.environ.get('TZ') or '').strip()
+    if tz:
+        return tz
+    try:
+        z = datetime.now().astimezone().tzinfo
+        key = getattr(z, 'key', None)
+        if key:
+            return str(key)
+    except Exception:
+        pass
+    return 'UTC'
+
+
+_iana_tz_lower_map = None
+
+
+def _iana_tz_lower_map_build():
+    global _iana_tz_lower_map
+    if _iana_tz_lower_map is None:
+        from zoneinfo import available_timezones
+        _iana_tz_lower_map = {z.lower(): z for z in available_timezones()}
+    return _iana_tz_lower_map
+
+
+def _canonical_timezone_name(raw):
+    if raw is None:
+        return None
+    s = str(raw).strip().replace('\\', '/')
+    while '//' in s:
+        s = s.replace('//', '/')
+    if not s:
+        return None
+    canon = _iana_tz_lower_map_build().get(s.lower())
+    if canon:
+        return canon
+    from zoneinfo import ZoneInfo
+    try:
+        zi = ZoneInfo(s)
+        return getattr(zi, 'key', None) or s
+    except Exception:
+        pass
+    raise ValueError('Unknown timezone. Use an IANA name like Asia/Beirut.')
+
+
+def _folder_schedule_tz_name(schedule):
+    raw = (schedule.schedule_timezone or '').strip() if schedule.schedule_timezone else ''
+    return raw or _server_timezone_name()
 
 
 def _reschedule_folder_backup_jobs():
@@ -1270,7 +1320,7 @@ def _schedule_folder_backup(schedule, sched=None):
     if sched is None:
         return
     
-    tz = _get_iana_zone(schedule.schedule_timezone)
+    tz = _get_iana_zone(_folder_schedule_tz_name(schedule))
     ah = max(0, min(int(schedule.at_hour or 0), 23))
     am = max(0, min(int(schedule.at_minute or 0), 59))
     eh = max(1, min(int(schedule.every_hours or 2), 24 * 30))
@@ -1283,20 +1333,19 @@ def _schedule_folder_backup(schedule, sched=None):
     except Exception:
         pass
     
-    from apscheduler.triggers.cron import CronTrigger
     if eh == 24:
-        # Daily backup at the selected time.
+        from apscheduler.triggers.cron import CronTrigger
         trigger = CronTrigger(hour=ah, minute=am, timezone=tz)
-    elif eh < 24:
-        # Hourly backups should still honor the selected minute. For intervals
-        # above one hour, at_hour is the daily anchor for the hour cadence.
-        hour_expr = '*' if eh == 1 else f'{ah}-23/{eh}'
-        trigger = CronTrigger(hour=hour_expr, minute=am, timezone=tz)
     else:
-        # Multi-day intervals keep interval semantics because cron day steps can
-        # drift around month boundaries and DST in surprising ways.
         from apscheduler.triggers.interval import IntervalTrigger
-        trigger = IntervalTrigger(hours=eh, timezone=tz)
+        now = datetime.now(timezone.utc)
+        start = now.replace(second=0, microsecond=0, minute=am)
+        if start <= now:
+            start = start + timedelta(hours=eh)
+        try:
+            trigger = IntervalTrigger(hours=eh, start_date=start, timezone=tz)
+        except TypeError:
+            trigger = IntervalTrigger(hours=eh, start_date=start)
     
     sched.add_job(
         _execute_folder_backup,
@@ -1309,19 +1358,48 @@ def _schedule_folder_backup(schedule, sched=None):
     )
 
 
-def _execute_folder_backup(schedule_id):
+def _folder_schedule_next_run_at(schedule):
+    sched = _ensure_fm_scheduler()
+    if not sched or not schedule.enabled:
+        return None
+    job = sched.get_job(f'fm-backup-{schedule.id}')
+    if not job or not job.next_run_time:
+        return None
+    return iso_utc(job.next_run_time)
+
+
+def _folder_schedule_dict_with_next(schedule):
+    d = schedule.to_dict()
+    d['next_run_at'] = _folder_schedule_next_run_at(schedule)
+    d['server_timezone'] = _server_timezone_name()
+    return d
+
+
+def _execute_folder_backup(schedule_id, triggered_by='scheduled'):
     """Execute a scheduled folder backup."""
     from backend.models import FolderBackupSchedule, FolderBackupArchive
     from backend.extensions import db
     
+    if has_app_context():
+        return _execute_folder_backup_in_context(schedule_id, triggered_by)
+    if app:
+        with app.app_context():
+            return _execute_folder_backup_in_context(schedule_id, triggered_by)
+    return _execute_folder_backup_in_context(schedule_id, triggered_by)
+
+
+def _execute_folder_backup_in_context(schedule_id, triggered_by='scheduled'):
+    from backend.models import FolderBackupSchedule, FolderBackupArchive
+    from backend.extensions import db
+
     try:
         schedule = FolderBackupSchedule.query.get(schedule_id)
         if not schedule:
-            return
+            return None
         
         archive = FolderBackupArchive(
             schedule_id=schedule_id,
-            triggered_by='scheduled',
+            triggered_by=triggered_by,
             backup_name=f'{schedule.source_path.split("/")[-1]}_backup_{datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")}',
             backup_path=schedule.destination_path,
             status='pending',
@@ -1388,6 +1466,7 @@ def _execute_folder_backup(schedule_id):
                     db.session.delete(old)
             
             db.session.commit()
+            return archive
         except Exception as e:
             archive.status = 'failed'
             archive.error_message = str(e)[:500]
@@ -1399,8 +1478,10 @@ def _execute_folder_backup(schedule_id):
             schedule.last_run_error = str(e)[:500]
             
             db.session.commit()
+            return archive
     except Exception as e:
         print(f'[backup scheduler] Error executing schedule {schedule_id}: {e}', file=sys.stderr)
+        return None
 
 
 # Folder backup schedule routes
@@ -1411,7 +1492,10 @@ def api_list_backup_schedules():
     from backend.models import FolderBackupSchedule
     
     schedules = FolderBackupSchedule.query.filter_by(user_id=current_user.id).all()
-    return jsonify([s.to_dict() for s in schedules])
+    return jsonify({
+        'schedules': [_folder_schedule_dict_with_next(s) for s in schedules],
+        'server_timezone': _server_timezone_name(),
+    })
 
 
 @bp.route('/api/backup-schedules', methods=['POST'])
@@ -1455,6 +1539,11 @@ def api_create_backup_schedule():
             return err
         scope_id = None
     
+    try:
+        schedule_timezone = _canonical_timezone_name(data.get('schedule_timezone'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
     schedule = FolderBackupSchedule(
         user_id=current_user.id,
         scope_type=scope_type,
@@ -1465,7 +1554,7 @@ def api_create_backup_schedule():
         at_hour=max(0, min(at_hour, 23)),
         at_minute=max(0, min(at_minute, 59)),
         retention_days=max(0, retention_days),
-        schedule_timezone=data.get('schedule_timezone', '').strip() or None,
+        schedule_timezone=schedule_timezone,
         enabled=True,
     )
     
@@ -1475,7 +1564,7 @@ def api_create_backup_schedule():
     # Re-schedule all jobs
     _reschedule_folder_backup_jobs()
     
-    return jsonify(schedule.to_dict()), 201
+    return jsonify({'schedule': _folder_schedule_dict_with_next(schedule), 'server_timezone': _server_timezone_name()}), 201
 
 
 @bp.route('/api/backup-schedules/<int:schedule_id>', methods=['GET'])
@@ -1488,7 +1577,7 @@ def api_get_backup_schedule(schedule_id):
     if schedule.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
     
-    return jsonify(schedule.to_dict())
+    return jsonify({'schedule': _folder_schedule_dict_with_next(schedule), 'server_timezone': _server_timezone_name()})
 
 
 @bp.route('/api/backup-schedules/<int:schedule_id>', methods=['PUT'])
@@ -1526,7 +1615,10 @@ def api_update_backup_schedule(schedule_id):
     if 'retention_days' in data:
         schedule.retention_days = max(0, int(data.get('retention_days', 7)))
     if 'schedule_timezone' in data:
-        schedule.schedule_timezone = data.get('schedule_timezone', '').strip() or None
+        try:
+            schedule.schedule_timezone = _canonical_timezone_name(data.get('schedule_timezone'))
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
     
     schedule.updated_at = datetime.now(timezone.utc)
     db.session.commit()
@@ -1534,7 +1626,30 @@ def api_update_backup_schedule(schedule_id):
     # Re-schedule jobs
     _reschedule_folder_backup_jobs()
     
-    return jsonify(schedule.to_dict())
+    return jsonify({'schedule': _folder_schedule_dict_with_next(schedule), 'server_timezone': _server_timezone_name()})
+
+
+@bp.route('/api/backup-schedules/<int:schedule_id>/run', methods=['POST'])
+@login_required
+def api_run_backup_schedule(schedule_id):
+    """Run a folder backup schedule immediately for testing."""
+    from backend.models import FolderBackupSchedule
+
+    schedule = FolderBackupSchedule.query.get_or_404(schedule_id)
+    if schedule.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    archive = _execute_folder_backup(schedule.id, triggered_by='manual')
+    if not archive:
+        return jsonify({'error': 'Backup did not start.'}), 500
+    db.session.refresh(schedule)
+    payload = {
+        'ok': archive.status == 'success',
+        'archive': archive.to_dict(),
+        'schedule': _folder_schedule_dict_with_next(schedule),
+        'server_timezone': _server_timezone_name(),
+    }
+    return jsonify(payload), (200 if archive.status == 'success' else 400)
 
 
 @bp.route('/api/backup-schedules/<int:schedule_id>', methods=['DELETE'])

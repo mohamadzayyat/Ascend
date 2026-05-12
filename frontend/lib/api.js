@@ -338,6 +338,7 @@ export function makeFileApi(prefix) {
     getBackupSchedule: (scheduleId) => api.get(`/api/backup-schedules/${scheduleId}`),
     updateBackupSchedule: (scheduleId, data) => api.put(`/api/backup-schedules/${scheduleId}`, data),
     deleteBackupSchedule: (scheduleId) => api.delete(`/api/backup-schedules/${scheduleId}`),
+    runBackupSchedule: (scheduleId) => api.post(`/api/backup-schedules/${scheduleId}/run`, {}, { timeout: 1900000 }),
     listBackupArchives: () => api.get('/api/backup-archives'),
     
     // Aliases for compatibility
