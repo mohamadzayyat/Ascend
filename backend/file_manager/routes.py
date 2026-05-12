@@ -1433,7 +1433,7 @@ def _execute_folder_backup_in_context(schedule_id, triggered_by='scheduled'):
             backup_path = (dest_base / archive.backup_name).resolve()
             backup_path.relative_to(base)  # Verify in scope
             
-            shutil.copytree(source, backup_path)
+            shutil.copytree(source, backup_path, dirs_exist_ok=True)
             
             # Calculate size
             size = sum(f.stat().st_size for f in backup_path.rglob('*') if f.is_file())
