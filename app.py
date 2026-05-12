@@ -3095,6 +3095,82 @@ def _wait_for_app_port(app_row, log, timeout=20):
     return False
 
 
+def _restore_deployed_pm2_apps_on_boot():
+    """Best-effort restore for deployed Node apps after panel updates/reboots."""
+    if not shutil.which('pm2'):
+        return
+    lock_path = Path('/tmp/ascend-runtime-restore.lock')
+    lock_fd = None
+    try:
+        try:
+            if lock_path.exists() and time.time() - lock_path.stat().st_mtime > 300:
+                lock_path.unlink()
+        except Exception:
+            pass
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(lock_fd, str(os.getpid()).encode())
+    except FileExistsError:
+        return
+    except Exception as exc:
+        print(f'[runtime-restore] could not acquire lock: {exc}', file=sys.stderr)
+        return
+    try:
+        pm2_rows = _load_pm2_processes()
+        pm2_by_name = {p.get('name'): p for p in pm2_rows if p.get('name')}
+    except Exception as exc:
+        print(f'[runtime-restore] could not read PM2 process list: {exc}', file=sys.stderr)
+        pm2_by_name = {}
+
+    apps = App.query.filter(
+        App.status == 'deployed',
+        App.pm2_name.isnot(None),
+        App.start_command.isnot(None),
+    ).all()
+    for app_row in apps:
+        if _is_php_app(app_row) or _is_static_app(app_row):
+            continue
+        pm2_name = (app_row.pm2_name or '').strip()
+        if not pm2_name or not (app_row.start_command or '').strip():
+            continue
+        proc = pm2_by_name.get(pm2_name)
+        port_ok = _is_port_listening(app_row.app_port) if app_row.app_port else True
+        if proc and proc.get('status') == 'online' and port_ok is not False:
+            continue
+
+        deploy_dir = _app_deploy_dir(app_row)
+        if not deploy_dir.exists():
+            print(f'[runtime-restore] skip {pm2_name}: deploy dir missing: {deploy_dir}', file=sys.stderr)
+            continue
+
+        reason = 'missing PM2 process' if not proc else f'PM2={proc.get("status")}, port_listening={port_ok}'
+        print(f'[runtime-restore] restarting {pm2_name}: {reason}', file=sys.stderr)
+        try:
+            class _BootLog:
+                def write(self, msg):
+                    text = str(msg).rstrip()
+                    if text:
+                        print(f'[runtime-restore] {text}', file=sys.stderr)
+                def flush(self):
+                    pass
+
+            log = _BootLog()
+            _write_app_env(app_row, deploy_dir, log)
+            run_cmd(['pm2', 'delete', pm2_name], log, check=False)
+            if run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
+                run_cmd(['pm2', 'save'], log, check=False)
+                _wait_for_app_port(app_row, log, timeout=30)
+            else:
+                print(f'[runtime-restore] PM2 start failed for {pm2_name}', file=sys.stderr)
+        except Exception as exc:
+            print(f'[runtime-restore] failed for {pm2_name}: {exc}', file=sys.stderr)
+    try:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def deploy_app_bg(deployment_id, github_username, github_token):
     """Background task: deploy a single App. Runs in its own app context."""
     with app.app_context():
@@ -5375,6 +5451,13 @@ with app.app_context():
         register_fm_scheduler(app)
     except Exception as e:
         print(f'[scheduler] WARNING: folder backup scheduler boot failed: {e}', file=sys.stderr)
+
+    # After panel updates/reboots, PM2 can be alive while deployed app
+    # processes are missing or no longer bound to their configured ports.
+    try:
+        _restore_deployed_pm2_apps_on_boot()
+    except Exception as e:
+        print(f'[runtime-restore] WARNING: deployed app restore failed: {e}', file=sys.stderr)
 
 
 if __name__ == '__main__':
