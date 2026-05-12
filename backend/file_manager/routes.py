@@ -1283,13 +1283,18 @@ def _schedule_folder_backup(schedule, sched=None):
     except Exception:
         pass
     
-    # Schedule based on interval
+    from apscheduler.triggers.cron import CronTrigger
     if eh == 24:
-        # Daily backup at specific time
-        from apscheduler.triggers.cron import CronTrigger
+        # Daily backup at the selected time.
         trigger = CronTrigger(hour=ah, minute=am, timezone=tz)
+    elif eh < 24:
+        # Hourly backups should still honor the selected minute. For intervals
+        # above one hour, at_hour is the daily anchor for the hour cadence.
+        hour_expr = '*' if eh == 1 else f'{ah}-23/{eh}'
+        trigger = CronTrigger(hour=hour_expr, minute=am, timezone=tz)
     else:
-        # Interval-based backup
+        # Multi-day intervals keep interval semantics because cron day steps can
+        # drift around month boundaries and DST in surprising ways.
         from apscheduler.triggers.interval import IntervalTrigger
         trigger = IntervalTrigger(hours=eh, timezone=tz)
     
