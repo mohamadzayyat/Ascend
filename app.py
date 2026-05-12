@@ -5368,6 +5368,13 @@ with app.app_context():
         _reschedule_backup_jobs()
     except Exception as e:
         print(f'[scheduler] WARNING: backup scheduler boot failed: {e}', file=sys.stderr)
+    
+    # Boot the folder backup scheduler.
+    try:
+        from backend.file_manager.routes import register_fm_scheduler
+        register_fm_scheduler(app)
+    except Exception as e:
+        print(f'[scheduler] WARNING: folder backup scheduler boot failed: {e}', file=sys.stderr)
 
 
 if __name__ == '__main__':

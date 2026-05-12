@@ -259,6 +259,14 @@ export const apiClient = {
     api.put(`/api/databases/connections/${connId}/backup-schedules/${scheduleId}`, data),
   deleteDbBackupSchedule: (connId, scheduleId) =>
     api.delete(`/api/databases/connections/${connId}/backup-schedules/${scheduleId}`),
+
+  // Folder backup schedules
+  listFolderBackupSchedules: () => api.get('/api/backup-schedules'),
+  createFolderBackupSchedule: (data) => api.post('/api/backup-schedules', data),
+  getFolderBackupSchedule: (scheduleId) => api.get(`/api/backup-schedules/${scheduleId}`),
+  updateFolderBackupSchedule: (scheduleId, data) => api.put(`/api/backup-schedules/${scheduleId}`, data),
+  deleteFolderBackupSchedule: (scheduleId) => api.delete(`/api/backup-schedules/${scheduleId}`),
+  listFolderBackupArchives: () => api.get('/api/backup-archives'),
 }
 
 export function securityStatusStreamUrl() {
@@ -321,6 +329,19 @@ export function makeFileApi(prefix) {
       api.post(`${prefix}/files/archive`, { paths, current_path: currentPath, output_name: outputName, mode: 'create' }),
     share: (path, expiresHours = 24) =>
       api.post(`${prefix}/files/share`, { path, expires_hours: expiresHours }),
+    backup: (sourcePath, destinationPath) =>
+      api.post(`${prefix}/files/backup`, { source_path: sourcePath, destination_path: destinationPath }),
+    
+    // Schedule management (global endpoints, not scoped to prefix)
+    listBackupSchedules: () => api.get('/api/backup-schedules'),
+    createBackupSchedule: (data) => api.post('/api/backup-schedules', data),
+    getBackupSchedule: (scheduleId) => api.get(`/api/backup-schedules/${scheduleId}`),
+    updateBackupSchedule: (scheduleId, data) => api.put(`/api/backup-schedules/${scheduleId}`, data),
+    deleteBackupSchedule: (scheduleId) => api.delete(`/api/backup-schedules/${scheduleId}`),
+    listBackupArchives: () => api.get('/api/backup-archives'),
+    
+    // Aliases for compatibility
+    createFolderBackupSchedule: (data) => api.post('/api/backup-schedules', data),
   }
 }
 export const appFileApi = (id) => makeFileApi(`/api/app/${id}`)

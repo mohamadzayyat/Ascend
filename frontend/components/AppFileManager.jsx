@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ClipboardPaste,
   ChevronRight,
+  Clock,
   Copy,
   Download,
   Edit3,
@@ -160,7 +161,7 @@ function contextMenuPosition(x, y, entry) {
   const menuWidth = 190
   const itemHeight = 37
   const itemCount = entry?.is_dir
-    ? 7
+    ? 9
     : 8 + (isPreviewable(entry?.name || '') ? 1 : 0) + (isZipFile(entry?.name) ? 1 : 0)
   const menuHeight = itemCount * itemHeight + 8
   return {
@@ -762,6 +763,85 @@ export default function AppFileManager({
     }
   }
 
+  const backupEntry = async (entry) => {
+    if (!entry.is_dir) {
+      setError('Only folders can be backed up')
+      return
+    }
+    
+    const destPath = await dialog.prompt({
+      title: 'Backup folder',
+      message: `Backup "${entry.name}" to which path?`,
+      label: 'Destination path (relative)',
+      placeholder: 'backups',
+      defaultValue: '',
+      confirmLabel: 'Create backup',
+      required: true,
+    })
+    
+    if (!destPath) return
+    
+    setError('')
+    try {
+      const res = await api.backup(entry.path, destPath.trim())
+      flash(`Backed up ${entry.name} to ${res.data.backup_name} (${formatSize(res.data.size)})`)
+      load()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Backup failed')
+    }
+  }
+
+  const scheduleBackup = async (entry) => {
+    if (!entry.is_dir) {
+      setError('Only folders can be backed up')
+      return
+    }
+    
+    const destPath = await dialog.prompt({
+      title: 'Schedule folder backup',
+      message: `Schedule regular backups for "${entry.name}". Where should backups be stored?`,
+      label: 'Destination path (relative)',
+      placeholder: 'backups',
+      defaultValue: '',
+      confirmLabel: 'Next',
+      required: true,
+    })
+    
+    if (!destPath) return
+    
+    const hoursStr = await dialog.prompt({
+      title: 'Schedule interval',
+      message: 'How often should backups run?',
+      label: 'Every N hours',
+      defaultValue: '2',
+      placeholder: '2',
+      confirmLabel: 'Create schedule',
+      required: true,
+    })
+    
+    if (!hoursStr) return
+    
+    const hours = Math.max(1, Math.min(parseInt(hoursStr, 10) || 2, 24 * 30))
+    
+    // Parse scope from scopeKey (e.g., "app:123" or "project:456")
+    const [scopeType, scopeIdStr] = scopeKey.includes(':') ? scopeKey.split(':') : ['server', null]
+    const scopeId = scopeIdStr ? parseInt(scopeIdStr, 10) : null
+    
+    setError('')
+    try {
+      await api.createFolderBackupSchedule({
+        scope_type: scopeType,
+        scope_id: scopeId,
+        source_path: entry.path,
+        destination_path: destPath.trim(),
+        every_hours: hours,
+      })
+      flash(`Scheduled backups for ${entry.name} every ${hours} hour(s)`)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Schedule failed')
+    }
+  }
+
   const toggleSelection = (entry, checked) => {
     setSelected((prev) => {
       const next = new Set(prev)
@@ -1327,6 +1407,30 @@ export default function AppFileManager({
               }}
             >
               Share temporary link
+            </MenuItem>
+          )}
+          {menu.entry.is_dir && (
+            <MenuItem
+              icon={<Download className="w-4 h-4" />}
+              onClick={() => {
+                const entry = menu.entry
+                setMenu(null)
+                backupEntry(entry)
+              }}
+            >
+              Backup folder
+            </MenuItem>
+          )}
+          {menu.entry.is_dir && (
+            <MenuItem
+              icon={<Clock className="w-4 h-4" />}
+              onClick={() => {
+                const entry = menu.entry
+                setMenu(null)
+                scheduleBackup(entry)
+              }}
+            >
+              Schedule backups
             </MenuItem>
           )}
           <MenuItem

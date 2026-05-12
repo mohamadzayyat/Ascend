@@ -427,6 +427,23 @@ def _repair_crowdsec_bouncer():
     return ok, results
 
 
+def _restart_crowdsec_bouncer():
+    systemctl = shutil.which('systemctl')
+    if not systemctl:
+        return {'ok': False, 'error': 'systemctl was not found.'}
+    unit = _first_existing_service(BOUNCER_SERVICE_CANDIDATES)
+    if not unit or not _systemd_unit_exists(unit):
+        return {'ok': False, 'error': 'CrowdSec firewall bouncer service was not found.'}
+    rc, out, err = _run([systemctl, 'restart', unit], timeout=20)
+    return {
+        'ok': rc == 0,
+        'name': unit,
+        'returncode': rc,
+        'stdout': out,
+        'stderr': err,
+    }
+
+
 def _tool_version(name, args):
     path = shutil.which(name)
     if not path:
@@ -1338,8 +1355,9 @@ def api_security_crowdsec_decision_delete():
     _remove_crowdsec_decision_from_cache(decision_id, value)
     already = bool(result.get('already_removed'))
     message = 'CrowdSec decision was already removed.' if already else 'CrowdSec decision removed.'
-    _audit_log('security.crowdsec_decision_deleted', 'ok', f'{message} {value or decision_id}', {'id': decision_id, 'value': value, 'result': result})
-    return jsonify({'message': message, 'output': result.get('stdout') or '', 'already_removed': already, 'result': result})
+    bouncer_refresh = _restart_crowdsec_bouncer() if not already else {'ok': True, 'skipped': 'decision already removed'}
+    _audit_log('security.crowdsec_decision_deleted', 'ok', f'{message} {value or decision_id}', {'id': decision_id, 'value': value, 'result': result, 'bouncer_refresh': bouncer_refresh})
+    return jsonify({'message': message, 'output': result.get('stdout') or '', 'already_removed': already, 'result': result, 'bouncer_refresh': bouncer_refresh})
 
 
 @bp.route('/api/security/crowdsec/decisions/all', methods=['DELETE'])
@@ -1394,11 +1412,12 @@ def api_security_crowdsec_decisions_delete_all():
             _remove_crowdsec_decision_from_cache(item.get('id'), item.get('value'))
         else:
             failed += 1
+    bouncer_refresh = _restart_crowdsec_bouncer() if removed else {'ok': True, 'skipped': 'no decisions removed'}
     if failed == 0:
         _clear_crowdsec_decisions_cache()
-    _audit_log('security.crowdsec_decisions_deleted_all', 'ok' if failed == 0 else 'failed', f'Bulk CrowdSec unblock removed {removed}, failed {failed}', {'removed': removed, 'failed': failed})
+    _audit_log('security.crowdsec_decisions_deleted_all', 'ok' if failed == 0 else 'failed', f'Bulk CrowdSec unblock removed {removed}, failed {failed}', {'removed': removed, 'failed': failed, 'bouncer_refresh': bouncer_refresh})
     status_code = 200 if failed == 0 else 500
-    return jsonify({'message': f'Removed {removed} CrowdSec block(s).', 'removed': removed, 'failed': failed, 'results': results}), status_code
+    return jsonify({'message': f'Removed {removed} CrowdSec block(s).', 'removed': removed, 'failed': failed, 'results': results, 'bouncer_refresh': bouncer_refresh}), status_code
 
 
 @bp.route('/api/security/ssh-failures')

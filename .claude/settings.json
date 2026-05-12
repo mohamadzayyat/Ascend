@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
+      "Bash(npx --no-install next lint --dir components/AppFileManager.jsx --dir pages/app --dir lib)",
+      "Bash(git -C d:/personal/projects/cpanel status)",
+      "Bash(git -C d:/personal/projects/cpanel diff --stat)",
+      "Bash(git -C d:/personal/projects/cpanel log -5 --oneline)",
+      "Bash(git -C d:/personal/projects/cpanel add app.py frontend/lib/api.js frontend/pages/app/\\\\[id\\\\].jsx frontend/components/AppFileManager.jsx)",
+      "Bash(git -C d:/personal/projects/cpanel commit -m ' *)",
+      "Bash(git -C d:/personal/projects/cpanel push origin main)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
+      "Bash(git -C d:/personal/projects/cpanel add app.py frontend/components/AppFileManager.jsx)",
+      "Bash(git -C d:/personal/projects/cpanel add frontend/components/AppFileManager.jsx)",
+      "Bash(node -e \"require\\('@babel/parser'\\).parse\\(require\\('fs'\\).readFileSync\\('components/AppFileManager.jsx','utf8'\\), { sourceType:'module', plugins:['jsx'] }\\); console.log\\('ok'\\)\")",
+      "Bash(node -e \"const a=require\\('acorn'\\); try { require\\('acorn-jsx'\\); } catch\\(e\\) { console.log\\('no acorn-jsx'\\); } console.log\\('has acorn'\\)\")",
+      "Bash(npx --no-install next build)",
+      "Bash(git -C d:/personal/projects/cpanel add frontend/components/AppFileManager.jsx frontend/lib/api.js)",
+      "Bash(git -C d:/personal/projects/cpanel add frontend/components/AppCard.jsx frontend/pages/projects/\\\\[id\\\\].jsx frontend/lib/hooks/useAuth.js)",
+      "Bash(git -C d:/personal/projects/cpanel add app.py frontend/lib/api.js frontend/components/DiskUsage.jsx frontend/components/AppCard.jsx frontend/pages/projects/\\\\[id\\\\].jsx frontend/pages/app/\\\\[id\\\\].jsx)",
+      "Bash(git -C d:/personal/projects/cpanel add requirements.txt app.py frontend/lib/api.js frontend/lib/hooks/useAuth.js frontend/components/ServerStats.jsx frontend/pages/dashboard.jsx)",
+      "Bash(git -C d:/personal/projects/cpanel add app.py frontend/lib/api.js frontend/components/AppFileManager.jsx frontend/pages/app/\\\\[id\\\\].jsx frontend/pages/projects/\\\\[id\\\\].jsx)"
+    ],
+    "additionalDirectories": [
+      "d:\\personal\\projects\\cpanel\\frontend\\pages\\projects\\[id]"
+    ]
+  }
+}

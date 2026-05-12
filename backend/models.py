@@ -375,4 +375,90 @@ class Deployment(db.Model):
         }
 
 
+class FolderBackupSchedule(db.Model):
+    """Recurring backup job for a folder. Supports apps, projects, or server files."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    
+    # Scope: app:<id>, project:<id>, or server
+    scope_type = db.Column(db.String(20), nullable=False)  # app | project | server
+    scope_id = db.Column(db.Integer)  # app_id or project_id; null for server
+    
+    # What to back up (relative path within scope)
+    source_path = db.Column(db.String(500), nullable=False)
+    # Where to back up (relative path within scope)
+    destination_path = db.Column(db.String(500), nullable=False)
+    
+    # Schedule params (similar to BackupSchedule)
+    enabled = db.Column(db.Boolean, default=True, nullable=False)
+    every_hours = db.Column(db.Integer, default=2, nullable=False)
+    at_hour = db.Column(db.Integer, default=0, nullable=False)
+    at_minute = db.Column(db.Integer, default=0, nullable=False)
+    schedule_timezone = db.Column(db.String(64), nullable=True)
+    retention_days = db.Column(db.Integer, default=7, nullable=False)
+    
+    # Tracking
+    last_run_at = db.Column(db.DateTime)
+    last_run_status = db.Column(db.String(20))  # success | failed
+    last_run_error = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    user = db.relationship('User', backref='folder_backup_schedules')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'scope_type': self.scope_type,
+            'scope_id': self.scope_id,
+            'source_path': self.source_path,
+            'destination_path': self.destination_path,
+            'enabled': self.enabled,
+            'every_hours': self.every_hours,
+            'at_hour': self.at_hour,
+            'at_minute': self.at_minute,
+            'schedule_timezone': (self.schedule_timezone or '').strip() or None,
+            'retention_days': self.retention_days,
+            'last_run_at': iso_utc(self.last_run_at),
+            'last_run_status': self.last_run_status,
+            'last_run_error': self.last_run_error,
+            'created_at': iso_utc(self.created_at),
+            'updated_at': iso_utc(self.updated_at),
+        }
+
+
+class FolderBackupArchive(db.Model):
+    """Record of a completed folder backup."""
+    id = db.Column(db.Integer, primary_key=True)
+    schedule_id = db.Column(db.Integer, db.ForeignKey('folder_backup_schedule.id'))
+    
+    # Backup details
+    backup_name = db.Column(db.String(255), nullable=False)
+    backup_path = db.Column(db.String(500), nullable=False)
+    size_bytes = db.Column(db.BigInteger, default=0)
+    status = db.Column(db.String(20), default='pending', nullable=False)  # pending|success|failed
+    error_message = db.Column(db.Text)
+    triggered_by = db.Column(db.String(20), default='manual')  # manual|scheduled
+    started_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    completed_at = db.Column(db.DateTime)
+    duration_seconds = db.Column(db.Integer)
+    
+    schedule = db.relationship('FolderBackupSchedule', backref='backups')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'schedule_id': self.schedule_id,
+            'backup_name': self.backup_name,
+            'backup_path': self.backup_path,
+            'size_bytes': self.size_bytes,
+            'status': self.status,
+            'error_message': self.error_message,
+            'triggered_by': self.triggered_by,
+            'started_at': iso_utc(self.started_at),
+            'completed_at': iso_utc(self.completed_at),
+            'duration_seconds': self.duration_seconds,
+        }
+
+
 # ═══════════════════════════════════════════

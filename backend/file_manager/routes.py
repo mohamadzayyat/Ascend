@@ -4,12 +4,13 @@ import os
 import re
 import shutil
 import socket
+import sys
 import tempfile
 import time
 import urllib.parse
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Blueprint, after_this_request, jsonify, request, send_file, session
@@ -732,6 +733,71 @@ def _fm_handle_share(scope):
     return jsonify(share), 201
 
 
+def _fm_handle_backup(scope):
+    data = request.get_json(silent=True) or {}
+    source_path = str(data.get('source_path') or '').strip()
+    destination_path = str(data.get('destination_path') or '').strip()
+    
+    if not source_path:
+        return jsonify({'error': 'source_path is required'}), 400
+    if not destination_path:
+        return jsonify({'error': 'destination_path is required'}), 400
+    
+    try:
+        base, source = _fm_resolve(scope, source_path)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': 'Source folder not found'}), 404
+    
+    # Source must be a directory
+    if not source.is_dir():
+        return jsonify({'error': 'Only folders can be backed up'}), 400
+    
+    try:
+        _, dest_base = _fm_resolve(scope, destination_path, must_exist=False)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    
+    # Create the destination directory if it doesn't exist
+    dest_base.mkdir(parents=True, exist_ok=True)
+    if not dest_base.is_dir():
+        return jsonify({'error': 'Destination must be a directory'}), 400
+    
+    # Create a timestamped backup folder
+    timestamp = datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')
+    backup_name = f'{source.name}_backup_{timestamp}'
+    backup_path = (dest_base / backup_name).resolve()
+    
+    # Verify backup path is within scope
+    try:
+        backup_path.relative_to(base)
+    except ValueError:
+        return jsonify({'error': 'Backup path escapes scope directory'}), 400
+    
+    # Check if backup already exists (shouldn't happen with timestamp, but be safe)
+    if backup_path.exists():
+        return jsonify({'error': f'{backup_name} already exists'}), 409
+    
+    try:
+        # Copy the entire directory tree to the backup location
+        shutil.copytree(source, backup_path)
+    except OSError as exc:
+        # Clean up partial backup if it failed
+        try:
+            shutil.rmtree(backup_path, ignore_errors=True)
+        except Exception:
+            pass
+        return jsonify({'error': f'Backup failed: {exc.strerror or exc}'}), 500
+    
+    return jsonify({
+        'status': 'ok',
+        'backup_name': backup_name,
+        'backup_path': _fm_rel(backup_path, base),
+        'size': sum(f.stat().st_size for f in backup_path.rglob('*') if f.is_file()),
+    }), 201
+
+
 # ── App-scoped routes ──────────────────────────────────────────────
 @bp.route('/api/app/<int:app_id>/files/list')
 @login_required
@@ -817,6 +883,13 @@ def api_app_files_share(app_id):
     return err or _fm_handle_share(a)
 
 
+@bp.route('/api/app/<int:app_id>/files/backup', methods=['POST'])
+@login_required
+def api_app_files_backup(app_id):
+    a, err = _fm_owned_app(app_id)
+    return err or _fm_handle_backup(a)
+
+
 # ── Project-scoped routes (browse the cloned repo root) ───────────
 @bp.route('/api/project/<int:project_id>/files/list')
 @login_required
@@ -900,6 +973,13 @@ def api_project_files_archive(project_id):
 def api_project_files_share(project_id):
     p, err = _fm_owned_project(project_id)
     return err or _fm_handle_share(p)
+
+
+@bp.route('/api/project/<int:project_id>/files/backup', methods=['POST'])
+@login_required
+def api_project_files_backup(project_id):
+    p, err = _fm_owned_project(project_id)
+    return err or _fm_handle_backup(p)
 
 
 @bp.route('/api/project/<int:project_id>/files/delete', methods=['POST'])
@@ -1106,8 +1186,374 @@ def api_server_files_share():
     return err or _fm_handle_share(scope)
 
 
+@bp.route('/api/server/files/backup', methods=['POST'])
+@login_required
+def api_server_files_backup():
+    scope, err = _fm_owned_server()
+    return err or _fm_handle_backup(scope)
+
+
 @bp.route('/api/server/files/delete', methods=['POST'])
 @login_required
 def api_server_files_delete():
     scope, err = _fm_owned_server()
     return err or _fm_handle_delete(scope)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Folder Backup Scheduler
+# ══════════════════════════════════════════════════════════════════
+
+_fm_scheduler = None
+
+
+def _ensure_fm_scheduler():
+    """Lazy-load APScheduler for folder backups."""
+    global _fm_scheduler
+    if _fm_scheduler is not None:
+        return _fm_scheduler
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+    except ImportError:
+        return None
+    _fm_scheduler = BackgroundScheduler(timezone='UTC', daemon=True)
+    _fm_scheduler.start()
+    return _fm_scheduler
+
+
+def register_fm_scheduler(flask_app):
+    """Boot the folder backup scheduler. Called from app initialization."""
+    def reschedule():
+        _reschedule_folder_backup_jobs()
+    
+    with flask_app.app_context():
+        try:
+            reschedule()
+        except Exception as e:
+            print(f'[scheduler] WARNING: folder backup scheduler boot failed: {e}', file=sys.stderr)
+
+
+def _get_iana_zone(tz_name):
+    """Resolve IANA timezone name to ZoneInfo."""
+    from zoneinfo import ZoneInfo
+    try:
+        if not tz_name or not tz_name.strip():
+            return ZoneInfo('UTC')
+        return ZoneInfo(tz_name.strip())
+    except Exception:
+        return ZoneInfo('UTC')
+
+
+def _reschedule_folder_backup_jobs():
+    """Rebuild all folder backup schedule jobs."""
+    from flask import current_app
+    from backend.models import FolderBackupSchedule
+    
+    sched = _ensure_fm_scheduler()
+    if sched is None:
+        return
+    
+    # Remove existing folder backup jobs
+    for job in list(sched.get_jobs()):
+        if job.id.startswith('fm-backup-'):
+            sched.remove_job(job.id)
+    
+    # Re-add from DB
+    for schedule in FolderBackupSchedule.query.filter_by(enabled=True).all():
+        _schedule_folder_backup(schedule, sched)
+
+
+def _schedule_folder_backup(schedule, sched=None):
+    """Schedule a single folder backup job."""
+    if sched is None:
+        sched = _ensure_fm_scheduler()
+    if sched is None:
+        return
+    
+    tz = _get_iana_zone(schedule.schedule_timezone)
+    ah = max(0, min(int(schedule.at_hour or 0), 23))
+    am = max(0, min(int(schedule.at_minute or 0), 59))
+    eh = max(1, min(int(schedule.every_hours or 2), 24 * 30))
+    
+    job_id = f'fm-backup-{schedule.id}'
+    
+    # Remove existing job if present
+    try:
+        sched.remove_job(job_id)
+    except Exception:
+        pass
+    
+    # Schedule based on interval
+    if eh == 24:
+        # Daily backup at specific time
+        from apscheduler.triggers.cron import CronTrigger
+        trigger = CronTrigger(hour=ah, minute=am, timezone=tz)
+    else:
+        # Interval-based backup
+        from apscheduler.triggers.interval import IntervalTrigger
+        trigger = IntervalTrigger(hours=eh, timezone=tz)
+    
+    sched.add_job(
+        _execute_folder_backup,
+        trigger=trigger,
+        id=job_id,
+        args=(schedule.id,),
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+
+def _execute_folder_backup(schedule_id):
+    """Execute a scheduled folder backup."""
+    from backend.models import FolderBackupSchedule, FolderBackupArchive
+    from backend.extensions import db
+    
+    try:
+        schedule = FolderBackupSchedule.query.get(schedule_id)
+        if not schedule:
+            return
+        
+        archive = FolderBackupArchive(
+            schedule_id=schedule_id,
+            triggered_by='scheduled',
+            backup_name=f'{schedule.source_path.split("/")[-1]}_backup_{datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")}',
+            backup_path=schedule.destination_path,
+            status='pending',
+        )
+        db.session.add(archive)
+        db.session.commit()
+        
+        start_time = datetime.now(timezone.utc)
+        try:
+            # Determine scope
+            if schedule.scope_type == 'app':
+                scope = App.query.get(schedule.scope_id)
+                if not scope:
+                    raise ValueError('App not found')
+            elif schedule.scope_type == 'project':
+                scope = Project.query.get(schedule.scope_id)
+                if not scope:
+                    raise ValueError('Project not found')
+            else:  # server
+                scope = SERVER_FILE_SCOPE
+            
+            # Perform backup
+            base, source = _fm_resolve(scope, schedule.source_path)
+            if not source.is_dir():
+                raise ValueError('Source is not a directory')
+            
+            _, dest_base = _fm_resolve(scope, schedule.destination_path, must_exist=False)
+            dest_base.mkdir(parents=True, exist_ok=True)
+            
+            backup_path = (dest_base / archive.backup_name).resolve()
+            backup_path.relative_to(base)  # Verify in scope
+            
+            shutil.copytree(source, backup_path)
+            
+            # Calculate size
+            size = sum(f.stat().st_size for f in backup_path.rglob('*') if f.is_file())
+            
+            # Update archive
+            archive.size_bytes = size
+            archive.status = 'success'
+            archive.completed_at = datetime.now(timezone.utc)
+            archive.duration_seconds = int((archive.completed_at - start_time).total_seconds())
+            
+            # Update schedule
+            schedule.last_run_at = archive.completed_at
+            schedule.last_run_status = 'success'
+            schedule.last_run_error = None
+            
+            # Clean old backups (retention policy)
+            if schedule.retention_days > 0:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=schedule.retention_days)
+                old_backups = FolderBackupArchive.query.filter(
+                    FolderBackupArchive.schedule_id == schedule_id,
+                    FolderBackupArchive.status == 'success',
+                    FolderBackupArchive.completed_at < cutoff
+                ).all()
+                for old in old_backups:
+                    try:
+                        old_path = Path(str(base / old.backup_path / old.backup_name))
+                        if old_path.exists():
+                            shutil.rmtree(old_path, ignore_errors=True)
+                    except Exception:
+                        pass
+                    db.session.delete(old)
+            
+            db.session.commit()
+        except Exception as e:
+            archive.status = 'failed'
+            archive.error_message = str(e)[:500]
+            archive.completed_at = datetime.now(timezone.utc)
+            archive.duration_seconds = int((archive.completed_at - start_time).total_seconds())
+            
+            schedule.last_run_at = archive.completed_at
+            schedule.last_run_status = 'failed'
+            schedule.last_run_error = str(e)[:500]
+            
+            db.session.commit()
+    except Exception as e:
+        print(f'[backup scheduler] Error executing schedule {schedule_id}: {e}', file=sys.stderr)
+
+
+# Folder backup schedule routes
+@bp.route('/api/backup-schedules', methods=['GET'])
+@login_required
+def api_list_backup_schedules():
+    """List all folder backup schedules for current user."""
+    from backend.models import FolderBackupSchedule
+    
+    schedules = FolderBackupSchedule.query.filter_by(user_id=current_user.id).all()
+    return jsonify([s.to_dict() for s in schedules])
+
+
+@bp.route('/api/backup-schedules', methods=['POST'])
+@login_required
+def api_create_backup_schedule():
+    """Create a new folder backup schedule."""
+    from backend.models import FolderBackupSchedule
+    from backend.extensions import db
+    
+    data = request.get_json(silent=True) or {}
+    
+    # Validate input
+    scope_type = str(data.get('scope_type', '')).strip()
+    scope_id = data.get('scope_id')
+    source_path = str(data.get('source_path', '')).strip()
+    destination_path = str(data.get('destination_path', '')).strip()
+    every_hours = int(data.get('every_hours', 2))
+    at_hour = int(data.get('at_hour', 0))
+    at_minute = int(data.get('at_minute', 0))
+    retention_days = int(data.get('retention_days', 7))
+    
+    if scope_type not in ('app', 'project', 'server'):
+        return jsonify({'error': 'Invalid scope_type'}), 400
+    if not source_path:
+        return jsonify({'error': 'source_path required'}), 400
+    if not destination_path:
+        return jsonify({'error': 'destination_path required'}), 400
+    
+    # Validate scope ownership
+    if scope_type == 'app':
+        a, err = _fm_owned_app(scope_id)
+        if err:
+            return err
+    elif scope_type == 'project':
+        p, err = _fm_owned_project(scope_id)
+        if err:
+            return err
+    else:  # server
+        _, err = _fm_owned_server()
+        if err:
+            return err
+        scope_id = None
+    
+    schedule = FolderBackupSchedule(
+        user_id=current_user.id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        source_path=source_path,
+        destination_path=destination_path,
+        every_hours=max(1, min(every_hours, 24 * 30)),
+        at_hour=max(0, min(at_hour, 23)),
+        at_minute=max(0, min(at_minute, 59)),
+        retention_days=max(0, retention_days),
+        schedule_timezone=data.get('schedule_timezone', '').strip() or None,
+        enabled=True,
+    )
+    
+    db.session.add(schedule)
+    db.session.commit()
+    
+    # Re-schedule all jobs
+    _reschedule_folder_backup_jobs()
+    
+    return jsonify(schedule.to_dict()), 201
+
+
+@bp.route('/api/backup-schedules/<int:schedule_id>', methods=['GET'])
+@login_required
+def api_get_backup_schedule(schedule_id):
+    """Get a specific backup schedule."""
+    from backend.models import FolderBackupSchedule
+    
+    schedule = FolderBackupSchedule.query.get_or_404(schedule_id)
+    if schedule.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    return jsonify(schedule.to_dict())
+
+
+@bp.route('/api/backup-schedules/<int:schedule_id>', methods=['PUT'])
+@login_required
+def api_update_backup_schedule(schedule_id):
+    """Update a backup schedule."""
+    from backend.models import FolderBackupSchedule
+    from backend.extensions import db
+    
+    schedule = FolderBackupSchedule.query.get_or_404(schedule_id)
+    if schedule.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    data = request.get_json(silent=True) or {}
+    
+    # Update fields
+    if 'enabled' in data:
+        schedule.enabled = bool(data.get('enabled'))
+    if 'every_hours' in data:
+        schedule.every_hours = max(1, min(int(data.get('every_hours', 2)), 24 * 30))
+    if 'at_hour' in data:
+        schedule.at_hour = max(0, min(int(data.get('at_hour', 0)), 23))
+    if 'at_minute' in data:
+        schedule.at_minute = max(0, min(int(data.get('at_minute', 0)), 59))
+    if 'retention_days' in data:
+        schedule.retention_days = max(0, int(data.get('retention_days', 7)))
+    if 'schedule_timezone' in data:
+        schedule.schedule_timezone = data.get('schedule_timezone', '').strip() or None
+    
+    schedule.updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+    
+    # Re-schedule jobs
+    _reschedule_folder_backup_jobs()
+    
+    return jsonify(schedule.to_dict())
+
+
+@bp.route('/api/backup-schedules/<int:schedule_id>', methods=['DELETE'])
+@login_required
+def api_delete_backup_schedule(schedule_id):
+    """Delete a backup schedule."""
+    from backend.models import FolderBackupSchedule
+    from backend.extensions import db
+    
+    schedule = FolderBackupSchedule.query.get_or_404(schedule_id)
+    if schedule.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    db.session.delete(schedule)
+    db.session.commit()
+    
+    # Re-schedule jobs
+    _reschedule_folder_backup_jobs()
+    
+    return jsonify({'status': 'ok'})
+
+
+@bp.route('/api/backup-archives', methods=['GET'])
+@login_required
+def api_list_backup_archives():
+    """List backup archives for current user's schedules."""
+    from backend.models import FolderBackupArchive, FolderBackupSchedule
+    
+    schedule_ids = FolderBackupSchedule.query.filter_by(user_id=current_user.id).with_entities(FolderBackupSchedule.id).all()
+    schedule_ids = [s[0] for s in schedule_ids]
+    
+    archives = FolderBackupArchive.query.filter(
+        FolderBackupArchive.schedule_id.in_(schedule_ids)
+    ).order_by(FolderBackupArchive.completed_at.desc()).limit(100).all()
+    
+    return jsonify([a.to_dict() for a in archives])
+
