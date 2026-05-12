@@ -1500,6 +1500,16 @@ def api_update_backup_schedule(schedule_id):
     data = request.get_json(silent=True) or {}
     
     # Update fields
+    if 'source_path' in data:
+        source_path = str(data.get('source_path', '')).strip()
+        if not source_path:
+            return jsonify({'error': 'source_path required'}), 400
+        schedule.source_path = source_path
+    if 'destination_path' in data:
+        destination_path = str(data.get('destination_path', '')).strip()
+        if not destination_path:
+            return jsonify({'error': 'destination_path required'}), 400
+        schedule.destination_path = destination_path
     if 'enabled' in data:
         schedule.enabled = bool(data.get('enabled'))
     if 'every_hours' in data:
@@ -1556,4 +1566,3 @@ def api_list_backup_archives():
     ).order_by(FolderBackupArchive.completed_at.desc()).limit(100).all()
     
     return jsonify([a.to_dict() for a in archives])
-

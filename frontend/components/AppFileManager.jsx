@@ -155,6 +155,14 @@ function baseName(p) {
   return parts[parts.length - 1] || ''
 }
 
+function scopeFromKey(scopeKey) {
+  if (scopeKey && scopeKey.includes(':')) {
+    const [scopeType, scopeIdStr] = scopeKey.split(':')
+    return { scopeType, scopeId: scopeIdStr ? parseInt(scopeIdStr, 10) : null }
+  }
+  return { scopeType: 'server', scopeId: null }
+}
+
 function contextMenuPosition(x, y, entry) {
   if (typeof window === 'undefined') return { x, y }
   const margin = 8
@@ -301,10 +309,18 @@ export default function AppFileManager({
   const [dragOver, setDragOver] = useState(false)
   const [status, setStatus] = useState('')
   const [shareLink, setShareLink] = useState(null)
+  const [backupSchedulesOpen, setBackupSchedulesOpen] = useState(false)
+  const [backupSchedules, setBackupSchedules] = useState([])
+  const [backupSchedulesLoading, setBackupSchedulesLoading] = useState(false)
+  const [backupSchedulesError, setBackupSchedulesError] = useState('')
+  const [editingScheduleId, setEditingScheduleId] = useState(null)
+  const [scheduleDrafts, setScheduleDrafts] = useState({})
+  const [scheduleBusyId, setScheduleBusyId] = useState(null)
   const uploadRef = useRef(null)
   const zipRef = useRef(null)
   const editorStorageKey = `ascend:file-editor:${scopeKey}`
   const dialog = useDialog()
+  const currentScope = useMemo(() => scopeFromKey(scopeKey), [scopeKey])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -389,6 +405,23 @@ export default function AppFileManager({
     setTimeout(() => setStatus((s) => (s === msg ? '' : s)), 2500)
   }
 
+  const loadBackupSchedules = useCallback(async () => {
+    if (!api?.listBackupSchedules) return
+    setBackupSchedulesLoading(true)
+    setBackupSchedulesError('')
+    try {
+      const res = await api.listBackupSchedules()
+      const rows = Array.isArray(res.data) ? res.data : (res.data?.schedules || [])
+      setBackupSchedules(rows)
+    } catch (err) {
+      setBackupSchedulesError(err.response?.data?.error || 'Failed to load backup schedules')
+    } finally {
+      setBackupSchedulesLoading(false)
+    }
+  }, [api])
+
+  useEffect(() => { loadBackupSchedules() }, [loadBackupSchedules])
+
   const breadcrumbs = useMemo(() => {
     if (!path) return []
     const parts = path.split('/').filter(Boolean)
@@ -405,6 +438,13 @@ export default function AppFileManager({
   const selectedEntries = useMemo(
     () => visibleSelectableEntries.filter((entry) => selected.has(entry.path)),
     [visibleSelectableEntries, selected]
+  )
+  const scopedBackupSchedules = useMemo(
+    () => backupSchedules.filter((row) => {
+      const rowScopeId = row.scope_id === null || row.scope_id === undefined ? null : Number(row.scope_id)
+      return row.scope_type === currentScope.scopeType && rowScopeId === currentScope.scopeId
+    }),
+    [backupSchedules, currentScope]
   )
   const allSelected = visibleSelectableEntries.length > 0 && selectedEntries.length === visibleSelectableEntries.length
   const activeEditor = useMemo(
@@ -823,22 +863,100 @@ export default function AppFileManager({
     
     const hours = Math.max(1, Math.min(parseInt(hoursStr, 10) || 2, 24 * 30))
     
-    // Parse scope from scopeKey (e.g., "app:123" or "project:456")
-    const [scopeType, scopeIdStr] = scopeKey.includes(':') ? scopeKey.split(':') : ['server', null]
-    const scopeId = scopeIdStr ? parseInt(scopeIdStr, 10) : null
-    
     setError('')
     try {
-      await api.createFolderBackupSchedule({
-        scope_type: scopeType,
-        scope_id: scopeId,
+      await (api.createBackupSchedule || api.createFolderBackupSchedule)({
+        scope_type: currentScope.scopeType,
+        scope_id: currentScope.scopeId,
         source_path: entry.path,
         destination_path: destPath.trim(),
         every_hours: hours,
       })
       flash(`Scheduled backups for ${entry.name} every ${hours} hour(s)`)
+      loadBackupSchedules()
     } catch (err) {
       setError(err.response?.data?.error || 'Schedule failed')
+    }
+  }
+
+  const openBackupSchedules = () => {
+    setBackupSchedulesOpen((open) => !open)
+    if (!backupSchedulesOpen) loadBackupSchedules()
+  }
+
+  const scheduleDraftFromRow = (row) => ({
+    source_path: row.source_path || '',
+    destination_path: row.destination_path || '',
+    every_hours: String(row.every_hours || 2),
+    at_hour: String(row.at_hour ?? 0),
+    at_minute: String(row.at_minute ?? 0),
+    retention_days: String(row.retention_days ?? 7),
+    schedule_timezone: row.schedule_timezone || '',
+    enabled: row.enabled !== false,
+  })
+
+  const editBackupSchedule = (row) => {
+    setEditingScheduleId(row.id)
+    setScheduleDrafts((drafts) => ({ ...drafts, [row.id]: scheduleDraftFromRow(row) }))
+  }
+
+  const patchScheduleDraft = (id, patch) => {
+    setScheduleDrafts((drafts) => ({
+      ...drafts,
+      [id]: { ...(drafts[id] || {}), ...patch },
+    }))
+  }
+
+  const saveBackupSchedule = async (row) => {
+    const draft = scheduleDrafts[row.id] || scheduleDraftFromRow(row)
+    const sourcePath = draft.source_path.trim()
+    const destinationPath = draft.destination_path.trim()
+    if (!sourcePath || !destinationPath) {
+      setBackupSchedulesError('Source and destination paths are required.')
+      return
+    }
+    setScheduleBusyId(row.id)
+    setBackupSchedulesError('')
+    try {
+      await api.updateBackupSchedule(row.id, {
+        source_path: sourcePath,
+        destination_path: destinationPath,
+        every_hours: Math.max(1, Math.min(parseInt(draft.every_hours, 10) || 2, 24 * 30)),
+        at_hour: Math.max(0, Math.min(parseInt(draft.at_hour, 10) || 0, 23)),
+        at_minute: Math.max(0, Math.min(parseInt(draft.at_minute, 10) || 0, 59)),
+        retention_days: Math.max(0, parseInt(draft.retention_days, 10) || 0),
+        schedule_timezone: draft.schedule_timezone.trim(),
+        enabled: !!draft.enabled,
+      })
+      setEditingScheduleId(null)
+      flash('Backup schedule updated')
+      loadBackupSchedules()
+    } catch (err) {
+      setBackupSchedulesError(err.response?.data?.error || 'Failed to update backup schedule')
+    } finally {
+      setScheduleBusyId(null)
+    }
+  }
+
+  const deleteBackupSchedule = async (row) => {
+    const ok = await dialog.confirm({
+      title: 'Delete backup schedule?',
+      message: `Delete the scheduled backup for "${row.source_path}"? Existing backup files will stay in place.`,
+      confirmLabel: 'Delete schedule',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setScheduleBusyId(row.id)
+    setBackupSchedulesError('')
+    try {
+      await api.deleteBackupSchedule(row.id)
+      if (editingScheduleId === row.id) setEditingScheduleId(null)
+      flash('Backup schedule deleted')
+      loadBackupSchedules()
+    } catch (err) {
+      setBackupSchedulesError(err.response?.data?.error || 'Failed to delete backup schedule')
+    } finally {
+      setScheduleBusyId(null)
     }
   }
 
@@ -999,6 +1117,17 @@ export default function AppFileManager({
           </button>
           <button
             type="button"
+            onClick={openBackupSchedules}
+            className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm"
+            title="View and edit scheduled folder backups"
+          >
+            <Clock className="w-4 h-4" /> Schedules
+            {scopedBackupSchedules.length > 0 && (
+              <span className="rounded bg-accent/20 px-1.5 py-0.5 text-xs text-accent">{scopedBackupSchedules.length}</span>
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => pasteClipboardTo(path)}
             disabled={!clipboard}
             className="inline-flex items-center gap-1 px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm disabled:opacity-50"
@@ -1037,6 +1166,200 @@ export default function AppFileManager({
           <input ref={zipRef} type="file" accept=".zip,application/zip" className="hidden" onChange={onPickZip} />
         </div>
       </div>
+
+      {backupSchedulesOpen && (
+        <div className="mb-4 rounded border border-gray-700 bg-primary/30">
+          <div className="flex items-center justify-between gap-3 border-b border-gray-700 px-4 py-3">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Scheduled folder backups</h3>
+              <p className="text-xs text-gray-500 mt-0.5">{scopedBackupSchedules.length} schedule(s) for this file manager</p>
+            </div>
+            <button
+              type="button"
+              onClick={loadBackupSchedules}
+              className="inline-flex items-center gap-1 px-3 py-2 bg-secondary hover:bg-gray-700 rounded text-white text-sm"
+            >
+              <RefreshCw className={`w-4 h-4 ${backupSchedulesLoading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+          {backupSchedulesError && (
+            <div className="mx-4 mt-3 rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{backupSchedulesError}</div>
+          )}
+          {backupSchedulesLoading && scopedBackupSchedules.length === 0 ? (
+            <div className="p-6 text-center text-sm text-gray-400">Loading schedules...</div>
+          ) : scopedBackupSchedules.length === 0 ? (
+            <div className="p-6 text-center text-sm text-gray-500">No scheduled backups for this file manager yet.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-xs uppercase text-gray-500">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-semibold">Folder</th>
+                    <th className="px-4 py-2 text-left font-semibold">Destination</th>
+                    <th className="px-4 py-2 text-left font-semibold">Schedule</th>
+                    <th className="px-4 py-2 text-left font-semibold">Status</th>
+                    <th className="px-4 py-2 text-right font-semibold">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scopedBackupSchedules.map((row) => {
+                    const editing = editingScheduleId === row.id
+                    const draft = scheduleDrafts[row.id] || scheduleDraftFromRow(row)
+                    return (
+                      <tr key={row.id} className="border-t border-gray-800 align-top">
+                        <td className="px-4 py-3">
+                          {editing ? (
+                            <input
+                              value={draft.source_path}
+                              onChange={(e) => patchScheduleDraft(row.id, { source_path: e.target.value })}
+                              className="w-56 rounded border border-gray-700 bg-secondary px-2 py-1.5 font-mono text-xs text-white outline-none focus:border-accent"
+                            />
+                          ) : (
+                            <span className="font-mono text-xs text-gray-200">{row.source_path}</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {editing ? (
+                            <input
+                              value={draft.destination_path}
+                              onChange={(e) => patchScheduleDraft(row.id, { destination_path: e.target.value })}
+                              className="w-56 rounded border border-gray-700 bg-secondary px-2 py-1.5 font-mono text-xs text-white outline-none focus:border-accent"
+                            />
+                          ) : (
+                            <span className="font-mono text-xs text-gray-300">{row.destination_path}</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {editing ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <label className="text-xs text-gray-500">
+                                Every
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="720"
+                                  value={draft.every_hours}
+                                  onChange={(e) => patchScheduleDraft(row.id, { every_hours: e.target.value })}
+                                  className="ml-1 w-16 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
+                                />
+                                h
+                              </label>
+                              <label className="text-xs text-gray-500">
+                                At
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="23"
+                                  value={draft.at_hour}
+                                  onChange={(e) => patchScheduleDraft(row.id, { at_hour: e.target.value })}
+                                  className="ml-1 w-14 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
+                                />
+                                :
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="59"
+                                  value={draft.at_minute}
+                                  onChange={(e) => patchScheduleDraft(row.id, { at_minute: e.target.value })}
+                                  className="ml-1 w-14 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
+                                />
+                              </label>
+                              <label className="text-xs text-gray-500">
+                                Keep
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={draft.retention_days}
+                                  onChange={(e) => patchScheduleDraft(row.id, { retention_days: e.target.value })}
+                                  className="mx-1 w-16 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
+                                />
+                                days
+                              </label>
+                              <input
+                                value={draft.schedule_timezone}
+                                onChange={(e) => patchScheduleDraft(row.id, { schedule_timezone: e.target.value })}
+                                placeholder="UTC"
+                                className="w-28 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-xs text-white outline-none focus:border-accent"
+                              />
+                            </div>
+                          ) : (
+                            <div className="text-gray-300">
+                              Every {row.every_hours}h at {String(row.at_hour || 0).padStart(2, '0')}:{String(row.at_minute || 0).padStart(2, '0')}
+                              <div className="text-xs text-gray-500">Keep {row.retention_days} day(s) {row.schedule_timezone || 'UTC'}</div>
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {editing ? (
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-300">
+                              <input
+                                type="checkbox"
+                                checked={draft.enabled}
+                                onChange={(e) => patchScheduleDraft(row.id, { enabled: e.target.checked })}
+                                className="accent-accent"
+                              />
+                              Enabled
+                            </label>
+                          ) : (
+                            <div>
+                              <span className={row.enabled ? 'text-green-300' : 'text-gray-500'}>{row.enabled ? 'Enabled' : 'Paused'}</span>
+                              <div className="text-xs text-gray-500">{row.last_run_at ? `Last ${formatTime(row.last_run_at)}` : 'Never run'}</div>
+                              {row.last_run_error && <div className="mt-1 max-w-xs truncate text-xs text-red-300">{row.last_run_error}</div>}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="inline-flex items-center gap-1">
+                            {editing ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => saveBackupSchedule(row)}
+                                  disabled={scheduleBusyId === row.id}
+                                  className="p-1.5 rounded text-gray-300 hover:bg-gray-700 hover:text-white disabled:opacity-50"
+                                  title="Save schedule"
+                                >
+                                  <Save className="w-4 h-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingScheduleId(null)}
+                                  className="p-1.5 rounded text-gray-300 hover:bg-gray-700 hover:text-white"
+                                  title="Cancel"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => editBackupSchedule(row)}
+                                className="p-1.5 rounded text-gray-300 hover:bg-gray-700 hover:text-white"
+                                title="Edit schedule"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => deleteBackupSchedule(row)}
+                              disabled={scheduleBusyId === row.id}
+                              className="p-1.5 rounded text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                              title="Delete schedule"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {selectedEntries.length > 0 && (
         <div className="mb-4 flex items-center justify-between gap-3 flex-wrap rounded border border-accent/30 bg-accent/10 px-4 py-3">
