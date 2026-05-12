@@ -572,16 +572,17 @@ def _fm_handle_copy(scope):
         return jsonify({'error': 'Source not found'}), 404
     if src_p == base or dst_p == base:
         return jsonify({'error': 'Invalid path'}), 400
-    if dst_p.exists():
+    if src_p.is_dir():
+        try:
+            dst_p.relative_to(src_p)
+            return jsonify({'error': 'Cannot copy a directory into itself'}), 400
+        except ValueError:
+            pass
+    if dst_p.exists() and not (src_p.is_dir() and dst_p.is_dir()):
         return jsonify({'error': 'Destination exists'}), 409
-    try:
-        src_p.relative_to(dst_p)
-        return jsonify({'error': 'Cannot copy a directory into itself'}), 400
-    except ValueError:
-        pass
     dst_p.parent.mkdir(parents=True, exist_ok=True)
     if src_p.is_dir():
-        shutil.copytree(src_p, dst_p)
+        shutil.copytree(src_p, dst_p, dirs_exist_ok=True)
     else:
         shutil.copy2(src_p, dst_p)
     return jsonify({'status': 'ok', 'path': _fm_rel(dst_p, base)})
