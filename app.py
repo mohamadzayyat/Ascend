@@ -3782,6 +3782,52 @@ def _restore_php_mutable_paths(target, backup_root, preserved, log):
             log.write(f"  Warning: could not restore preserved {rel}: {exc}\n")
 
 
+def _rmtree_best_effort(path, log=None, label='path'):
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        return True
+    if path.is_symlink():
+        try:
+            path.unlink()
+            return True
+        except Exception as exc:
+            if log:
+                log.write(f"  Warning: could not remove old {label} {path}: {exc}\n")
+            return False
+
+    def _onerror(func, p, exc_info):
+        try:
+            os.chmod(p, 0o700)
+            func(p)
+        except Exception:
+            raise
+
+    last_exc = None
+    for _ in range(3):
+        try:
+            shutil.rmtree(path, onerror=_onerror)
+            return True
+        except FileNotFoundError:
+            return True
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.25)
+    if log:
+        log.write(f"  Warning: could not remove old {label} {path}: {last_exc}\n")
+    return False
+
+
+def _unique_retired_path(target):
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
+    base = target.parent / f'.{target.name}.old-{stamp}'
+    candidate = base
+    n = 1
+    while candidate.exists() or candidate.is_symlink():
+        n += 1
+        candidate = target.parent / f'{base.name}-{n}'
+    return candidate
+
+
 def _publish_php_app(app_row, log):
     source = _app_deploy_dir(app_row)
     source_public = _php_source_public_dir(app_row)
@@ -3791,19 +3837,31 @@ def _publish_php_app(app_row, log):
     if os.name == 'nt':
         return source
     target.parent.mkdir(parents=True, exist_ok=True)
+    retired_target = None
     with tempfile.TemporaryDirectory(prefix=f'.{target.name}-preserve-', dir=str(target.parent)) as tmp:
         backup_root = Path(tmp)
-        preserved = _backup_php_mutable_paths(app_row, target, backup_root, log) if target.exists() else []
+        previous_target = target
+        if target.exists() or target.is_symlink():
+            retired_target = _unique_retired_path(target)
+            target.rename(retired_target)
+            previous_target = retired_target
+        preserved = _backup_php_mutable_paths(app_row, previous_target, backup_root, log) if previous_target.exists() else []
         if preserved:
             log.write(f"  Preserving runtime data: {', '.join(preserved)}\n")
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(
-            source,
-            target,
-            ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
-        )
-        _restore_php_mutable_paths(target, backup_root, preserved, log)
+        try:
+            shutil.copytree(
+                source,
+                target,
+                ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
+            )
+            _restore_php_mutable_paths(target, backup_root, preserved, log)
+        except Exception:
+            _rmtree_best_effort(target, log, 'partial PHP publish')
+            if retired_target and retired_target.exists() and not target.exists():
+                retired_target.rename(target)
+            raise
+    if retired_target:
+        _rmtree_best_effort(retired_target, log, 'PHP publish directory')
     try:
         subprocess.run(['chmod', '-R', 'a+rX', str(target)], capture_output=True, timeout=30)
         for writable in ('runtime', 'web/assets', 'frontend/runtime', 'frontend/web/assets', 'backend/runtime', 'backend/web/assets'):
