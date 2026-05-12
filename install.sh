@@ -408,6 +408,65 @@ install_pm2() {
     ok "PM2 $(pm2 --version) installed"
 }
 
+pm2_process_count() {
+    if ! command -v pm2 &>/dev/null; then
+        echo 0
+        return
+    fi
+    pm2 jlist 2>/dev/null | grep -o '"name"' | wc -l | tr -d ' '
+}
+
+snapshot_pm2_apps() {
+    section "Preserving PM2 apps"
+    if ! command -v pm2 &>/dev/null; then
+        info "PM2 is not installed yet; skipping PM2 snapshot."
+        return
+    fi
+
+    local count
+    count="$(pm2_process_count)"
+    if [[ "${count:-0}" -gt 0 ]]; then
+        info "Saving $count PM2 process(es) before the panel update..."
+        if pm2 save --force >/dev/null 2>&1; then
+            ok "PM2 process list saved"
+        else
+            warn "Could not save PM2 process list; existing apps may need a manual restart after update."
+        fi
+    else
+        info "No active PM2 apps found to snapshot."
+    fi
+}
+
+restore_pm2_apps() {
+    section "Restoring PM2 apps"
+    if ! command -v pm2 &>/dev/null; then
+        info "PM2 is not installed; skipping PM2 restore."
+        return
+    fi
+
+    local dump="/root/.pm2/dump.pm2"
+    if [[ ! -s "$dump" ]]; then
+        info "No saved PM2 process list found."
+        return
+    fi
+
+    local count
+    count="$(pm2_process_count)"
+    if [[ "${count:-0}" -eq 0 ]]; then
+        info "PM2 has no running apps; resurrecting saved app processes..."
+        if pm2 resurrect >/dev/null 2>&1; then
+            ok "PM2 apps resurrected"
+        else
+            warn "PM2 resurrect failed. Existing apps can still be restored with: pm2 resurrect"
+        fi
+    else
+        ok "PM2 already has $count running process(es); leaving them untouched."
+    fi
+
+    pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
+    pm2 save --force >/dev/null 2>&1 || true
+}
+
 # ── Source code ─────────────────────────────────────────────────
 
 get_source() {
@@ -1013,6 +1072,7 @@ main() {
     check_systemd
     check_not_panel_terminal
     check_ports
+    snapshot_pm2_apps
 
     GUNICORN_WORKERS=$(detect_worker_count)
     info "Gunicorn workers: $GUNICORN_WORKERS  (based on $(nproc) CPU core(s))"
@@ -1033,6 +1093,7 @@ main() {
 
     create_services
     start_services
+    restore_pm2_apps
     setup_nginx
     open_firewall
 
