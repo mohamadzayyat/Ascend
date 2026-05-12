@@ -547,14 +547,39 @@ def _fm_handle_rename(scope):
         return jsonify({'error': 'Source not found'}), 404
     if src_p == base or dst_p == base:
         return jsonify({'error': 'Invalid path'}), 400
-    if dst_p.exists():
+    if src_p.is_dir():
+        try:
+            dst_p.relative_to(src_p)
+            return jsonify({'error': 'Cannot move a directory into itself'}), 400
+        except ValueError:
+            pass
+    if dst_p.exists() and not (src_p.is_dir() and dst_p.is_dir()):
         return jsonify({'error': 'Destination exists'}), 409
     try:
         dst_p.parent.mkdir(parents=True, exist_ok=True)
-        src_p.rename(dst_p)
+        if src_p.is_dir() and dst_p.is_dir():
+            _fm_merge_move_dir(src_p, dst_p)
+        else:
+            src_p.rename(dst_p)
     except OSError as exc:
         return jsonify({'error': f'Rename failed: {exc.strerror or exc}'}), 500
     return jsonify({'status': 'ok', 'path': _fm_rel(dst_p, base)})
+
+
+def _fm_merge_move_dir(source, destination):
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        target = destination / child.name
+        if child.is_dir() and not child.is_symlink() and target.exists() and target.is_dir():
+            _fm_merge_move_dir(child, target)
+            continue
+        if target.exists() or target.is_symlink():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        shutil.move(str(child), str(target))
+    source.rmdir()
 
 
 def _fm_handle_copy(scope):
