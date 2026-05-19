@@ -236,9 +236,11 @@ export default function DatabasesPage() {
   const [openTableTabs, setOpenTableTabs] = useState(Array.isArray(initialUi.openTableTabs) ? initialUi.openTableTabs : [])
   const [browseSelection, setBrowseSelection] = useState(initialUi.browseSelection || null)
   const [databaseContext, setDatabaseContext] = useState(initialUi.databaseContext || {})
+  const [schemaRefreshToken, setSchemaRefreshToken] = useState(0)
   /** When set, SQL tab applies this to the editor once then clears via callback. */
   const [pendingSql, setPendingSql] = useState(null)
   const consumePendingSql = useCallback(() => setPendingSql(null), [])
+  const notifySchemaChanged = useCallback(() => setSchemaRefreshToken((value) => value + 1), [])
   const active = useMemo(
     () => connections.find((c) => c.id === activeId) || null,
     [connections, activeId],
@@ -433,6 +435,7 @@ export default function DatabasesPage() {
               onDeleted={onConnectionDeleted}
               onEdit={(connection) => { setShowAddForm(false); setEditingConnection(connection) }}
               onRefresh={refresh}
+              schemaRefreshToken={schemaRefreshToken}
             />
             {active && (
               <ConnectionPanel
@@ -446,6 +449,7 @@ export default function DatabasesPage() {
                 onOpenTableTab={openTableTab}
                 databaseContext={databaseContext}
                 onDatabaseContextChange={rememberDatabase}
+                onSchemaChanged={notifySchemaChanged}
                 pendingSql={pendingSql}
                 onPendingSqlConsumed={consumePendingSql}
               />
@@ -478,6 +482,7 @@ function SchemaNavigator({
   onDeleted,
   onEdit,
   onRefresh,
+  schemaRefreshToken = 0,
 }) {
   const dialog = useDialog()
   const initialNav = useMemo(() => readStoredJson(DB_NAV_STATE_KEY, {}), [])
@@ -515,9 +520,9 @@ function SchemaNavigator({
     }
   }
 
-  const loadSchema = async (cid, dbName) => {
+  const loadSchema = async (cid, dbName, force = false) => {
     const sk = `${cid}:${dbName}`
-    if (schemaByKey[sk] || loadingSchema[sk]) return
+    if (!force && (schemaByKey[sk] || loadingSchema[sk])) return
     setLoadingSchema((m) => ({ ...m, [sk]: true }))
     try {
       const res = await apiClient.getDatabaseSchema(cid, dbName)
@@ -545,6 +550,17 @@ function SchemaNavigator({
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbsByConn])
+
+  useEffect(() => {
+    if (!schemaRefreshToken) return
+    setSchemaByKey({})
+    expandedDb.forEach((key) => {
+      const [cid, ...dbParts] = String(key).split(':')
+      const dbName = dbParts.join(':')
+      if (cid && dbName) loadSchema(Number(cid), dbName, true)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schemaRefreshToken])
 
   useEffect(() => {
     writeStoredJson(DB_NAV_STATE_KEY, {
@@ -862,6 +878,7 @@ function ConnectionPanel({
   onOpenTableTab,
   databaseContext,
   onDatabaseContextChange,
+  onSchemaChanged,
   pendingSql,
   onPendingSqlConsumed,
 }) {
@@ -930,6 +947,7 @@ function ConnectionPanel({
             onOpenTableTab={onOpenTableTab}
             rememberedDatabase={databaseContext?.[connection.id] || ''}
             onDatabaseContextChange={onDatabaseContextChange}
+            onSchemaChanged={onSchemaChanged}
           />
         </div>
         {activeTable && (
@@ -968,7 +986,7 @@ function ConnectionPanel({
 
 // ── Searchable tables / views grid (opened from navigator folder) ─
 
-function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
+function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSchemaChanged }) {
   const dialog = useDialog()
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
@@ -977,6 +995,9 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
   const [q, setQ] = useState('')
   const [selectedTables, setSelectedTables] = useState([])
   const [busyAction, setBusyAction] = useState('')
+  const isTables = folder === 'tables'
+  const objectLabel = isTables ? 'table' : 'view'
+  const objectLabelPlural = isTables ? 'tables' : 'views'
 
   const loadItems = useCallback(() => {
     let c = false
@@ -1036,6 +1057,28 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
     setError('')
     setMessage('')
     const count = selectedTables.length
+    if (!isTables) {
+      const ok = await dialog.confirm({
+        title: 'Delete selected views?',
+        message: `Delete ${count} selected view${count === 1 ? '' : 's'} in ${database}?\n\nThis runs DROP VIEW and cannot be undone.`,
+        confirmLabel: count === 1 ? 'Delete view' : 'Delete views',
+        tone: 'danger',
+      })
+      if (!ok) return
+      setBusyAction(action)
+      try {
+        await apiClient.bulkViewAction(connection.id, { database, views: selectedTables, action: 'delete' })
+        setMessage(`Deleted ${count} view${count === 1 ? '' : 's'}.`)
+        setSelectedTables([])
+        loadItems()
+        onSchemaChanged?.()
+      } catch (err) {
+        setError(err.response?.data?.error || 'Delete views failed')
+      } finally {
+        setBusyAction('')
+      }
+      return
+    }
     if (action === 'export') {
       setBusyAction(action)
       try {
@@ -1077,6 +1120,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
         setSelectedTables([])
       }
       loadItems()
+      if (action === 'copy' || action === 'delete') onSchemaChanged?.()
     } catch (err) {
       setError(err.response?.data?.error || `${confirmLabel} failed`)
     } finally {
@@ -1088,7 +1132,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
     <div className="flex flex-col gap-3 h-full min-h-0">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm text-gray-400">
-          {folder === 'tables' ? 'Tables' : 'Views'} in <span className="text-gray-200">{database}</span>
+          {isTables ? 'Tables' : 'Views'} in <span className="text-gray-200">{database}</span>
         </span>
         <span className="text-xs text-gray-600">({items.length} total)</span>
       </div>
@@ -1098,11 +1142,11 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={`Search ${folder}…`}
+          placeholder={`Search ${objectLabelPlural}...`}
           className="w-full bg-primary border border-gray-700 rounded pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-gray-600"
         />
       </div>
-      {folder === 'tables' ? (
+      {isTables ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-500">{selectedTables.length} selected</span>
           <button type="button" onClick={() => runSelectedAction('copy')} disabled={!selectedTables.length || !!busyAction} title="Copy selected tables" className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1 disabled:opacity-40"><Copy className="w-3 h-3" /> Copy</button>
@@ -1112,7 +1156,11 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
           {busyAction && busyAction !== 'export' && <Loader2 className="w-4 h-4 animate-spin text-gray-400" />}
         </div>
       ) : (
-        <p className="text-xs text-gray-500">Double-click a row to open it in a new tab (search inside data there).</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-500">{selectedTables.length} selected</span>
+          <button type="button" onClick={() => runSelectedAction('delete')} disabled={!selectedTables.length || !!busyAction} title="Delete selected views" className="px-2 py-1 bg-primary hover:bg-gray-700 rounded text-red-300 text-xs inline-flex items-center gap-1 disabled:opacity-40">{busyAction === 'delete' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />} Delete</button>
+          <span className="text-xs text-gray-500">Double-click a row to open it in a new tab.</span>
+        </div>
       )}
       {message && <div className="rounded border border-green-500/30 bg-green-500/10 px-3 py-2 text-green-300 text-xs">{message}</div>}
       {error && (
@@ -1125,13 +1173,11 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
           <table className="w-full text-sm text-left">
             <thead className="bg-primary text-gray-300 sticky top-0">
               <tr>
-                {folder === 'tables' && (
-                  <th className="px-3 py-2 w-10">
-                    <input type="checkbox" checked={allFilteredSelected} onChange={toggleFiltered} aria-label="Select all visible tables" />
-                  </th>
-                )}
+                <th className="px-3 py-2 w-10">
+                  <input type="checkbox" checked={allFilteredSelected} onChange={toggleFiltered} aria-label={`Select all visible ${objectLabelPlural}`} />
+                </th>
                 <th className="px-3 py-2">Name</th>
-                {folder === 'tables' && (
+                {isTables && (
                   <>
                     <th className="px-3 py-2">Rows</th>
                     <th className="px-3 py-2">Size</th>
@@ -1144,20 +1190,18 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
                 <tr
                   key={it.name}
                   className="border-t border-gray-700 hover:bg-primary/40 cursor-default"
-                  onDoubleClick={() => onOpenTableTab(database, it.name, folder === 'tables' ? 'table' : 'view')}
+                  onDoubleClick={() => onOpenTableTab(database, it.name, isTables ? 'table' : 'view')}
                 >
-                  {folder === 'tables' && (
-                    <td className="px-3 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selectedSet.has(it.name)}
-                        onChange={() => toggleTable(it.name)}
-                        aria-label={`Select ${it.name}`}
-                      />
-                    </td>
-                  )}
+                  <td className="px-3 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedSet.has(it.name)}
+                      onChange={() => toggleTable(it.name)}
+                      aria-label={`Select ${objectLabel} ${it.name}`}
+                    />
+                  </td>
                   <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{it.name}</td>
-                  {folder === 'tables' && (
+                  {isTables && (
                     <>
                       <td className="px-3 py-1.5 text-gray-400 text-xs">{(it.rows ?? 0).toLocaleString()}</td>
                       <td className="px-3 py-1.5 text-gray-400 text-xs">{formatBytes(it.size_bytes ?? 0)}</td>
@@ -1166,7 +1210,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab }) {
                 </tr>
               ))}
               {filtered.length === 0 && (
-                <tr><td colSpan={folder === 'tables' ? 4 : 1} className="px-3 py-8 text-center text-gray-500 text-sm">No matches</td></tr>
+                <tr><td colSpan={isTables ? 4 : 2} className="px-3 py-8 text-center text-gray-500 text-sm">No matches</td></tr>
               )}
             </tbody>
           </table>
@@ -1458,7 +1502,7 @@ function CreateTablePanel({ connectionId, database, onCreated }) {
   return <div className="rounded border border-gray-700 bg-secondary p-3 max-w-5xl"><div className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-3"><label className="text-xs text-gray-400 md:col-span-2">Table name<input value={form.table} onChange={(e) => setForm((f) => ({ ...f, table: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" placeholder="new_table" /></label><label className="text-xs text-gray-400">Engine<input value={form.engine} onChange={(e) => setForm((f) => ({ ...f, engine: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Collation<select value={form.collation} onChange={(e) => setForm((f) => ({ ...f, collation: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{(DB_COLLATIONS[form.charset] || DB_COLLATIONS.utf8mb4).map((c) => <option key={c} value={c}>{c}</option>)}</select></label></div><div className="space-y-2">{form.columns.map((col, idx) => <div key={idx} className="grid grid-cols-1 md:grid-cols-7 gap-2 items-end"><label className="text-xs text-gray-400 md:col-span-2">Column<input value={col.name} onChange={(e) => patchColumn(idx, { name: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Type<select value={col.type} onChange={(e) => patchColumn(idx, { type: e.target.value, length: e.target.value === 'VARCHAR' ? '255' : e.target.value === 'INT' ? '11' : '' })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white">{COLUMN_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label><label className="text-xs text-gray-400">Length<input value={col.length || ''} onChange={(e) => patchColumn(idx, { length: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><label className="text-xs text-gray-400">Default<input value={col.default || ''} onChange={(e) => patchColumn(idx, { default: e.target.value })} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" /></label><div className="flex flex-wrap gap-2 text-xs text-gray-300"><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!col.nullable} onChange={(e) => patchColumn(idx, { nullable: e.target.checked })} /> Null</label><label className="inline-flex items-center gap-1"><input type="checkbox" checked={!!col.auto_increment} onChange={(e) => patchColumn(idx, { auto_increment: e.target.checked, nullable: false })} /> AI</label><label className="inline-flex items-center gap-1"><input type="radio" checked={form.primary_key === col.name && !!col.name} onChange={() => setForm((f) => ({ ...f, primary_key: col.name }))} /> PK</label></div><button type="button" onClick={() => removeColumn(idx)} disabled={form.columns.length <= 1} className="px-2 py-1.5 bg-primary hover:bg-gray-700 rounded text-red-300 text-xs disabled:opacity-40">Remove</button></div>)}</div><button type="button" onClick={addColumn} className="mt-3 px-2 py-1 bg-primary hover:bg-gray-700 rounded text-gray-200 text-xs inline-flex items-center gap-1"><Plus className="w-3 h-3" /> Add field</button><pre className="mt-3 rounded border border-gray-700 bg-primary p-2 text-xs text-gray-300 whitespace-pre-wrap">{preview}</pre>{error && <div className="mt-2 text-red-300 text-xs">{error}</div>}<button type="button" onClick={submit} disabled={busy || !form.table.trim()} className="mt-3 px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-2 disabled:opacity-50">{busy && <Loader2 className="w-3 h-3 animate-spin" />} Create table</button></div>
 }
 
-function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab, rememberedDatabase = '', onDatabaseContextChange }) {
+function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpenTableTab, rememberedDatabase = '', onDatabaseContextChange, onSchemaChanged }) {
   const [databases, setDatabases] = useState([])
   const [database, setDatabase] = useState('')
   const [tables, setTables] = useState([])
@@ -1563,6 +1607,7 @@ function BrowseTab({ connection, browseSelection, onBrowseSelectionChange, onOpe
           database={treeSel.database}
           folder={treeSel.folder}
           onOpenTableTab={onOpenTableTab}
+          onSchemaChanged={onSchemaChanged}
         />
       </div>
     )

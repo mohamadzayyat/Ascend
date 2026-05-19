@@ -88,21 +88,29 @@ def _qi(name):
     return f'`{name}`'
 
 
-def _selected_table_names(raw, *, max_count=100):
+def _selected_identifier_names(raw, *, max_count=100, label='object'):
     if not isinstance(raw, list) or not raw:
-        raise ValueError('Select at least one table.')
-    tables = []
+        raise ValueError(f'Select at least one {label}.')
+    names = []
     seen = set()
     for value in raw:
         name = str(value or '').strip()
         if not _valid_identifier(name):
-            raise ValueError(f'Invalid table name: {name or "(blank)"}')
+            raise ValueError(f'Invalid {label} name: {name or "(blank)"}')
         if name not in seen:
             seen.add(name)
-            tables.append(name)
-    if len(tables) > max_count:
-        raise ValueError(f'Select {max_count} tables or fewer.')
-    return tables
+            names.append(name)
+    if len(names) > max_count:
+        raise ValueError(f'Select {max_count} {label}s or fewer.')
+    return names
+
+
+def _selected_table_names(raw, *, max_count=100):
+    return _selected_identifier_names(raw, max_count=max_count, label='table')
+
+
+def _selected_view_names(raw, *, max_count=100):
+    return _selected_identifier_names(raw, max_count=max_count, label='view')
 
 
 def _coerce_json_value(v):
@@ -885,6 +893,19 @@ def _ensure_base_tables(cur, database, tables):
         raise ValueError(f'Table not found or not a base table: {missing[0]}')
 
 
+def _ensure_views(cur, database, views):
+    cur.execute("""
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = %s AND table_type = 'VIEW'
+          AND table_name IN ({})
+    """.format(', '.join(['%s'] * len(views))), tuple([database, *views]))
+    found = {r[0] for r in cur.fetchall()}
+    missing = [v for v in views if v not in found]
+    if missing:
+        raise ValueError(f'View not found: {missing[0]}')
+
+
 def _next_copy_table_name(cur, base):
     stem = f'{base}_copy'
     for n in range(1, 1000):
@@ -962,6 +983,60 @@ def api_db_tables_bulk(conn_id):
         'action': action,
         'tables': tables,
         'copied': copied,
+        'sql': executed,
+        'duration_ms': int((time.time() - started) * 1000),
+    })
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/views/bulk', methods=['POST'])
+@login_required
+def api_db_views_bulk(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    database = (data.get('database') or '').strip()
+    action = (data.get('action') or '').strip().lower()
+    if not _valid_identifier(database):
+        return jsonify({'error': 'Invalid database name.'}), 400
+    if action != 'delete':
+        return jsonify({'error': 'Unsupported view action.'}), 400
+    try:
+        views = _selected_view_names(data.get('views'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        client = _open_mysql(conn, database=database)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    started = time.time()
+    executed = []
+    try:
+        with client.cursor() as cur:
+            _ensure_views(cur, database, views)
+            for view in views:
+                cur.execute(f'DROP VIEW {_qi(view)}')
+                executed.append(f'DROP VIEW {_qi(view)}')
+        client.commit()
+    except Exception as e:
+        try:
+            client.rollback()
+        except Exception:
+            pass
+        client.close()
+        return jsonify({'error': str(e), 'executed': executed, 'duration_ms': int((time.time() - started) * 1000)}), 400
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return jsonify({
+        'ok': True,
+        'action': action,
+        'views': views,
         'sql': executed,
         'duration_ms': int((time.time() - started) * 1000),
     })

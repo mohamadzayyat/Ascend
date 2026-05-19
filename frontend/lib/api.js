@@ -209,6 +209,7 @@ export const apiClient = {
     api.get(`/api/databases/connections/${id}/tables`, { params: { database } }),
   createTable: (id, data) => api.post(`/api/databases/connections/${id}/tables`, data),
   bulkTableAction: (id, data) => api.post(`/api/databases/connections/${id}/tables/bulk`, data, { timeout: 1900000 }),
+  bulkViewAction: (id, data) => api.post(`/api/databases/connections/${id}/views/bulk`, data, { timeout: 1900000 }),
   exportTables: (id, data) => api.post(`/api/databases/connections/${id}/tables/export`, data, { timeout: 1900000 }),
   addTableColumn: (id, data) => api.post(`/api/databases/connections/${id}/table-columns`, data),
   getDatabaseSchema: (id, database) =>
