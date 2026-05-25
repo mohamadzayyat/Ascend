@@ -6,14 +6,16 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, after_this_request, jsonify, request, send_file
 from flask_login import current_user, login_required
 from werkzeug.utils import secure_filename
 
@@ -1797,6 +1799,49 @@ def _downloaded_backup_filename(conn, parsed, explicit_name):
     return name
 
 
+def _db_backup_archive_name(name):
+    cleaned = re.sub(r'[^A-Za-z0-9._-]+', '-', (name or '').strip()).strip('.-')
+    if not cleaned:
+        cleaned = f'database-backups-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}'
+    if not cleaned.lower().endswith('.zip'):
+        cleaned += '.zip'
+    return cleaned
+
+
+def _selected_backup_ids(raw, *, max_count=200):
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('Select at least one backup.')
+    ids = []
+    seen = set()
+    for value in raw:
+        try:
+            backup_id = int(value)
+        except (TypeError, ValueError):
+            raise ValueError('Invalid backup id.') from None
+        if backup_id <= 0:
+            raise ValueError('Invalid backup id.')
+        if backup_id in seen:
+            continue
+        seen.add(backup_id)
+        ids.append(backup_id)
+    if len(ids) > max_count:
+        raise ValueError(f'Select {max_count} backups or fewer.')
+    return ids
+
+
+def _unique_zip_arcname(name, seen):
+    arcname = secure_filename(Path(str(name or '')).name) or 'backup.sql'
+    stem = Path(arcname).stem or 'backup'
+    suffix = Path(arcname).suffix
+    candidate = arcname
+    n = 2
+    while candidate in seen:
+        candidate = f'{stem}-{n}{suffix}'
+        n += 1
+    seen.add(candidate)
+    return candidate
+
+
 def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_database=None):
     """Synchronously run mysqldump for a connection. Records a BackupArchive
     row in either success or failed state. Used by both the manual endpoint
@@ -1994,6 +2039,95 @@ def api_db_backups_list(conn_id):
         return err
     rows = BackupArchive.query.filter_by(connection_id=conn.id).order_by(BackupArchive.started_at.desc()).limit(200).all()
     return jsonify({'backups': [r.to_dict() for r in rows]})
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/backups/archive', methods=['POST'])
+@login_required
+def api_db_backups_archive(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        backup_ids = _selected_backup_ids(data.get('backup_ids'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    rows = BackupArchive.query.filter(
+        BackupArchive.connection_id == conn.id,
+        BackupArchive.id.in_(backup_ids),
+    ).all()
+    by_id = {row.id: row for row in rows}
+    selected = []
+    for backup_id in backup_ids:
+        row = by_id.get(backup_id)
+        if row is None:
+            return jsonify({'error': 'One or more selected backups were not found.'}), 404
+        path = Path(row.filepath)
+        if row.status != 'success' or not path.is_file():
+            return jsonify({'error': f'Backup file is not available: {row.filename}'}), 410
+        selected.append((row, path))
+
+    output_name = _db_backup_archive_name(data.get('output_name'))
+    temp_dir = tempfile.mkdtemp(prefix='ascend-db-backups-')
+    zip_path = Path(temp_dir) / output_name
+    try:
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            seen_names = set()
+            for row, path in selected:
+                zf.write(path, arcname=_unique_zip_arcname(row.filename, seen_names))
+    except Exception as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({'error': f'Could not create backup zip: {str(exc)[:300]}'}), 500
+
+    @after_this_request
+    def _cleanup_db_backup_archive(response):
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return response
+
+    return send_file(str(zip_path), as_attachment=True, download_name=output_name, mimetype='application/zip')
+
+
+@bp.route('/api/databases/connections/<int:conn_id>/backups/delete', methods=['POST'])
+@login_required
+def api_db_backups_delete_many(conn_id):
+    err = _admin_required()
+    if err:
+        return err
+    conn, err = _conn_owned(conn_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    try:
+        backup_ids = _selected_backup_ids(data.get('backup_ids'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    rows = BackupArchive.query.filter(
+        BackupArchive.connection_id == conn.id,
+        BackupArchive.id.in_(backup_ids),
+    ).all()
+    if len(rows) != len(backup_ids):
+        return jsonify({'error': 'One or more selected backups were not found.'}), 404
+
+    deleted = []
+    for row in rows:
+        try:
+            p = Path(row.filepath)
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+        deleted.append(row.id)
+        db.session.delete(row)
+    db.session.commit()
+    return jsonify({'ok': True, 'deleted': deleted})
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/backups/run', methods=['POST'])

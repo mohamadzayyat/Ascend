@@ -164,6 +164,17 @@ async function copyTextToClipboard(text) {
   return ok
 }
 
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 function columnDefinitionPreview(col) {
   const name = col.name?.trim() || 'column_name'
   const type = col.type || 'VARCHAR'
@@ -993,6 +1004,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [q, setQ] = useState('')
+  const [sortConfig, setSortConfig] = useState({ key: 'name', direction: 'asc' })
   const [selectedTables, setSelectedTables] = useState([])
   const [busyAction, setBusyAction] = useState('')
   const isTables = folder === 'tables'
@@ -1023,6 +1035,11 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
   useEffect(() => {
     setSelectedTables([])
     setMessage('')
+    setSortConfig((current) => (
+      folder === 'tables' || current.key === 'name'
+        ? current
+        : { key: 'name', direction: 'asc' }
+    ))
   }, [connection.id, database, folder])
 
   const filtered = useMemo(() => {
@@ -1031,9 +1048,39 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
     return items.filter((it) => it.name.toLowerCase().includes(s))
   }, [items, q])
 
+  const sortedItems = useMemo(() => {
+    const direction = sortConfig.direction === 'desc' ? -1 : 1
+    const byName = (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' })
+    return [...filtered].sort((a, b) => {
+      if (sortConfig.key === 'name') return byName(a, b) * direction
+      const field = sortConfig.key === 'size' ? 'size_bytes' : 'rows'
+      const valueCompare = Number(a[field] ?? 0) - Number(b[field] ?? 0)
+      return valueCompare === 0 ? byName(a, b) : valueCompare * direction
+    })
+  }, [filtered, sortConfig])
+
   const selectedSet = useMemo(() => new Set(selectedTables), [selectedTables])
-  const selectableNames = useMemo(() => filtered.map((it) => it.name), [filtered])
+  const selectableNames = useMemo(() => sortedItems.map((it) => it.name), [sortedItems])
   const allFilteredSelected = selectableNames.length > 0 && selectableNames.every((name) => selectedSet.has(name))
+
+  const toggleSort = (key) => {
+    setSortConfig((current) => {
+      if (current.key === key) {
+        return { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: key === 'name' ? 'asc' : 'desc' }
+    })
+  }
+
+  const sortIconClass = (key) => (
+    `w-3 h-3 transition ${sortConfig.key === key ? 'opacity-100' : 'opacity-30'} ${sortConfig.key === key && sortConfig.direction === 'asc' ? 'rotate-180' : ''}`
+  )
+
+  const sortAria = (key) => (
+    sortConfig.key === key
+      ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending')
+      : 'none'
+  )
 
   const toggleTable = (name) => {
     setSelectedTables((current) => current.includes(name)
@@ -1176,17 +1223,44 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
                 <th className="px-3 py-2 w-10">
                   <input type="checkbox" checked={allFilteredSelected} onChange={toggleFiltered} aria-label={`Select all visible ${objectLabelPlural}`} />
                 </th>
-                <th className="px-3 py-2">Name</th>
+                <th className="px-3 py-2" aria-sort={sortAria('name')}>
+                  <button
+                    type="button"
+                    onClick={() => toggleSort('name')}
+                    className="inline-flex items-center gap-1 font-medium hover:text-white"
+                  >
+                    Name
+                    <ChevronDown className={sortIconClass('name')} />
+                  </button>
+                </th>
                 {isTables && (
                   <>
-                    <th className="px-3 py-2">Rows</th>
-                    <th className="px-3 py-2">Size</th>
+                    <th className="px-3 py-2" aria-sort={sortAria('rows')}>
+                      <button
+                        type="button"
+                        onClick={() => toggleSort('rows')}
+                        className="inline-flex items-center gap-1 font-medium hover:text-white"
+                      >
+                        Rows
+                        <ChevronDown className={sortIconClass('rows')} />
+                      </button>
+                    </th>
+                    <th className="px-3 py-2" aria-sort={sortAria('size')}>
+                      <button
+                        type="button"
+                        onClick={() => toggleSort('size')}
+                        className="inline-flex items-center gap-1 font-medium hover:text-white"
+                      >
+                        Size
+                        <ChevronDown className={sortIconClass('size')} />
+                      </button>
+                    </th>
                   </>
                 )}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((it) => (
+              {sortedItems.map((it) => (
                 <tr
                   key={it.name}
                   className="border-t border-gray-700 hover:bg-primary/40 cursor-default"
@@ -1209,7 +1283,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
                   )}
                 </tr>
               ))}
-              {filtered.length === 0 && (
+              {sortedItems.length === 0 && (
                 <tr><td colSpan={isTables ? 4 : 2} className="px-3 py-8 text-center text-gray-500 text-sm">No matches</td></tr>
               )}
             </tbody>
@@ -2458,11 +2532,19 @@ function BackupsTab({ connection }) {
   const [backupDatabases, setBackupDatabases] = useState([])
   const [backupDbLoading, setBackupDbLoading] = useState(false)
   const [shareLink, setShareLink] = useState(null)
+  const [selectedBackups, setSelectedBackups] = useState(() => new Set())
+  const [backupSelectionAnchorId, setBackupSelectionAnchorId] = useState(null)
+  const [backupBusyAction, setBackupBusyAction] = useState('')
+  const [message, setMessage] = useState('')
 
   const refresh = async () => {
     try {
       const res = await apiClient.listDbBackups(connection.id)
-      setBackups(res.data.backups || [])
+      const nextBackups = res.data.backups || []
+      const nextIds = new Set(nextBackups.map((backup) => backup.id))
+      setBackups(nextBackups)
+      setSelectedBackups((current) => new Set([...current].filter((id) => nextIds.has(id))))
+      setBackupSelectionAnchorId((current) => (nextIds.has(current) ? current : null))
       setError('')
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load backups')
@@ -2478,6 +2560,51 @@ function BackupsTab({ connection }) {
     return () => clearInterval(t)
     // eslint-disable-next-line
   }, [connection.id])
+
+  useEffect(() => {
+    setSelectedBackups(new Set())
+    setBackupSelectionAnchorId(null)
+    setMessage('')
+  }, [connection.id])
+
+  const selectedBackupRows = useMemo(
+    () => backups.filter((backup) => selectedBackups.has(backup.id)),
+    [backups, selectedBackups]
+  )
+  const selectedSuccessfulBackups = useMemo(
+    () => selectedBackupRows.filter((backup) => backup.status === 'success'),
+    [selectedBackupRows]
+  )
+  const allBackupsSelected = backups.length > 0 && selectedBackupRows.length === backups.length
+
+  const toggleBackupSelection = (backup, checked, shiftKey = false) => {
+    const currentIndex = backups.findIndex((item) => item.id === backup.id)
+    const anchorIndex = backupSelectionAnchorId != null
+      ? backups.findIndex((item) => item.id === backupSelectionAnchorId)
+      : -1
+    setSelectedBackups((current) => {
+      const next = new Set(current)
+      if (shiftKey && anchorIndex !== -1 && currentIndex !== -1) {
+        const start = Math.min(anchorIndex, currentIndex)
+        const end = Math.max(anchorIndex, currentIndex)
+        backups.slice(start, end + 1).forEach((item) => {
+          if (checked) next.add(item.id)
+          else next.delete(item.id)
+        })
+      } else if (checked) {
+        next.add(backup.id)
+      } else {
+        next.delete(backup.id)
+      }
+      return next
+    })
+    setBackupSelectionAnchorId(backup.id)
+  }
+
+  const toggleAllBackups = (checked) => {
+    setSelectedBackups(checked ? new Set(backups.map((backup) => backup.id)) : new Set())
+    setBackupSelectionAnchorId(null)
+  }
 
   const openBackupDialog = async () => {
     setBackupDialogOpen(true)
@@ -2531,6 +2658,50 @@ function BackupsTab({ connection }) {
     }
   }
 
+  const onBulkDelete = async () => {
+    if (!selectedBackupRows.length || backupBusyAction) return
+    const count = selectedBackupRows.length
+    const ok = await dialog.confirm({
+      title: 'Delete selected backups?',
+      message: `Delete ${count} selected backup${count === 1 ? '' : 's'}?\n\nThis cannot be undone.`,
+      confirmLabel: count === 1 ? 'Delete backup' : 'Delete backups',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setBackupBusyAction('delete')
+    setError('')
+    setMessage('')
+    try {
+      await apiClient.deleteDbBackups(connection.id, selectedBackupRows.map((backup) => backup.id))
+      setMessage(`Deleted ${count} backup${count === 1 ? '' : 's'}.`)
+      setSelectedBackups(new Set())
+      setBackupSelectionAnchorId(null)
+      refresh()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Delete selected backups failed')
+    } finally {
+      setBackupBusyAction('')
+    }
+  }
+
+  const onBulkDownload = async () => {
+    if (!selectedSuccessfulBackups.length || backupBusyAction) return
+    const count = selectedSuccessfulBackups.length
+    const outputName = `database-backups-${Date.now()}.zip`
+    setBackupBusyAction('download')
+    setError('')
+    setMessage('')
+    try {
+      const res = await apiClient.archiveDbBackups(connection.id, selectedSuccessfulBackups.map((backup) => backup.id), outputName)
+      saveBlob(res.data, outputName)
+      setMessage(`Downloaded ${count} backup${count === 1 ? '' : 's'} as a zip.`)
+    } catch (err) {
+      setError(err.response?.data?.error || 'Download selected backups failed')
+    } finally {
+      setBackupBusyAction('')
+    }
+  }
+
   const onShare = async (b) => {
     const rawHours = await dialog.prompt({
       title: 'Create temporary backup link',
@@ -2563,20 +2734,61 @@ function BackupsTab({ connection }) {
   return (
     <div className="p-4 flex flex-col gap-3 h-full">
       <BackupUploadSettings />
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-gray-400">{backups.length} backup(s)</span>
-        <button
-          type="button"
-          onClick={openBackupDialog}
-          disabled={running}
-          className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
-        >
-          {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-          Backup now
-        </button>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-sm text-gray-400">{backups.length} backup(s)</span>
+          {selectedBackupRows.length > 0 && (
+            <span className="text-xs text-gray-500">{selectedBackupRows.length} selected</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {selectedBackupRows.length > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={onBulkDownload}
+                disabled={!selectedSuccessfulBackups.length || !!backupBusyAction}
+                className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm inline-flex items-center gap-2 disabled:opacity-50"
+                title="Download selected successful backups as a zip"
+              >
+                {backupBusyAction === 'download' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                Download zip
+              </button>
+              <button
+                type="button"
+                onClick={onBulkDelete}
+                disabled={!!backupBusyAction}
+                className="px-3 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-red-300 text-sm inline-flex items-center gap-2 disabled:opacity-50"
+              >
+                {backupBusyAction === 'delete' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Delete selected
+              </button>
+              <button
+                type="button"
+                onClick={() => { setSelectedBackups(new Set()); setBackupSelectionAnchorId(null) }}
+                disabled={!!backupBusyAction}
+                className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-gray-200 text-sm inline-flex items-center gap-2 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" /> Clear
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={openBackupDialog}
+            disabled={running || !!backupBusyAction}
+            className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+          >
+            {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            Backup now
+          </button>
+        </div>
       </div>
       {error && (
         <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-red-300 text-sm">{error}</div>
+      )}
+      {message && (
+        <div className="rounded border border-green-500/30 bg-green-500/10 p-3 text-green-300 text-sm">{message}</div>
       )}
       {loading ? (
         <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
@@ -2585,6 +2797,15 @@ function BackupsTab({ connection }) {
           <table className="w-full text-sm text-left">
             <thead className="bg-primary text-gray-300 sticky top-0">
               <tr>
+                <th className="px-3 py-2 w-10">
+                  <input
+                    type="checkbox"
+                    checked={allBackupsSelected}
+                    onChange={(e) => toggleAllBackups(e.target.checked)}
+                    className="accent-accent"
+                    aria-label="Select all backups"
+                  />
+                </th>
                 <th className="px-3 py-2">Filename</th>
                 <th className="px-3 py-2">Status</th>
                 <th className="px-3 py-2">Size</th>
@@ -2597,6 +2818,15 @@ function BackupsTab({ connection }) {
             <tbody>
               {backups.map((b) => (
                 <tr key={b.id} className="border-t border-gray-700 hover:bg-primary/40">
+                  <td className="px-3 py-1.5">
+                    <input
+                      type="checkbox"
+                      checked={selectedBackups.has(b.id)}
+                      onChange={(e) => toggleBackupSelection(b, e.target.checked, Boolean(e.shiftKey || e.nativeEvent?.shiftKey))}
+                      className="accent-accent"
+                      aria-label={`Select backup ${b.filename}`}
+                    />
+                  </td>
                   <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{b.filename}</td>
                   <td className="px-3 py-1.5">
                     {b.status === 'success' && <span className="text-green-400 text-xs">success</span>}
@@ -2638,7 +2868,7 @@ function BackupsTab({ connection }) {
                 </tr>
               ))}
               {backups.length === 0 && (
-                <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500 text-sm">No backups yet — click "Backup now" or set up a schedule.</td></tr>
+                <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500 text-sm">No backups yet — click "Backup now" or set up a schedule.</td></tr>
               )}
             </tbody>
           </table>

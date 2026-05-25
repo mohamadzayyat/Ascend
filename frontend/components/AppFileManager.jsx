@@ -318,6 +318,7 @@ export default function AppFileManager({
   const [searchContents, setSearchContents] = useState(true)
   const [searchLimited, setSearchLimited] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
+  const [selectionAnchorPath, setSelectionAnchorPath] = useState(null)
   const [clipboard, setClipboard] = useState(null) // { mode, path, name, is_dir }
   const [dragItem, setDragItem] = useState(null)
   const [dropTarget, setDropTarget] = useState('')
@@ -410,6 +411,7 @@ export default function AppFileManager({
 
   useEffect(() => {
     setSelected(new Set())
+    setSelectionAnchorPath(null)
   }, [path, search, showHidden, searchContents])
 
   useEffect(() => {
@@ -1018,17 +1020,33 @@ export default function AppFileManager({
     }
   }
 
-  const toggleSelection = (entry, checked) => {
+  const toggleSelection = (entry, checked, shiftKey = false) => {
+    const currentIndex = visibleSelectableEntries.findIndex((item) => item.path === entry.path)
+    const anchorIndex = selectionAnchorPath
+      ? visibleSelectableEntries.findIndex((item) => item.path === selectionAnchorPath)
+      : -1
     setSelected((prev) => {
       const next = new Set(prev)
-      if (checked) next.add(entry.path)
-      else next.delete(entry.path)
+      if (shiftKey && anchorIndex !== -1 && currentIndex !== -1) {
+        const start = Math.min(anchorIndex, currentIndex)
+        const end = Math.max(anchorIndex, currentIndex)
+        visibleSelectableEntries.slice(start, end + 1).forEach((item) => {
+          if (checked) next.add(item.path)
+          else next.delete(item.path)
+        })
+      } else if (checked) {
+        next.add(entry.path)
+      } else {
+        next.delete(entry.path)
+      }
       return next
     })
+    setSelectionAnchorPath(entry.path)
   }
 
   const toggleSelectAll = (checked) => {
     setSelected(checked ? new Set(visibleSelectableEntries.map((entry) => entry.path)) : new Set())
+    setSelectionAnchorPath(null)
   }
 
   const bulkDelete = async () => {
@@ -1662,7 +1680,7 @@ export default function AppFileManager({
                       <input
                         type="checkbox"
                         checked={selected.has(entry.path)}
-                        onChange={(e) => toggleSelection(entry, e.target.checked)}
+                        onChange={(e) => toggleSelection(entry, e.target.checked, Boolean(e.shiftKey || e.nativeEvent?.shiftKey))}
                         className="accent-accent"
                         aria-label={`Select ${entry.name}`}
                       />

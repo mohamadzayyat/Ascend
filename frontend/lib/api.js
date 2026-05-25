@@ -240,6 +240,10 @@ export const apiClient = {
     }, { timeout: 20000 }),
   listDbBackups: (id) => api.get(`/api/databases/connections/${id}/backups`),
   runDbBackup: (id, targetDatabase = '') => api.post(`/api/databases/connections/${id}/backups/run`, { target_database: targetDatabase || '' }),
+  archiveDbBackups: (id, backupIds, outputName = '') =>
+    api.post(`/api/databases/connections/${id}/backups/archive`, { backup_ids: backupIds, output_name: outputName }, { responseType: 'blob', timeout: 1900000 }),
+  deleteDbBackups: (id, backupIds) =>
+    api.post(`/api/databases/connections/${id}/backups/delete`, { backup_ids: backupIds }),
   downloadDbBackupFromUrl: (id, data) =>
     api.post(`/api/databases/connections/${id}/backups/download-url`, data, { timeout: 1900000 }),
   startDbRestore: (id, data) => api.post(`/api/databases/connections/${id}/restore-jobs`, data, { timeout: 120000 }),
