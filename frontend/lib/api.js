@@ -18,7 +18,7 @@ api.interceptors.response.use(
 
 export const apiClient = {
   // Auth — all JSON endpoints, no CSRF token needed
-  login: (username, password, otp = '') => api.post('/api/auth/login', { username, password, otp }),
+  login: (username, password, otp = '', remember = false) => api.post('/api/auth/login', { username, password, otp, remember }),
   logout: () => api.post('/api/auth/logout'),
   setup: (username, password, email) => api.post('/api/auth/setup', { username, password, email }),
   getSetupStatus: () => api.get('/api/setup-status'),

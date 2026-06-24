@@ -11,6 +11,7 @@ export default function Login() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
+  const [rememberMe, setRememberMe] = useState(false)
   const [needsOtp, setNeedsOtp] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -25,7 +26,7 @@ export default function Login() {
     setLoading(true)
 
     try {
-      await login(username, password, otp)
+      await login(username, password, otp, rememberMe)
       router.push('/dashboard')
     } catch (err) {
       if (err.response?.data?.two_factor_required) {
@@ -163,6 +164,21 @@ export default function Login() {
                     />
                   </div>
                 )}
+
+                <label className="flex items-start gap-3 rounded-lg border border-gray-700 bg-primary/40 px-3 py-3 text-sm text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-gray-600 accent-accent"
+                  />
+                  <span>
+                    <span className="block text-white">Remember me for 1 month</span>
+                    <span className="mt-0.5 block text-xs leading-5 text-gray-500">
+                      Keep this browser signed in after the last login.
+                    </span>
+                  </span>
+                </label>
 
                 {error && (
                   <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">

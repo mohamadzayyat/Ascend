@@ -374,7 +374,7 @@ export default function DatabasesPage() {
     <DatabaseDialogProvider>
       <Head><title>Databases · Ascend</title></Head>
       <div className="px-3 py-2 h-full flex flex-col min-h-0">
-        <div className="flex items-center justify-between gap-3 mb-2 shrink-0 border-b border-gray-800/80 pb-2">
+        <div className="flex flex-col gap-2 mb-2 shrink-0 border-b border-gray-800/80 pb-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex items-center gap-2">
             <Database className="w-5 h-5 text-accent shrink-0" />
             <div className="min-w-0">
@@ -387,7 +387,7 @@ export default function DatabasesPage() {
           <button
             type="button"
             onClick={() => { setEditingConnection(null); setShowAddForm(true) }}
-            className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold"
+            className="shrink-0 inline-flex min-h-10 items-center justify-center gap-1.5 px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold sm:min-h-0 sm:py-1.5"
           >
             <Plus className="w-3.5 h-3.5" /> New connection
           </button>
@@ -429,7 +429,7 @@ export default function DatabasesPage() {
         )}
 
         {connections.length > 0 && (
-          <div className="flex flex-1 min-h-0 gap-4">
+          <div className="flex flex-1 min-h-0 flex-col gap-3 lg:flex-row lg:gap-4">
             <SchemaNavigator
               connections={connections}
               activeConnectionId={activeId}
@@ -652,7 +652,7 @@ function SchemaNavigator({
     && browseSelection.folder === catId
 
   return (
-    <div className="w-80 shrink-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-0 max-h-full">
+    <div className="w-full shrink-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-[18rem] max-h-[42dvh] lg:w-80 lg:min-h-0 lg:max-h-full">
       <div className="p-3 border-b border-gray-700 flex items-center justify-between shrink-0">
         <span className="text-xs uppercase tracking-wide text-gray-400">Navigator</span>
         <button
@@ -896,8 +896,8 @@ function ConnectionPanel({
   const activeTable = openTableTabs.find((t) => t.id === tab) || null
 
   return (
-    <div className="flex-1 min-w-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-0">
-      <div className="border-b border-gray-700 flex items-stretch gap-0.5 px-1 overflow-x-auto shrink-0">
+    <div className="flex-1 min-w-0 rounded border border-gray-700 bg-secondary flex flex-col min-h-[70dvh] lg:min-h-0">
+      <div className="border-b border-gray-700 flex items-stretch gap-1 px-1.5 overflow-x-auto shrink-0">
         {TABS.map((t) => {
           const Icon = t.icon
           const active = tab === t.id
@@ -906,7 +906,7 @@ function ConnectionPanel({
               key={t.id}
               type="button"
               onClick={() => onTabChange(t.id)}
-              className={`shrink-0 px-2.5 py-2 text-sm flex items-center gap-1.5 border-b-2 whitespace-nowrap ${
+              className={`shrink-0 min-h-11 px-3 py-2 text-sm flex items-center gap-1.5 border-b-2 whitespace-nowrap sm:min-h-0 ${
                 active
                   ? 'border-accent text-white'
                   : 'border-transparent text-gray-400 hover:text-white'
@@ -928,7 +928,7 @@ function ConnectionPanel({
               <button
                 type="button"
                 onClick={() => onTabChange(tt.id)}
-                className={`pl-2 pr-1 py-2 text-xs flex items-center gap-1 truncate min-w-0 ${
+                className={`min-h-11 pl-2 pr-1 py-2 text-xs flex items-center gap-1 truncate min-w-0 sm:min-h-0 ${
                   active ? 'text-white' : 'text-gray-400 hover:text-white'
                 }`}
                 title={`${tt.database} · ${tt.name} (${tt.kind})`}
@@ -1216,8 +1216,56 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
       {loading ? (
         <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
       ) : (
-        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700">
-          <table className="w-full text-sm text-left">
+        <>
+        <div className="space-y-2 md:hidden">
+          {sortedItems.map((it) => {
+            const selected = selectedSet.has(it.name)
+            return (
+              <div key={it.name} className={`rounded border p-3 ${selected ? 'border-accent bg-accent/10' : 'border-gray-700 bg-primary/35'}`}>
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={() => toggleTable(it.name)}
+                    className="mt-1 h-5 w-5 accent-accent"
+                    aria-label={`Select ${objectLabel} ${it.name}`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="break-all font-mono text-sm text-gray-100">{it.name}</div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+                      <span>{isTables ? 'Table' : 'View'}</span>
+                      {isTables && <span>{(it.rows ?? 0).toLocaleString()} rows</span>}
+                      {isTables && <span>{formatBytes(it.size_bytes ?? 0)}</span>}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onOpenTableTab(database, it.name, isTables ? 'table' : 'view')}
+                    className="min-h-10 rounded bg-primary px-3 py-2 text-sm text-accent hover:bg-gray-700"
+                  >
+                    Open
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleTable(it.name)}
+                    className="min-h-10 rounded bg-primary px-3 py-2 text-sm text-gray-200 hover:bg-gray-700"
+                  >
+                    {selected ? 'Unselect' : 'Select'}
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+          {sortedItems.length === 0 && (
+            <div className="rounded border border-gray-700 bg-primary/35 px-3 py-8 text-center text-sm text-gray-500">
+              No matches
+            </div>
+          )}
+        </div>
+        <div className="hidden flex-1 min-h-0 overflow-auto rounded border border-gray-700 md:block">
+          <table className="w-full min-w-[900px] text-sm text-left">
             <thead className="bg-primary text-gray-300 sticky top-0">
               <tr>
                 <th className="px-3 py-2 w-10">
@@ -1289,6 +1337,7 @@ function TableFolderPanel({ connection, database, folder, onOpenTableTab, onSche
             </tbody>
           </table>
         </div>
+        </>
       )}
     </div>
   )
@@ -1985,6 +2034,12 @@ function SqlTab({ connection, preferredDatabase = '', onDatabaseChange, pendingS
 }
 
 // ── Backups list + run-now ──────────────────────────────────────
+
+function BackupStatusBadge({ backup }) {
+  if (backup.status === 'success') return <span className="rounded border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs text-green-300">success</span>
+  if (backup.status === 'pending') return <span className="rounded border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-300">running...</span>
+  return <span className="rounded border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-xs text-red-300" title={backup.error_message || ''}>failed</span>
+}
 
 function ManageDatabasesTab({ connection, preferredDatabase = '', onDatabaseChange }) {
   const dialog = useDialog()
@@ -2732,23 +2787,23 @@ function BackupsTab({ connection }) {
   }
 
   return (
-    <div className="p-4 flex flex-col gap-3 h-full">
+    <div className="p-3 sm:p-4 flex flex-col gap-3 h-full">
       <BackupUploadSettings />
-      <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-sm text-gray-400">{backups.length} backup(s)</span>
           {selectedBackupRows.length > 0 && (
             <span className="text-xs text-gray-500">{selectedBackupRows.length} selected</span>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="grid grid-cols-1 gap-2 sm:flex sm:items-center sm:flex-wrap">
           {selectedBackupRows.length > 0 && (
             <>
               <button
                 type="button"
                 onClick={onBulkDownload}
                 disabled={!selectedSuccessfulBackups.length || !!backupBusyAction}
-                className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm inline-flex items-center gap-2 disabled:opacity-50"
+                className="min-h-11 justify-center px-3 py-2 bg-primary hover:bg-gray-700 rounded text-white text-sm inline-flex items-center gap-2 disabled:opacity-50 sm:min-h-0"
                 title="Download selected successful backups as a zip"
               >
                 {backupBusyAction === 'download' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
@@ -2758,7 +2813,7 @@ function BackupsTab({ connection }) {
                 type="button"
                 onClick={onBulkDelete}
                 disabled={!!backupBusyAction}
-                className="px-3 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-red-300 text-sm inline-flex items-center gap-2 disabled:opacity-50"
+                className="min-h-11 justify-center px-3 py-2 bg-red-500/20 hover:bg-red-500/30 rounded text-red-300 text-sm inline-flex items-center gap-2 disabled:opacity-50 sm:min-h-0"
               >
                 {backupBusyAction === 'delete' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                 Delete selected
@@ -2767,7 +2822,7 @@ function BackupsTab({ connection }) {
                 type="button"
                 onClick={() => { setSelectedBackups(new Set()); setBackupSelectionAnchorId(null) }}
                 disabled={!!backupBusyAction}
-                className="px-3 py-2 bg-primary hover:bg-gray-700 rounded text-gray-200 text-sm inline-flex items-center gap-2 disabled:opacity-50"
+                className="min-h-11 justify-center px-3 py-2 bg-primary hover:bg-gray-700 rounded text-gray-200 text-sm inline-flex items-center gap-2 disabled:opacity-50 sm:min-h-0"
               >
                 <X className="w-4 h-4" /> Clear
               </button>
@@ -2777,7 +2832,7 @@ function BackupsTab({ connection }) {
             type="button"
             onClick={openBackupDialog}
             disabled={running || !!backupBusyAction}
-            className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+            className="min-h-11 justify-center px-3 py-2 bg-accent hover:bg-accent/80 rounded text-white text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50 sm:min-h-0"
           >
             {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
             Backup now
@@ -2793,8 +2848,81 @@ function BackupsTab({ connection }) {
       {loading ? (
         <div className="text-gray-400 text-sm flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
       ) : (
-        <div className="flex-1 min-h-0 overflow-auto rounded border border-gray-700">
-          <table className="w-full text-sm text-left">
+        <>
+        <div className="space-y-3 md:hidden">
+          {backups.map((b) => {
+            const selected = selectedBackups.has(b.id)
+            return (
+              <div key={b.id} className={`rounded border p-3 ${selected ? 'border-accent bg-accent/10' : 'border-gray-700 bg-primary/35'}`}>
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={(e) => toggleBackupSelection(b, e.target.checked)}
+                    className="mt-1 h-5 w-5 accent-accent"
+                    aria-label={`Select backup ${b.filename}`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="break-all font-mono text-xs text-gray-100">{b.filename}</div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <BackupStatusBadge backup={b} />
+                      <span className="text-xs text-gray-400">{formatBytes(b.size_bytes)}</span>
+                      <span className="text-xs text-gray-500">{b.triggered_by}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-400">
+                  <div>
+                    <span className="block text-gray-500">Started</span>
+                    <span>{formatTime(b.started_at)}</span>
+                  </div>
+                  <div>
+                    <span className="block text-gray-500">Duration</span>
+                    <span>{b.duration_seconds != null ? `${b.duration_seconds}s` : '-'}</span>
+                  </div>
+                </div>
+                {b.error_message && (
+                  <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300 break-words">
+                    {b.error_message}
+                  </div>
+                )}
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  {b.status === 'success' && (
+                    <a
+                      href={apiClient.downloadDbBackupUrl(b.id)}
+                      className="min-h-10 rounded bg-primary px-3 py-2 text-center text-sm text-accent hover:bg-gray-700"
+                    >
+                      Download
+                    </a>
+                  )}
+                  {b.status === 'success' && (
+                    <button
+                      type="button"
+                      onClick={() => onShare(b)}
+                      className="min-h-10 rounded bg-primary px-3 py-2 text-sm text-accent hover:bg-gray-700"
+                    >
+                      Share
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onDelete(b)}
+                    className="min-h-10 rounded bg-red-500/15 px-3 py-2 text-sm text-red-300 hover:bg-red-500/25"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+          {backups.length === 0 && (
+            <div className="rounded border border-gray-700 bg-primary/35 px-3 py-8 text-center text-sm text-gray-500">
+              No backups yet. Tap Backup now or set up a schedule.
+            </div>
+          )}
+        </div>
+        <div className="hidden flex-1 min-h-0 overflow-auto rounded border border-gray-700 md:block">
+          <table className="w-full min-w-[900px] text-sm text-left">
             <thead className="bg-primary text-gray-300 sticky top-0">
               <tr>
                 <th className="px-3 py-2 w-10">
@@ -2828,13 +2956,7 @@ function BackupsTab({ connection }) {
                     />
                   </td>
                   <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{b.filename}</td>
-                  <td className="px-3 py-1.5">
-                    {b.status === 'success' && <span className="text-green-400 text-xs">success</span>}
-                    {b.status === 'pending' && <span className="text-yellow-400 text-xs">running…</span>}
-                    {b.status === 'failed' && (
-                      <span className="text-red-400 text-xs" title={b.error_message || ''}>failed</span>
-                    )}
-                  </td>
+                  <td className="px-3 py-1.5"><BackupStatusBadge backup={b} /></td>
                   <td className="px-3 py-1.5 text-gray-300 text-xs">{formatBytes(b.size_bytes)}</td>
                   <td className="px-3 py-1.5 text-gray-300 text-xs whitespace-nowrap">{formatTime(b.started_at)}</td>
                   <td className="px-3 py-1.5 text-gray-300 text-xs">{b.duration_seconds != null ? `${b.duration_seconds}s` : '—'}</td>
@@ -2873,6 +2995,7 @@ function BackupsTab({ connection }) {
             </tbody>
           </table>
         </div>
+        </>
       )}
       {backupDialogOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm">

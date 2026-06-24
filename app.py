@@ -24,7 +24,7 @@ import tempfile
 import platform
 import struct
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psutil
@@ -117,6 +117,9 @@ app.config['MAX_CONTENT_LENGTH'] = max(
 # Cross-origin session cookies (needed when frontend is on a different port/domain)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=30)
+app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
 # In production with HTTPS: set SESSION_COOKIE_SECURE=True and SESSION_COOKIE_SAMESITE='None'
 
 db.init_app(app)
