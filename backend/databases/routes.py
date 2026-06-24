@@ -236,17 +236,14 @@ def _statement_timeout_row_value(row):
     return row[1] if len(row) > 1 else None
 
 
-def _server_statement_timeout_vars(conn):
-    """Return timeout variables available on the target server.
-
-    MySQL uses max_execution_time; MariaDB uses max_statement_time.
-    """
+def _server_available_variables(conn, names):
+    """Return the requested server variables that exist on this connection."""
     found = set()
     client = None
     try:
         client = _open_mysql(conn, database='')
         with client.cursor() as cur:
-            for name in ('max_execution_time', 'max_statement_time'):
+            for name in names:
                 try:
                     cur.execute('SHOW VARIABLES LIKE %s', (name,))
                     if cur.fetchone():
@@ -264,11 +261,47 @@ def _server_statement_timeout_vars(conn):
     return found
 
 
+def _server_statement_timeout_vars(conn):
+    """Return timeout variables available on the target server.
+
+    MySQL uses max_execution_time; MariaDB uses max_statement_time.
+    """
+    return _server_available_variables(conn, ('max_execution_time', 'max_statement_time'))
+
+
 def _mysqldump_statement_timeout_args(conn):
     args = []
     server_vars = _server_statement_timeout_vars(conn)
     if 'max_statement_time' in server_vars and _mysql_client_supports('mysqldump', '--max-statement-time'):
         args.append('--max-statement-time=0')
+    return args
+
+
+def _mysqldump_resilience_args(conn):
+    args = []
+    server_vars = _server_available_variables(conn, (
+        'max_execution_time',
+        'max_statement_time',
+        'net_read_timeout',
+        'net_write_timeout',
+        'wait_timeout',
+        'interactive_timeout',
+    ))
+    if 'max_statement_time' in server_vars and _mysql_client_supports('mysqldump', '--max-statement-time'):
+        args.append('--max-statement-time=0')
+    if _mysql_client_supports('mysqldump', '--network-timeout'):
+        args.append('--network-timeout')
+    if _mysql_client_supports('mysqldump', '--init-command'):
+        assignments = []
+        if 'max_execution_time' in server_vars:
+            assignments.append('SESSION max_execution_time=0')
+        if 'max_statement_time' in server_vars:
+            assignments.append('SESSION max_statement_time=0')
+        for name in ('net_read_timeout', 'net_write_timeout', 'wait_timeout', 'interactive_timeout'):
+            if name in server_vars:
+                assignments.append(f'SESSION {name}=28800')
+        if assignments:
+            args.append(f'--init-command=SET {", ".join(assignments)}')
     return args
 
 
@@ -284,6 +317,12 @@ def _temporarily_disable_dump_statement_timeouts(conn, session_timeout_args=None
     session_handled = set()
     if '--max-statement-time=0' in session_timeout_args:
         session_handled.add('max_statement_time')
+    for arg in session_timeout_args:
+        if isinstance(arg, str) and arg.startswith('--init-command='):
+            lower = arg.lower()
+            for name in ('max_execution_time', 'max_statement_time'):
+                if name in lower:
+                    session_handled.add(name)
     client = None
     try:
         client = _open_mysql(conn, database='')
@@ -349,6 +388,9 @@ def _annotate_mysqldump_error(message):
     lower = text.lower()
     timeout_markers = (
         'maximum statement execution time',
+        'query execution was interrupted',
+        'error 1317',
+        'interrupted when dumping table',
         'max_execution_time',
         'max_statement_time',
     )
@@ -1251,7 +1293,7 @@ def api_db_tables_export(conn_id):
     started = time.time()
     try:
         env, base_args = _mysqldump_env(conn)
-        timeout_args = _mysqldump_statement_timeout_args(conn)
+        timeout_args = _mysqldump_resilience_args(conn)
         argv = ['mysqldump', '--no-defaults', *base_args,
                 *timeout_args, '--single-transaction', '--quick', '--routines', '--triggers',
                 '--default-character-set=utf8mb4', database, *tables]
@@ -2067,7 +2109,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
             return archive.id
         # --no-defaults must be first: skip ~/.my.cnf / etc. so a [client] or [mysqldump]
         # line like set-gtid-purged=OFF does not break older MariaDB mysqldump builds.
-        timeout_args = _mysqldump_statement_timeout_args(conn)
+        timeout_args = _mysqldump_resilience_args(conn)
         argv = ['mysqldump', '--no-defaults', *base_args,
                 *timeout_args, '--single-transaction', '--quick', '--routines', '--events',
                 '--triggers', '--default-character-set=utf8mb4']
