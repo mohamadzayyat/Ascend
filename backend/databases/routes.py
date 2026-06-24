@@ -406,6 +406,298 @@ def _annotate_mysqldump_error(message):
     return text
 
 
+def _is_mysqldump_interruption(message):
+    lower = str(message or '').lower()
+    return any(marker in lower for marker in (
+        'query execution was interrupted',
+        'error 1317',
+        'interrupted when dumping table',
+        'maximum statement execution time',
+    ))
+
+
+def _dump_identifier(name):
+    text = str(name or '')
+    if not text or '\x00' in text:
+        raise ValueError('Invalid database object name.')
+    return '`' + text.replace('`', '``') + '`'
+
+
+def _backup_chunk_rows():
+    try:
+        configured = int(os.environ.get('ASCEND_DB_BACKUP_CHUNK_ROWS') or '50000')
+    except (TypeError, ValueError):
+        configured = 50000
+    return max(1000, min(configured, 500000))
+
+
+def _backup_chunk_min_rows():
+    try:
+        configured = int(os.environ.get('ASCEND_DB_BACKUP_MIN_CHUNK_ROWS') or '1000')
+    except (TypeError, ValueError):
+        configured = 1000
+    return max(100, min(configured, _backup_chunk_rows()))
+
+
+def _backup_chunk_threshold_rows():
+    try:
+        configured = int(os.environ.get('ASCEND_DB_BACKUP_CHUNK_THRESHOLD_ROWS') or '200000')
+    except (TypeError, ValueError):
+        configured = 200000
+    return max(_backup_chunk_rows(), configured)
+
+
+def _run_mysqldump_to_stream(argv, env, out):
+    proc = subprocess.run(argv, stdout=out, stderr=subprocess.PIPE, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+
+
+def _backup_database_names(conn, explicit_databases):
+    if explicit_databases:
+        return [name for name in explicit_databases if name]
+    client = None
+    try:
+        client = _open_mysql(conn, database='')
+        with client.cursor() as cur:
+            cur.execute('SHOW DATABASES')
+            names = [row[0] for row in cur.fetchall()]
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+    # These pseudo/system schemas either cannot be dumped or contain no user table data.
+    hidden = {'information_schema', 'performance_schema', 'sys'}
+    return [name for name in names if str(name).lower() not in hidden]
+
+
+def _backup_base_tables(conn, database):
+    client = None
+    try:
+        client = _open_mysql(conn, database='')
+        with client.cursor() as cur:
+            cur.execute("""
+                SELECT table_name, COALESCE(table_rows, 0) AS rows_estimate
+                FROM information_schema.tables
+                WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """, (database,))
+            return [{'name': row[0], 'rows_estimate': int(row[1] or 0)} for row in cur.fetchall()]
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+_MYSQL_INTEGER_TYPES = {
+    'tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint',
+}
+
+
+def _backup_numeric_range_column(conn, database, table):
+    client = None
+    try:
+        client = _open_mysql(conn, database=database)
+        with client.cursor() as cur:
+            cur.execute("""
+                SELECT k.COLUMN_NAME, c.DATA_TYPE
+                FROM information_schema.KEY_COLUMN_USAGE k
+                JOIN information_schema.COLUMNS c
+                  ON c.TABLE_SCHEMA = k.TABLE_SCHEMA
+                 AND c.TABLE_NAME = k.TABLE_NAME
+                 AND c.COLUMN_NAME = k.COLUMN_NAME
+                WHERE k.TABLE_SCHEMA = %s
+                  AND k.TABLE_NAME = %s
+                  AND k.CONSTRAINT_NAME = 'PRIMARY'
+                ORDER BY k.ORDINAL_POSITION
+            """, (database, table))
+            for column, data_type in cur.fetchall():
+                if str(data_type or '').lower() not in _MYSQL_INTEGER_TYPES:
+                    continue
+                cur.execute(f'SELECT MIN({_dump_identifier(column)}), MAX({_dump_identifier(column)}) FROM {_dump_identifier(table)}')
+                row = cur.fetchone()
+                if not row or row[0] is None or row[1] is None:
+                    return None
+                return {'column': column, 'min': int(row[0]), 'max': int(row[1])}
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return None
+
+
+def _table_data_dump_argv(base_args, timeout_args, database, table, where_clause=None):
+    argv = [
+        'mysqldump', '--no-defaults', *base_args,
+        *timeout_args, '--single-transaction', '--quick', '--skip-triggers',
+        '--no-create-info', '--skip-add-locks', '--default-character-set=utf8mb4',
+    ]
+    if where_clause:
+        argv.append(f'--where={where_clause}')
+    argv += [database, table]
+    return argv
+
+
+def _write_table_dump_header(out, database, table, mode):
+    out.write(
+        (
+            f'\n--\n-- Ascend chunked data dump for {database}.{table} ({mode})\n--\n'
+            f'USE {_dump_identifier(database)};\n'
+        ).encode('utf-8')
+    )
+
+
+def _append_file(src_path, out):
+    with open(src_path, 'rb') as src:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+
+
+def _new_chunk_temp_path(tmp_dir):
+    fd, tmp_name = tempfile.mkstemp(prefix='ascend-db-chunk-', suffix='.sql', dir=str(tmp_dir))
+    os.close(fd)
+    return Path(tmp_name)
+
+
+def _run_mysqldump_temp_then_append(argv, env, out, tmp_dir):
+    tmp = _new_chunk_temp_path(tmp_dir)
+    try:
+        with open(tmp, 'wb') as chunk_out:
+            _run_mysqldump_to_stream(argv, env, chunk_out)
+        _append_file(tmp, out)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _file_has_insert(src_path):
+    needle = b'INSERT INTO'
+    with open(src_path, 'rb') as src:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                return False
+            if needle in chunk:
+                return True
+
+
+def _dump_table_data_direct(env, base_args, timeout_args, out, database, table, tmp_dir):
+    _write_table_dump_header(out, database, table, 'direct')
+    _run_mysqldump_temp_then_append(_table_data_dump_argv(base_args, timeout_args, database, table), env, out, tmp_dir)
+
+
+def _dump_table_data_by_range(env, base_args, timeout_args, out, database, table, range_info, tmp_dir):
+    column = range_info['column']
+    current = int(range_info['min'])
+    max_value = int(range_info['max'])
+    step = _backup_chunk_rows()
+    min_step = _backup_chunk_min_rows()
+    _write_table_dump_header(out, database, table, f'range on {column}')
+    while current <= max_value:
+        end = min(current + step - 1, max_value)
+        where_clause = f'{_dump_identifier(column)} BETWEEN {current} AND {end}'
+        try:
+            _run_mysqldump_temp_then_append(_table_data_dump_argv(base_args, timeout_args, database, table, where_clause), env, out, tmp_dir)
+            current = end + 1
+            if step < _backup_chunk_rows():
+                step = min(_backup_chunk_rows(), step * 2)
+        except RuntimeError as exc:
+            if not _is_mysqldump_interruption(str(exc)) or step <= min_step:
+                raise
+            step = max(min_step, step // 2)
+            print(f'[backup] reducing chunk size for {database}.{table} to {step}', file=sys.stderr)
+
+
+def _dump_table_data_by_offset(env, base_args, timeout_args, out, database, table, tmp_dir):
+    offset = 0
+    limit = _backup_chunk_rows()
+    min_limit = _backup_chunk_min_rows()
+    _write_table_dump_header(out, database, table, 'offset')
+    while True:
+        where_clause = f'1=1 LIMIT {limit} OFFSET {offset}'
+        tmp = _new_chunk_temp_path(tmp_dir)
+        try:
+            with open(tmp, 'wb') as chunk_out:
+                _run_mysqldump_to_stream(_table_data_dump_argv(base_args, timeout_args, database, table, where_clause), env, chunk_out)
+            if not _file_has_insert(tmp):
+                break
+            _append_file(tmp, out)
+            offset += limit
+            if limit < _backup_chunk_rows():
+                limit = min(_backup_chunk_rows(), limit * 2)
+        except RuntimeError as exc:
+            if not _is_mysqldump_interruption(str(exc)) or limit <= min_limit:
+                raise
+            limit = max(min_limit, limit // 2)
+            print(f'[backup] reducing offset chunk size for {database}.{table} to {limit}', file=sys.stderr)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _dump_table_data_chunked(conn, env, base_args, timeout_args, out, database, table, tmp_dir):
+    range_info = _backup_numeric_range_column(conn, database, table)
+    if range_info:
+        _dump_table_data_by_range(env, base_args, timeout_args, out, database, table, range_info, tmp_dir)
+    else:
+        _dump_table_data_by_offset(env, base_args, timeout_args, out, database, table, tmp_dir)
+
+
+def _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_args):
+    target_databases = _backup_database_names(conn, databases)
+    if not target_databases:
+        raise RuntimeError('No databases are available for chunked backup fallback.')
+    tmp_path = filepath.with_suffix(filepath.suffix + '.chunked')
+    if tmp_path.exists():
+        tmp_path.unlink()
+    try:
+        with open(tmp_path, 'wb') as out:
+            out.write(b'-- Ascend chunked backup fallback\n')
+            schema_argv = [
+                'mysqldump', '--no-defaults', *base_args,
+                *timeout_args, '--single-transaction', '--routines', '--events',
+                '--triggers', '--no-data', '--default-character-set=utf8mb4',
+            ]
+            schema_argv += ['--databases', *target_databases]
+            _run_mysqldump_to_stream(schema_argv, env, out)
+
+            threshold = _backup_chunk_threshold_rows()
+            for database in target_databases:
+                for table in _backup_base_tables(conn, database):
+                    table_name = table['name']
+                    rows_estimate = int(table.get('rows_estimate') or 0)
+                    try:
+                        if rows_estimate >= threshold:
+                            _dump_table_data_chunked(conn, env, base_args, timeout_args, out, database, table_name, tmp_path.parent)
+                        else:
+                            _dump_table_data_direct(env, base_args, timeout_args, out, database, table_name, tmp_path.parent)
+                    except RuntimeError as exc:
+                        if not _is_mysqldump_interruption(str(exc)):
+                            raise
+                        _dump_table_data_chunked(conn, env, base_args, timeout_args, out, database, table_name, tmp_path.parent)
+        os.replace(tmp_path, filepath)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _valid_mysql_token(value):
     return bool(re.fullmatch(r'[A-Za-z0-9_]+', value or ''))
 
@@ -2120,35 +2412,47 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
 
         started = time.time()
         uploaded_to = None
+        fallback_note = None
         try:
             timeout_restore = _temporarily_disable_dump_statement_timeouts(conn, timeout_args)
             try:
-                with open(filepath, 'wb') as out:
-                    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                try:
+                    with open(filepath, 'wb') as out:
+                        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                        try:
+                            while True:
+                                chunk = proc.stdout.read(64 * 1024)
+                                if not chunk:
+                                    break
+                                out.write(chunk)
+                        except Exception as inner_exc:
+                            proc.kill()
+                            raise inner_exc
+                        stderr = proc.stderr.read()
+                        proc.wait()
+                        if proc.returncode != 0:
+                            raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+                except Exception as dump_exc:
+                    if not _is_mysqldump_interruption(str(dump_exc)):
+                        raise
+                    print(f'[backup] standard mysqldump interrupted for {conn.name}; retrying with chunked fallback', file=sys.stderr)
+                    fallback_note = 'Backup succeeded using chunked fallback after mysqldump was interrupted.'
                     try:
-                        while True:
-                            chunk = proc.stdout.read(64 * 1024)
-                            if not chunk:
-                                break
-                            out.write(chunk)
-                    except Exception as inner_exc:
-                        proc.kill()
-                        raise inner_exc
-                    stderr = proc.stderr.read()
-                    proc.wait()
-                    if proc.returncode != 0:
-                        raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+                        _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_args)
+                    except Exception as fallback_exc:
+                        raise RuntimeError(f'{dump_exc}\nChunked fallback also failed: {fallback_exc}') from fallback_exc
             finally:
                 _restore_dump_statement_timeouts(conn, timeout_restore)
             archive.size_bytes = filepath.stat().st_size
             archive.status = 'success'
-            archive.error_message = None
+            archive.error_message = fallback_note
             try:
                 uploaded_to = _upload_backup_to_remote(str(filepath), filename)
                 if uploaded_to:
-                    archive.error_message = f'Uploaded to {uploaded_to}'
+                    archive.error_message = f'{fallback_note} Uploaded to {uploaded_to}' if fallback_note else f'Uploaded to {uploaded_to}'
             except Exception as upload_exc:
-                archive.error_message = f'Backup succeeded; remote upload failed: {str(upload_exc)[:900]}'
+                prefix = f'{fallback_note} ' if fallback_note else ''
+                archive.error_message = f'{prefix}Backup succeeded; remote upload failed: {str(upload_exc)[:900]}'
                 _notify_email_async(
                     'backup_failed',
                     f'Ascend: backup upload failed - {conn.name}',
