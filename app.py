@@ -1296,21 +1296,38 @@ def api_settings_backup_upload():
         cur['enabled'] = bool(data['enabled'])
     if 'include_link_in_success_email' in data:
         cur['include_link_in_success_email'] = bool(data['include_link_in_success_email'])
-    for k in ('provider', 'webdav_url', 'username', 'remote_path'):
+    if 'provider' in data:
+        provider = str(data.get('provider') or '').strip().lower()
+        if provider not in ('webdav', 's3'):
+            return jsonify({'error': 'Choose WebDAV or Amazon S3 as the upload provider.'}), 400
+        cur['provider'] = provider
+    for k in ('webdav_url', 'username', 'remote_path', 's3_bucket', 's3_region', 's3_prefix', 's3_access_key_id'):
         if k in data and isinstance(data[k], str):
             cur[k] = data[k].strip()
     if bool(data.get('clear_password')):
         cur['password'] = ''
     elif isinstance(data.get('password'), str) and data['password'].strip():
         cur['password'] = data['password'].strip()
+    if bool(data.get('clear_s3_secret_access_key')):
+        cur['s3_secret_access_key'] = ''
+    elif isinstance(data.get('s3_secret_access_key'), str) and data['s3_secret_access_key'].strip():
+        cur['s3_secret_access_key'] = data['s3_secret_access_key'].strip()
+    provider = (cur.get('provider') or 'webdav').strip().lower()
+    if provider not in ('webdav', 's3'):
+        provider = 'webdav'
     persist = {
         'enabled': bool(cur.get('enabled')),
-        'provider': 'webdav',
+        'provider': provider,
         'webdav_url': (cur.get('webdav_url') or '').strip(),
         'username': (cur.get('username') or '').strip(),
         'remote_path': (cur.get('remote_path') or '').strip().strip('/'),
+        's3_bucket': (cur.get('s3_bucket') or '').strip(),
+        's3_region': (cur.get('s3_region') or '').strip() or 'us-east-1',
+        's3_prefix': (cur.get('s3_prefix') or '').strip().strip('/'),
+        's3_access_key_id': (cur.get('s3_access_key_id') or '').strip(),
         'include_link_in_success_email': bool(cur.get('include_link_in_success_email')),
         'password_encrypted': _encrypt_password(cur['password']) if cur.get('password') else '',
+        's3_secret_access_key_encrypted': _encrypt_password(cur['s3_secret_access_key']) if cur.get('s3_secret_access_key') else '',
     }
     rec = db.session.get(AppSetting, BACKUP_UPLOAD_SETTING_KEY)
     if rec is None:
@@ -1331,16 +1348,25 @@ def api_settings_backup_upload_test():
     if err:
         return err
     full = _backup_upload_settings_load()
-    if not (full.get('webdav_url') or '').strip():
-        return jsonify({'error': 'Set the WebDAV URL and save before testing.'}), 400
-    if not (full.get('username') or '').strip() or not full.get('password'):
-        return jsonify({'error': 'Set the WebDAV username and app password first. Koofr requires a generated WebDAV/app password, not your normal login password.'}), 400
+    provider = (full.get('provider') or 'webdav').strip().lower()
+    if provider == 's3':
+        if not (full.get('s3_bucket') or '').strip():
+            return jsonify({'error': 'Set the S3 bucket and save before testing.'}), 400
+        if not (full.get('s3_region') or '').strip():
+            return jsonify({'error': 'Set the S3 region and save before testing.'}), 400
+        if not (full.get('s3_access_key_id') or '').strip() or not full.get('s3_secret_access_key'):
+            return jsonify({'error': 'Set the S3 access key ID and secret access key before testing.'}), 400
+    else:
+        if not (full.get('webdav_url') or '').strip():
+            return jsonify({'error': 'Set the WebDAV URL and save before testing.'}), 400
+        if not (full.get('username') or '').strip() or not full.get('password'):
+            return jsonify({'error': 'Set the WebDAV username and app password first. Koofr requires a generated WebDAV/app password, not your normal login password.'}), 400
     tmp = None
     try:
         tmp = tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False, encoding='utf-8')
         tmp.write(f'Ascend backup upload test\nUTC: {datetime.now(timezone.utc).isoformat()}\n')
         tmp.close()
-        target = _upload_backup_to_remote(tmp.name, f'ascend-upload-test-{int(time.time())}.txt')
+        target = _upload_backup_to_remote(tmp.name, f'ascend-upload-test-{int(time.time())}.txt', force=True)
     except Exception as e:
         _audit_log('backup_upload.test', 'failed', str(e))
         return jsonify({'error': str(e)}), 502

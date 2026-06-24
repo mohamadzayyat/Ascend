@@ -2980,12 +2980,19 @@ function BackupsTab({ connection }) {
 function BackupUploadSettings() {
   const [form, setForm] = useState({
     enabled: false,
+    provider: 'webdav',
     webdav_url: 'https://app.koofr.net/dav/Koofr/Ascend-Backups',
     username: '',
     password: '',
     remote_path: '',
+    s3_bucket: '',
+    s3_region: 'us-east-1',
+    s3_prefix: 'database-backups',
+    s3_access_key_id: '',
+    s3_secret_access_key: '',
     include_link_in_success_email: true,
     has_password: false,
+    has_s3_secret_access_key: false,
   })
   const [open, setOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -2995,7 +3002,7 @@ function BackupUploadSettings() {
   const load = useCallback(async () => {
     try {
       const res = await apiClient.getBackupUploadSettings()
-      setForm((f) => ({ ...f, ...res.data, password: '' }))
+      setForm((f) => ({ ...f, ...res.data, provider: res.data.provider || 'webdav', password: '', s3_secret_access_key: '' }))
     } catch {
       setMessage('Could not load upload settings')
     }
@@ -3009,15 +3016,22 @@ function BackupUploadSettings() {
     try {
       const payload = {
         enabled: !!form.enabled,
+        provider: form.provider || 'webdav',
         webdav_url: form.webdav_url,
         username: form.username,
         remote_path: form.remote_path,
+        s3_bucket: form.s3_bucket,
+        s3_region: form.s3_region,
+        s3_prefix: form.s3_prefix,
+        s3_access_key_id: form.s3_access_key_id,
         include_link_in_success_email: !!form.include_link_in_success_email,
         clear_password: false,
+        clear_s3_secret_access_key: false,
       }
       if (form.password.trim()) payload.password = form.password.trim()
+      if (form.s3_secret_access_key.trim()) payload.s3_secret_access_key = form.s3_secret_access_key.trim()
       const res = await apiClient.updateBackupUploadSettings(payload)
-      setForm((f) => ({ ...f, ...res.data, password: '' }))
+      setForm((f) => ({ ...f, ...res.data, password: '', s3_secret_access_key: '' }))
       setMessage('Upload settings saved')
     } catch (err) {
       setMessage(err.response?.data?.error || 'Save failed')
@@ -3039,6 +3053,9 @@ function BackupUploadSettings() {
     }
   }
 
+  const isS3 = form.provider === 's3'
+  const providerName = isS3 ? 'Amazon S3' : 'WebDAV'
+
   return (
     <div className="rounded border border-gray-700 bg-primary/35">
       <button type="button" onClick={() => setOpen((v) => !v)} className="w-full px-3 py-2 flex items-center justify-between gap-3 text-left">
@@ -3046,18 +3063,41 @@ function BackupUploadSettings() {
           <UploadCloud className="w-4 h-4 text-accent" />
           Remote backup upload
           <span className={form.enabled ? 'text-green-400 text-xs' : 'text-gray-500 text-xs'}>{form.enabled ? 'enabled' : 'off'}</span>
+          <span className="text-gray-500 text-xs">{providerName}</span>
         </span>
         {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
       </button>
       {open && (
         <div className="border-t border-gray-700 p-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-          <div className="md:col-span-2 rounded border border-blue-500/25 bg-blue-500/10 p-2 text-xs text-blue-100/90">
-            Koofr is a simple free option. Use your Koofr account email as the username, but do not use your normal Koofr login password here.
-            Generate an application-specific WebDAV password in Koofr, paste that as the password, then use the default URL.
+          <div className="md:col-span-2 inline-flex rounded-lg border border-gray-700 bg-secondary p-1">
+            <button
+              type="button"
+              onClick={() => setForm((f) => ({ ...f, provider: 'webdav' }))}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold ${!isS3 ? 'bg-primary text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              WebDAV
+            </button>
+            <button
+              type="button"
+              onClick={() => setForm((f) => ({ ...f, provider: 's3' }))}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold ${isS3 ? 'bg-primary text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Amazon S3
+            </button>
           </div>
+          {!isS3 ? (
+            <div className="md:col-span-2 rounded border border-blue-500/25 bg-blue-500/10 p-2 text-xs text-blue-100/90">
+              Koofr is a simple free option. Use your Koofr account email as the username, but do not use your normal Koofr login password here.
+              Generate an application-specific WebDAV password in Koofr, paste that as the password, then use the default URL.
+            </div>
+          ) : (
+            <div className="md:col-span-2 rounded border border-blue-500/25 bg-blue-500/10 p-2 text-xs text-blue-100/90">
+              Use an AWS access key that can put objects into the selected bucket and prefix. Uploaded objects remain private unless your bucket policy changes that.
+            </div>
+          )}
           <label className="md:col-span-2 flex items-center gap-2 text-gray-300">
             <input type="checkbox" checked={!!form.enabled} onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))} />
-            Upload successful backups to WebDAV
+            Upload successful database backups to {providerName}
           </label>
           <label className="md:col-span-2 flex items-start gap-2 text-gray-300">
             <input
@@ -3067,27 +3107,54 @@ function BackupUploadSettings() {
               className="mt-0.5"
             />
             <span>
-              Include uploaded drive link in successful backup emails
-              <span className="block text-[11px] text-gray-500 mt-0.5">The link points to the WebDAV upload location and may require the drive account to be signed in.</span>
+              Include uploaded storage location in successful backup emails
+              <span className="block text-[11px] text-gray-500 mt-0.5">The location may require the backup storage account or AWS permissions.</span>
             </span>
           </label>
-          <label className="md:col-span-2 text-gray-300">
-            WebDAV URL
-            <input value={form.webdav_url} onChange={(e) => setForm((f) => ({ ...f, webdav_url: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
-          </label>
-          <label className="text-gray-300">
-            Username / email
-            <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
-          </label>
-          <label className="text-gray-300">
-            WebDAV app password {form.has_password && <span className="text-gray-500">(leave blank to keep)</span>}
-            <input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} placeholder={form.has_password ? '********' : ''} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
-            <span className="text-[11px] text-gray-500 mt-1 block">For Koofr, create this in Koofr app passwords/WebDAV passwords. The normal website password will return unauthorized.</span>
-          </label>
-          <label className="md:col-span-2 text-gray-300">
-            Extra remote folder (optional)
-            <input value={form.remote_path} onChange={(e) => setForm((f) => ({ ...f, remote_path: e.target.value }))} placeholder="production/mysql" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
-          </label>
+          {!isS3 ? (
+            <>
+              <label className="md:col-span-2 text-gray-300">
+                WebDAV URL
+                <input value={form.webdav_url} onChange={(e) => setForm((f) => ({ ...f, webdav_url: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+              <label className="text-gray-300">
+                Username / email
+                <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+              <label className="text-gray-300">
+                WebDAV app password {form.has_password && <span className="text-gray-500">(leave blank to keep)</span>}
+                <input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} placeholder={form.has_password ? '********' : ''} className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+                <span className="text-[11px] text-gray-500 mt-1 block">For Koofr, create this in Koofr app passwords/WebDAV passwords. The normal website password will return unauthorized.</span>
+              </label>
+              <label className="md:col-span-2 text-gray-300">
+                Extra remote folder (optional)
+                <input value={form.remote_path} onChange={(e) => setForm((f) => ({ ...f, remote_path: e.target.value }))} placeholder="production/mysql" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="text-gray-300">
+                S3 bucket
+                <input value={form.s3_bucket} onChange={(e) => setForm((f) => ({ ...f, s3_bucket: e.target.value }))} placeholder="my-backup-bucket" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+              <label className="text-gray-300">
+                AWS region
+                <input value={form.s3_region} onChange={(e) => setForm((f) => ({ ...f, s3_region: e.target.value }))} placeholder="us-east-1" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+              <label className="md:col-span-2 text-gray-300">
+                Backup prefix (optional)
+                <input value={form.s3_prefix} onChange={(e) => setForm((f) => ({ ...f, s3_prefix: e.target.value }))} placeholder="production/mysql" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+              <label className="text-gray-300">
+                Access key ID
+                <input value={form.s3_access_key_id} onChange={(e) => setForm((f) => ({ ...f, s3_access_key_id: e.target.value }))} autoComplete="off" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+              <label className="text-gray-300">
+                Secret access key {form.has_s3_secret_access_key && <span className="text-gray-500">(leave blank to keep)</span>}
+                <input type="password" value={form.s3_secret_access_key} onChange={(e) => setForm((f) => ({ ...f, s3_secret_access_key: e.target.value }))} placeholder={form.has_s3_secret_access_key ? '********' : ''} autoComplete="new-password" className="mt-1 w-full bg-primary border border-gray-700 rounded px-2 py-1.5 text-white" />
+              </label>
+            </>
+          )}
           {message && <div className="md:col-span-2 rounded border border-gray-600 bg-secondary px-2 py-1.5 text-xs text-gray-200 break-all">{message}</div>}
           <div className="md:col-span-2 flex flex-wrap gap-2">
             <button type="button" onClick={save} disabled={saving} className="px-3 py-1.5 bg-accent hover:bg-accent/80 rounded text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-50">

@@ -1967,8 +1967,8 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
             if uploaded_to and include_remote_link:
                 remote_lines = (
                     f'Remote upload: uploaded\n'
-                    f'Remote backup link: {uploaded_to}\n'
-                    'Remote link note: This drive link may require the backup storage account to be signed in.\n'
+                    f'Remote backup location: {uploaded_to}\n'
+                    'Remote location note: Access may require the backup storage account or AWS permissions.\n'
                 )
             elif uploaded_to:
                 remote_lines = 'Remote upload: uploaded\n'
