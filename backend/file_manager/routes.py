@@ -1364,9 +1364,9 @@ def _schedule_folder_backup(schedule, sched=None):
         trigger = CronTrigger(hour=ah, minute=am, timezone=tz)
     else:
         from apscheduler.triggers.interval import IntervalTrigger
-        now = datetime.now(timezone.utc)
-        start = now.replace(second=0, microsecond=0, minute=am)
-        if start <= now:
+        now = datetime.now(tz)
+        start = now.replace(hour=ah, minute=am, second=0, microsecond=0)
+        while start <= now:
             start = start + timedelta(hours=eh)
         try:
             trigger = IntervalTrigger(hours=eh, start_date=start, timezone=tz)
@@ -1379,9 +1379,14 @@ def _schedule_folder_backup(schedule, sched=None):
         id=job_id,
         args=(schedule.id,),
         replace_existing=True,
+        misfire_grace_time=600,
         coalesce=True,
         max_instances=1,
     )
+    try:
+        sched.wakeup()
+    except Exception:
+        pass
 
 
 def _folder_schedule_next_run_at(schedule):

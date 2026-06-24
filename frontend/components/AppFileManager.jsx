@@ -161,6 +161,22 @@ function formatPcTime(iso) {
   }
 }
 
+function pad2(value) {
+  const n = Number(value) || 0
+  return String(Math.max(0, Math.min(n, 99))).padStart(2, '0')
+}
+
+function scheduleClock(row) {
+  return `${pad2(row.at_hour)}:${pad2(row.at_minute)}`
+}
+
+function folderScheduleSummary(row, timezone) {
+  const hours = Number(row.every_hours) || 2
+  const clock = scheduleClock(row)
+  if (hours === 24) return `Daily at ${clock} ${timezone}`
+  return `Every ${hours}h starting at ${clock} ${timezone}`
+}
+
 function joinPath(base, name) {
   if (!base) return name
   return `${base}/${name}`
@@ -881,7 +897,7 @@ export default function AppFileManager({
     
     const destPath = await dialog.prompt({
       title: 'Schedule folder backup',
-      message: `Schedule regular backups for "${entry.name}". Where should backups be stored?`,
+      message: `Backups copy "${entry.name}" into timestamped folders under the destination path. Where should those folders be stored?`,
       label: 'Destination path (relative)',
       placeholder: 'backups',
       defaultValue: '',
@@ -893,10 +909,10 @@ export default function AppFileManager({
     
     const hoursStr = await dialog.prompt({
       title: 'Schedule interval',
-      message: 'How often should backups run?',
-      label: 'Every N hours',
-      defaultValue: '2',
-      placeholder: '2',
+      message: 'Use 24 for a daily backup. You can fine tune the exact time, timezone, retention, and enabled state from the Schedules panel after creation.',
+      label: 'Run every N hours',
+      defaultValue: '24',
+      placeholder: '24',
       confirmLabel: 'Create schedule',
       required: true,
     })
@@ -907,15 +923,23 @@ export default function AppFileManager({
     
     setError('')
     try {
-      await (api.createBackupSchedule || api.createFolderBackupSchedule)({
+      const now = new Date()
+      const res = await (api.createBackupSchedule || api.createFolderBackupSchedule)({
         scope_type: currentScope.scopeType,
         scope_id: currentScope.scopeId,
         source_path: entry.path,
         destination_path: destPath.trim(),
         every_hours: hours,
+        at_hour: now.getHours(),
+        at_minute: 0,
+        schedule_timezone: pcTimezone.includes('/') ? pcTimezone : '',
       })
-      flash(`Scheduled backups for ${entry.name} every ${hours} hour(s)`)
-      loadBackupSchedules()
+      const saved = res.data?.schedule
+      if (res.data?.server_timezone) setBackupServerTimezone(res.data.server_timezone)
+      if (saved) setBackupSchedules((rows) => [saved, ...rows.filter((item) => item.id !== saved.id)])
+      setBackupSchedulesOpen(true)
+      flash(`Scheduled backups for ${entry.name}. Review the next run in Schedules.`)
+      await loadBackupSchedules()
     } catch (err) {
       setError(err.response?.data?.error || 'Schedule failed')
     }
@@ -929,6 +953,7 @@ export default function AppFileManager({
   const scheduleDraftFromRow = (row) => ({
     source_path: row.source_path || '',
     destination_path: row.destination_path || '',
+    mode: Number(row.every_hours || 2) === 24 ? 'daily' : 'interval',
     every_hours: String(row.every_hours || 2),
     at_hour: String(row.at_hour ?? 0),
     at_minute: String(row.at_minute ?? 0),
@@ -960,19 +985,29 @@ export default function AppFileManager({
     setScheduleBusyId(row.id)
     setBackupSchedulesError('')
     try {
-      await api.updateBackupSchedule(row.id, {
+      const hours = draft.mode === 'daily' ? 24 : Math.max(1, Math.min(parseInt(draft.every_hours, 10) || 2, 24 * 30))
+      const res = await api.updateBackupSchedule(row.id, {
         source_path: sourcePath,
         destination_path: destinationPath,
-        every_hours: Math.max(1, Math.min(parseInt(draft.every_hours, 10) || 2, 24 * 30)),
+        every_hours: hours,
         at_hour: Math.max(0, Math.min(parseInt(draft.at_hour, 10) || 0, 23)),
         at_minute: Math.max(0, Math.min(parseInt(draft.at_minute, 10) || 0, 59)),
         retention_days: Math.max(0, parseInt(draft.retention_days, 10) || 0),
         schedule_timezone: draft.schedule_timezone.trim(),
         enabled: !!draft.enabled,
       })
+      const saved = res.data?.schedule
+      if (res.data?.server_timezone) setBackupServerTimezone(res.data.server_timezone)
+      if (saved) setBackupSchedules((rows) => rows.map((item) => (item.id === saved.id ? saved : item)))
       setEditingScheduleId(null)
-      flash('Backup schedule updated')
-      loadBackupSchedules()
+      setScheduleDrafts((drafts) => {
+        const next = { ...drafts }
+        delete next[row.id]
+        return next
+      })
+      const nextText = saved?.enabled && saved?.next_run_at ? ` Next run: ${formatPcTime(saved.next_run_at)}` : ''
+      flash(`Backup schedule updated.${nextText}`)
+      await loadBackupSchedules()
     } catch (err) {
       setBackupSchedulesError(err.response?.data?.error || 'Failed to update backup schedule')
     } finally {
@@ -1262,6 +1297,9 @@ export default function AppFileManager({
             <div>
               <h3 className="text-sm font-semibold text-white">Scheduled folder backups</h3>
               <p className="text-xs text-gray-500 mt-0.5">{scopedBackupSchedules.length} schedule(s) for this file manager</p>
+              <p className="mt-1 max-w-3xl text-xs text-gray-400">
+                A schedule copies the source folder into a new timestamped folder inside the destination. Daily runs use the selected clock time; interval runs start at the selected clock time, then repeat every N hours. Old successful backups are removed after the retention window.
+              </p>
             </div>
             <button
               type="button"
@@ -1285,7 +1323,8 @@ export default function AppFileManager({
                   <tr>
                     <th className="px-4 py-2 text-left font-semibold">Folder</th>
                     <th className="px-4 py-2 text-left font-semibold">Destination</th>
-                    <th className="px-4 py-2 text-left font-semibold">Schedule</th>
+                    <th className="px-4 py-2 text-left font-semibold">Runs</th>
+                    <th className="px-4 py-2 text-left font-semibold">Next run</th>
                     <th className="px-4 py-2 text-left font-semibold">Status</th>
                     <th className="px-4 py-2 text-right font-semibold">Actions</th>
                   </tr>
@@ -1294,8 +1333,9 @@ export default function AppFileManager({
                   {scopedBackupSchedules.map((row) => {
                     const editing = editingScheduleId === row.id
                     const draft = scheduleDrafts[row.id] || scheduleDraftFromRow(row)
-                    const daily = Number(editing ? draft.every_hours : row.every_hours) === 24
-                    const tzLabel = row.schedule_timezone || backupServerTimezone || 'UTC'
+                    const draftMode = draft.mode || (Number(draft.every_hours) === 24 ? 'daily' : 'interval')
+                    const draftHours = draftMode === 'daily' ? 24 : Math.max(1, Math.min(parseInt(draft.every_hours, 10) || 2, 24 * 30))
+                    const tzLabel = (editing ? draft.schedule_timezone : row.schedule_timezone) || backupServerTimezone || 'UTC'
                     const nextRun = row.enabled && row.next_run_at ? formatPcTime(row.next_run_at) : ''
                     return (
                       <tr key={row.id} className="border-t border-gray-800 align-top">
@@ -1323,29 +1363,47 @@ export default function AppFileManager({
                         </td>
                         <td className="px-4 py-3">
                           {editing ? (
-                            <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex flex-col gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <select
+                                  value={draftMode}
+                                  onChange={(e) => {
+                                    const mode = e.target.value
+                                    patchScheduleDraft(row.id, {
+                                      mode,
+                                      every_hours: mode === 'daily' ? '24' : (Number(draft.every_hours) === 24 ? '2' : draft.every_hours),
+                                    })
+                                  }}
+                                  className="rounded border border-gray-700 bg-secondary px-2 py-1.5 text-xs text-white outline-none focus:border-accent"
+                                >
+                                  <option value="daily">Daily</option>
+                                  <option value="interval">Every N hours</option>
+                                </select>
+                                {draftMode === 'interval' && (
+                                  <label className="text-xs text-gray-500">
+                                    Every
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="720"
+                                      value={draft.every_hours}
+                                      onChange={(e) => patchScheduleDraft(row.id, { every_hours: e.target.value })}
+                                      className="mx-1 w-16 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
+                                    />
+                                    h
+                                  </label>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-2">
                               <label className="text-xs text-gray-500">
-                                Every
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max="720"
-                                  value={draft.every_hours}
-                                  onChange={(e) => patchScheduleDraft(row.id, { every_hours: e.target.value })}
-                                  className="ml-1 w-16 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
-                                />
-                                h
-                              </label>
-                              <label className="text-xs text-gray-500">
-                                At
+                                {draftMode === 'daily' ? 'Run at' : 'Start at'}
                                 <input
                                   type="number"
                                   min="0"
                                   max="23"
                                   value={draft.at_hour}
-                                  disabled={!daily}
                                   onChange={(e) => patchScheduleDraft(row.id, { at_hour: e.target.value })}
-                                  className="ml-1 w-14 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent disabled:opacity-40"
+                                  className="ml-1 w-14 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-white outline-none focus:border-accent"
                                 />
                                 :
                                 <input
@@ -1372,20 +1430,32 @@ export default function AppFileManager({
                                 value={draft.schedule_timezone}
                                 onChange={(e) => patchScheduleDraft(row.id, { schedule_timezone: e.target.value })}
                                 placeholder={backupServerTimezone || 'UTC'}
-                                className="w-28 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-xs text-white outline-none focus:border-accent"
+                                className="w-36 rounded border border-gray-700 bg-secondary px-2 py-1.5 text-xs text-white outline-none focus:border-accent"
                               />
+                              </div>
+                              <div className="text-[11px] text-gray-500">
+                                {folderScheduleSummary({ ...row, ...draft, every_hours: draftHours }, tzLabel)}. Save to recalculate the next run.
+                              </div>
                             </div>
                           ) : (
                             <div className="text-gray-300">
-                              {Number(row.every_hours) === 24
-                                ? `Daily at ${String(row.at_hour || 0).padStart(2, '0')}:${String(row.at_minute || 0).padStart(2, '0')}`
-                                : `Every ${row.every_hours}h near minute ${String(row.at_minute || 0).padStart(2, '0')}`}
-                              <div className="text-xs text-gray-500">Keep {row.retention_days} day(s) {tzLabel}</div>
-                              <div className="text-xs text-green-300 mt-1">
-                                {row.enabled ? (nextRun ? `Next: ${nextRun}` : 'Next: pending scheduler') : 'Schedule paused'}
-                              </div>
-                              {row.enabled && nextRun && <div className="text-[10px] text-gray-500">{pcTimezone}</div>}
+                              {folderScheduleSummary(row, tzLabel)}
+                              <div className="text-xs text-gray-500">Keeps successful backups for {row.retention_days} day(s)</div>
                             </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-xs">
+                          {editing ? (
+                            <div className="max-w-[12rem] text-gray-500">
+                              Next run updates immediately after Save.
+                            </div>
+                          ) : row.enabled ? (
+                            <div>
+                              <div className="text-green-300">{nextRun || 'Pending scheduler'}</div>
+                              {nextRun && <div className="text-[10px] text-gray-500">{pcTimezone}</div>}
+                            </div>
+                          ) : (
+                            <span className="text-gray-500">Paused</span>
                           )}
                         </td>
                         <td className="px-4 py-3">

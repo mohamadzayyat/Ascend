@@ -203,6 +203,167 @@ def _mysqldump_env(conn):
     return env, base_args
 
 
+_MYSQL_CLIENT_HELP_CACHE = {}
+
+
+def _mysql_client_help(command):
+    cached = _MYSQL_CLIENT_HELP_CACHE.get(command)
+    if cached is not None:
+        return cached
+    try:
+        proc = subprocess.run(
+            [command, '--help'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+        )
+        text = (proc.stdout or b'').decode('utf-8', errors='replace')
+    except Exception:
+        text = ''
+    _MYSQL_CLIENT_HELP_CACHE[command] = text
+    return text
+
+
+def _mysql_client_supports(command, option):
+    return option in _mysql_client_help(command)
+
+
+def _statement_timeout_row_value(row):
+    if not row:
+        return None
+    if isinstance(row, dict):
+        return row.get('Value')
+    return row[1] if len(row) > 1 else None
+
+
+def _server_statement_timeout_vars(conn):
+    """Return timeout variables available on the target server.
+
+    MySQL uses max_execution_time; MariaDB uses max_statement_time.
+    """
+    found = set()
+    client = None
+    try:
+        client = _open_mysql(conn, database='')
+        with client.cursor() as cur:
+            for name in ('max_execution_time', 'max_statement_time'):
+                try:
+                    cur.execute('SHOW VARIABLES LIKE %s', (name,))
+                    if cur.fetchone():
+                        found.add(name)
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f'[backup] statement timeout variable detection failed: {exc}', file=sys.stderr)
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return found
+
+
+def _mysqldump_statement_timeout_args(conn):
+    args = []
+    server_vars = _server_statement_timeout_vars(conn)
+    if 'max_statement_time' in server_vars and _mysql_client_supports('mysqldump', '--max-statement-time'):
+        args.append('--max-statement-time=0')
+    return args
+
+
+def _temporarily_disable_dump_statement_timeouts(conn, session_timeout_args=None):
+    """Best-effort global override so new mysqldump sessions do not timeout.
+
+    Session settings made through PyMySQL would not affect mysqldump because it
+    opens a separate connection. We only touch supported vars that are nonzero,
+    and callers restore them immediately after the dump process exits.
+    """
+    changed = []
+    session_timeout_args = set(session_timeout_args or [])
+    session_handled = set()
+    if '--max-statement-time=0' in session_timeout_args:
+        session_handled.add('max_statement_time')
+    client = None
+    try:
+        client = _open_mysql(conn, database='')
+        with client.cursor() as cur:
+            for name in ('max_execution_time', 'max_statement_time'):
+                if name in session_handled:
+                    continue
+                try:
+                    cur.execute('SHOW GLOBAL VARIABLES LIKE %s', (name,))
+                    current = _statement_timeout_row_value(cur.fetchone())
+                    if current is None:
+                        continue
+                    current_text = str(current).strip()
+                    try:
+                        current_num = float(current_text)
+                    except (TypeError, ValueError):
+                        current_num = 0
+                    if current_num <= 0:
+                        continue
+                    cur.execute(f'SET GLOBAL {name}=0')
+                    changed.append((name, current_text))
+                    print(f'[backup] temporarily set GLOBAL {name}=0 for mysqldump', file=sys.stderr)
+                except Exception as exc:
+                    print(f'[backup] could not disable GLOBAL {name} for mysqldump: {exc}', file=sys.stderr)
+    except Exception as exc:
+        print(f'[backup] global statement timeout override failed: {exc}', file=sys.stderr)
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+    return changed
+
+
+def _restore_dump_statement_timeouts(conn, changed):
+    if not changed:
+        return
+    client = None
+    try:
+        client = _open_mysql(conn, database='')
+        with client.cursor() as cur:
+            for name, value in reversed(changed):
+                if name not in ('max_execution_time', 'max_statement_time'):
+                    continue
+                try:
+                    cur.execute(f'SET GLOBAL {name}=%s', (value,))
+                    print(f'[backup] restored GLOBAL {name}={value}', file=sys.stderr)
+                except Exception as exc:
+                    print(f'[backup] could not restore GLOBAL {name}: {exc}', file=sys.stderr)
+    except Exception as exc:
+        print(f'[backup] statement timeout restore failed: {exc}', file=sys.stderr)
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _annotate_mysqldump_error(message):
+    text = str(message or '')
+    lower = text.lower()
+    timeout_markers = (
+        'maximum statement execution time',
+        'max_execution_time',
+        'max_statement_time',
+    )
+    if any(marker in lower for marker in timeout_markers):
+        hint = (
+            ' Ascend attempted to disable statement timeouts for this dump. '
+            'If this repeats, allow the backup database user to SET GLOBAL '
+            'max_execution_time/max_statement_time, or set that timeout to 0 '
+            'for backup sessions on the database server.'
+        )
+        if hint.strip() not in text:
+            text = f'{text}{hint}'
+    return text
+
+
 def _valid_mysql_token(value):
     return bool(re.fullmatch(r'[A-Za-z0-9_]+', value or ''))
 
@@ -1090,11 +1251,16 @@ def api_db_tables_export(conn_id):
     started = time.time()
     try:
         env, base_args = _mysqldump_env(conn)
+        timeout_args = _mysqldump_statement_timeout_args(conn)
         argv = ['mysqldump', '--no-defaults', *base_args,
-                '--single-transaction', '--quick', '--routines', '--triggers',
+                *timeout_args, '--single-transaction', '--quick', '--routines', '--triggers',
                 '--default-character-set=utf8mb4', database, *tables]
-        with open(filepath, 'wb') as out:
-            proc = subprocess.run(argv, stdout=out, stderr=subprocess.PIPE, env=env, timeout=1800)
+        timeout_restore = _temporarily_disable_dump_statement_timeouts(conn, timeout_args)
+        try:
+            with open(filepath, 'wb') as out:
+                proc = subprocess.run(argv, stdout=out, stderr=subprocess.PIPE, env=env, timeout=1800)
+        finally:
+            _restore_dump_statement_timeouts(conn, timeout_restore)
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
         archive.size_bytes = filepath.stat().st_size
@@ -1108,7 +1274,7 @@ def api_db_tables_export(conn_id):
         archive.error_message = 'Table export timed out after 30 minutes.'
     except Exception as e:
         archive.status = 'failed'
-        archive.error_message = str(e)[:1000]
+        archive.error_message = _annotate_mysqldump_error(str(e))[:1000]
     finally:
         archive.completed_at = datetime.now(timezone.utc)
         archive.duration_seconds = int(time.time() - started)
@@ -1901,8 +2067,9 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
             return archive.id
         # --no-defaults must be first: skip ~/.my.cnf / etc. so a [client] or [mysqldump]
         # line like set-gtid-purged=OFF does not break older MariaDB mysqldump builds.
+        timeout_args = _mysqldump_statement_timeout_args(conn)
         argv = ['mysqldump', '--no-defaults', *base_args,
-                '--single-transaction', '--quick', '--routines', '--events',
+                *timeout_args, '--single-transaction', '--quick', '--routines', '--events',
                 '--triggers', '--default-character-set=utf8mb4']
         if databases:
             argv += ['--databases', *databases]
@@ -1912,21 +2079,25 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         started = time.time()
         uploaded_to = None
         try:
-            with open(filepath, 'wb') as out:
-                proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-                try:
-                    while True:
-                        chunk = proc.stdout.read(64 * 1024)
-                        if not chunk:
-                            break
-                        out.write(chunk)
-                except Exception as inner_exc:
-                    proc.kill()
-                    raise inner_exc
-                stderr = proc.stderr.read()
-                proc.wait()
-                if proc.returncode != 0:
-                    raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+            timeout_restore = _temporarily_disable_dump_statement_timeouts(conn, timeout_args)
+            try:
+                with open(filepath, 'wb') as out:
+                    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                    try:
+                        while True:
+                            chunk = proc.stdout.read(64 * 1024)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                    except Exception as inner_exc:
+                        proc.kill()
+                        raise inner_exc
+                    stderr = proc.stderr.read()
+                    proc.wait()
+                    if proc.returncode != 0:
+                        raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+            finally:
+                _restore_dump_statement_timeouts(conn, timeout_restore)
             archive.size_bytes = filepath.stat().st_size
             archive.status = 'success'
             archive.error_message = None
@@ -1943,7 +2114,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
                 )
         except Exception as e:
             archive.status = 'failed'
-            archive.error_message = str(e)[:1000]
+            archive.error_message = _annotate_mysqldump_error(str(e))[:1000]
             try:
                 if filepath.exists():
                     filepath.unlink()
