@@ -3223,8 +3223,14 @@ def deploy_app_bg(deployment_id, github_username, github_token):
 
         start_time = time.time()
         deploy_branch = deployment.branch or _app_repo_branch(app_row)
+        deploy_lock = None
 
         try:
+            deploy_lock = _acquire_app_deploy_lock(app_row)
+            db.session.refresh(app_row)
+            app_row.status = 'deploying'
+            db.session.commit()
+
             with open(log_file, 'w', encoding='utf-8') as log:
                 log.write(f"=== Deployment Started: {datetime.now(timezone.utc).isoformat()} ===\n")
                 log.write(f"Project: {project.name}\n")
@@ -3312,9 +3318,12 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                 pass
 
         finally:
-            deployment.completed_at = datetime.now(timezone.utc)
-            deployment.duration_seconds = int(time.time() - start_time)
-            db.session.commit()
+            try:
+                deployment.completed_at = datetime.now(timezone.utc)
+                deployment.duration_seconds = int(time.time() - start_time)
+                db.session.commit()
+            finally:
+                _release_app_deploy_lock(deploy_lock)
             try:
                 st = deployment.status
                 label = f'{project.name} / {app_row.name}'
@@ -4271,6 +4280,8 @@ def setup_nginx_config(app_row, log_file):
 _system_cache = {}
 _SYSTEM_TTL = 5  # seconds
 _repo_locks = {}
+_deploy_locks = {}
+_deploy_locks_guard = threading.Lock()
 _setup_lock = threading.Lock()
 
 
@@ -4286,6 +4297,59 @@ def _repo_lock(key):
         lock = threading.Lock()
         _repo_locks[key] = lock
     return lock
+
+
+def _app_deploy_thread_lock(app_id):
+    key = str(app_id)
+    with _deploy_locks_guard:
+        lock = _deploy_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _deploy_locks[key] = lock
+        return lock
+
+
+def _acquire_app_deploy_lock(app_row):
+    thread_lock = _app_deploy_thread_lock(app_row.id)
+    thread_lock.acquire()
+    lock_file = None
+    try:
+        if os.name != 'nt':
+            import fcntl
+
+            lock_path = Path('/tmp') / f'ascend-deploy-app-{app_row.id}.lock'
+            lock_file = open(lock_path, 'w')
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            lock_file.write(f'{os.getpid()}\n')
+            lock_file.truncate()
+        return thread_lock, lock_file
+    except Exception:
+        if lock_file:
+            try:
+                lock_file.close()
+            except Exception:
+                pass
+        thread_lock.release()
+        raise
+
+
+def _release_app_deploy_lock(held_lock):
+    if not held_lock:
+        return
+    thread_lock, lock_file = held_lock
+    try:
+        if lock_file:
+            try:
+                import fcntl
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_file.close()
+            except Exception:
+                pass
+    finally:
+        thread_lock.release()
 
 
 def _cached(key, ttl, builder):
