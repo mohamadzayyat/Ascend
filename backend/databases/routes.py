@@ -2364,6 +2364,32 @@ def _unique_zip_arcname(name, seen):
     return candidate
 
 
+def _backup_non_upload_note(message):
+    text = (message or '').strip()
+    if not text:
+        return ''
+    for marker in ('Backup succeeded; remote upload failed:', 'Uploaded to '):
+        idx = text.find(marker)
+        if idx >= 0:
+            return text[:idx].strip()
+    return text
+
+
+def _set_backup_uploaded_note(archive, uploaded_to):
+    base = _backup_non_upload_note(archive.error_message)
+    note = f'Uploaded to {uploaded_to}'
+    archive.error_message = f'{base} {note}' if base else note
+
+
+def _backup_remote_uploaded_to(message):
+    text = (message or '').strip()
+    marker = 'Uploaded to '
+    idx = text.rfind(marker)
+    if idx < 0:
+        return ''
+    return text[idx + len(marker):].strip().splitlines()[0].strip()
+
+
 def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_database=None):
     """Synchronously run mysqldump for a connection. Records a BackupArchive
     row in either success or failed state. Used by both the manual endpoint
@@ -2486,7 +2512,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
             try:
                 uploaded_to = _upload_backup_to_remote(str(filepath), filename)
                 if uploaded_to:
-                    archive.error_message = f'{fallback_note} Uploaded to {uploaded_to}' if fallback_note else f'Uploaded to {uploaded_to}'
+                    _set_backup_uploaded_note(archive, uploaded_to)
             except Exception as upload_exc:
                 prefix = f'{fallback_note} ' if fallback_note else ''
                 archive.error_message = f'{prefix}Backup succeeded; remote upload failed: {str(upload_exc)[:900]}'
@@ -2603,6 +2629,8 @@ def _backup_pending_live_size(row):
 
 def _backup_archive_api_dict(row):
     data = row.to_dict()
+    data['remote_uploaded_to'] = _backup_remote_uploaded_to(row.error_message)
+    data['remote_upload_failed'] = 'Backup succeeded; remote upload failed:' in (row.error_message or '')
     if row.status == 'pending':
         data['size_bytes'] = _backup_pending_live_size(row)
         started = row.started_at
@@ -2844,6 +2872,37 @@ def api_db_backup_share(backup_id):
         return jsonify({'error': str(exc)}), 400
     share['url'] = f"{request.host_url.rstrip('/')}/api/share/{share['token']}"
     return jsonify(share), 201
+
+
+@bp.route('/api/databases/backups/<int:backup_id>/upload', methods=['POST'])
+@login_required
+def api_db_backup_upload(backup_id):
+    err = _admin_required()
+    if err:
+        return err
+    a = db.session.get(BackupArchive, backup_id)
+    if a is None:
+        return jsonify({'error': 'Backup not found.'}), 404
+    conn = db.session.get(DatabaseConnection, a.connection_id)
+    if conn is None or conn.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+    if a.status != 'success':
+        return jsonify({'error': 'Only successful backups can be uploaded.'}), 400
+    path = Path(a.filepath)
+    if not path.is_file():
+        return jsonify({'error': 'Backup file is not available.'}), 410
+    settings = _backup_upload_settings_load()
+    if not settings.get('enabled'):
+        return jsonify({'error': 'Remote backup upload is not enabled.'}), 400
+    try:
+        uploaded_to = _upload_backup_to_remote(str(path), a.filename)
+    except Exception as exc:
+        return jsonify({'error': f'Remote upload failed: {str(exc)[:300]}'}), 400
+    if not uploaded_to:
+        return jsonify({'error': 'Remote upload did not return a destination.'}), 400
+    _set_backup_uploaded_note(a, uploaded_to)
+    db.session.commit()
+    return jsonify({'ok': True, 'uploaded_to': uploaded_to, 'backup': _backup_archive_api_dict(a)})
 
 
 @bp.route('/api/databases/backups/<int:backup_id>', methods=['DELETE'])
@@ -3105,7 +3164,8 @@ def api_db_schedule_upsert(conn_id):
         return jsonify({'error': str(e)}), 400
     db.session.commit()
     _reschedule_backup_jobs()
-    return jsonify({'schedule': sched.to_dict(), 'server_timezone': _server_timezone_name()})
+    db.session.refresh(sched)
+    return jsonify({'schedule': _schedule_dict_with_next(sched), 'server_timezone': _server_timezone_name()})
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/backup-schedules', methods=['GET'])
@@ -3248,9 +3308,9 @@ def _reschedule_backup_jobs():
             trigger = CronTrigger(hour=ah, minute=am, timezone=zone)
         else:
             from apscheduler.triggers.interval import IntervalTrigger
-            now = datetime.now(timezone.utc)
-            start = now.replace(second=0, microsecond=0, minute=am)
-            if start <= now:
+            now = datetime.now(zone)
+            start = now.replace(hour=ah, minute=am, second=0, microsecond=0)
+            while start <= now:
                 start = start + _timedelta(hours=eh)
             try:
                 trigger = IntervalTrigger(hours=eh, start_date=start, timezone=zone)
@@ -3261,10 +3321,15 @@ def _reschedule_backup_jobs():
             trigger=trigger,
             id=f'db-backup-{s.id}',
             args=[s.connection_id, s.id, 'scheduled'],
+            replace_existing=True,
             misfire_grace_time=600,
             coalesce=True,
             max_instances=1,
         )
+    try:
+        sched.wakeup()
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════

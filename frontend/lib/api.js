@@ -252,6 +252,8 @@ export const apiClient = {
     `${API_URL}/api/databases/backups/${backupId}/download`,
   shareDbBackup: (backupId, expiresHours = 24) =>
     api.post(`/api/databases/backups/${backupId}/share`, { expires_hours: expiresHours }),
+  uploadDbBackup: (backupId) =>
+    api.post(`/api/databases/backups/${backupId}/upload`, {}, { timeout: 1900000 }),
   deleteDbBackup: (backupId) => api.delete(`/api/databases/backups/${backupId}`),
   getDbSchedule: (id) => api.get(`/api/databases/connections/${id}/schedule`),
   upsertDbSchedule: (id, data) =>

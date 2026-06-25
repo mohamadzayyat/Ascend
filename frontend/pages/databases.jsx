@@ -2041,6 +2041,14 @@ function BackupStatusBadge({ backup }) {
   return <span className="rounded border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-xs text-red-300" title={backup.error_message || ''}>failed</span>
 }
 
+function RemoteUploadBadge({ backup }) {
+  if (backup.remote_upload_failed) {
+    return <span className="rounded border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-xs text-red-300">remote failed</span>
+  }
+  if (!backup.remote_uploaded_to) return null
+  return <span className="rounded border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs text-blue-200" title={backup.remote_uploaded_to}>remote</span>
+}
+
 function ManageDatabasesTab({ connection, preferredDatabase = '', onDatabaseChange }) {
   const dialog = useDialog()
   const initialManage = useMemo(() => readStoredJson(DB_MANAGE_STATE_KEY, {}), [])
@@ -2776,6 +2784,22 @@ function BackupsTab({ connection }) {
     }
   }
 
+  const onUploadRemote = async (b) => {
+    if (!b || backupBusyAction) return
+    setBackupBusyAction(`upload:${b.id}`)
+    setError('')
+    setMessage('')
+    try {
+      const res = await apiClient.uploadDbBackup(b.id)
+      setMessage(`Uploaded ${b.filename} to ${res.data.uploaded_to}`)
+      await refresh()
+    } catch (err) {
+      setError(err.response?.data?.error || 'Remote upload failed')
+    } finally {
+      setBackupBusyAction('')
+    }
+  }
+
   const copyShareLink = async () => {
     if (!shareLink?.url) return
     try {
@@ -2866,6 +2890,7 @@ function BackupsTab({ connection }) {
                     <div className="break-all font-mono text-xs text-gray-100">{b.filename}</div>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <BackupStatusBadge backup={b} />
+                      <RemoteUploadBadge backup={b} />
                       <span className="text-xs text-gray-400">{formatBytes(b.size_bytes)}</span>
                       <span className="text-xs text-gray-500">{b.triggered_by}</span>
                     </div>
@@ -2881,12 +2906,12 @@ function BackupsTab({ connection }) {
                     <span>{b.duration_seconds != null ? `${b.duration_seconds}s` : '-'}</span>
                   </div>
                 </div>
-                {b.error_message && (
+                {b.error_message && (b.status === 'failed' || b.remote_upload_failed) && (
                   <div className="mt-3 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300 break-words">
                     {b.error_message}
                   </div>
                 )}
-                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-4">
                   {b.status === 'success' && (
                     <a
                       href={apiClient.downloadDbBackupUrl(b.id)}
@@ -2894,6 +2919,17 @@ function BackupsTab({ connection }) {
                     >
                       Download
                     </a>
+                  )}
+                  {b.status === 'success' && (
+                    <button
+                      type="button"
+                      onClick={() => onUploadRemote(b)}
+                      disabled={!!backupBusyAction}
+                      className="min-h-10 rounded bg-primary px-3 py-2 text-sm text-accent hover:bg-gray-700 disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                    >
+                      {backupBusyAction === `upload:${b.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                      Upload
+                    </button>
                   )}
                   {b.status === 'success' && (
                     <button
@@ -2907,7 +2943,8 @@ function BackupsTab({ connection }) {
                   <button
                     type="button"
                     onClick={() => onDelete(b)}
-                    className="min-h-10 rounded bg-red-500/15 px-3 py-2 text-sm text-red-300 hover:bg-red-500/25"
+                    disabled={!!backupBusyAction}
+                    className="min-h-10 rounded bg-red-500/15 px-3 py-2 text-sm text-red-300 hover:bg-red-500/25 disabled:opacity-50"
                   >
                     Delete
                   </button>
@@ -2956,7 +2993,12 @@ function BackupsTab({ connection }) {
                     />
                   </td>
                   <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{b.filename}</td>
-                  <td className="px-3 py-1.5"><BackupStatusBadge backup={b} /></td>
+                  <td className="px-3 py-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <BackupStatusBadge backup={b} />
+                      <RemoteUploadBadge backup={b} />
+                    </div>
+                  </td>
                   <td className="px-3 py-1.5 text-gray-300 text-xs">{formatBytes(b.size_bytes)}</td>
                   <td className="px-3 py-1.5 text-gray-300 text-xs whitespace-nowrap">{formatTime(b.started_at)}</td>
                   <td className="px-3 py-1.5 text-gray-300 text-xs">{b.duration_seconds != null ? `${b.duration_seconds}s` : '—'}</td>
@@ -2973,6 +3015,17 @@ function BackupsTab({ connection }) {
                     {b.status === 'success' && (
                       <button
                         type="button"
+                        onClick={() => onUploadRemote(b)}
+                        disabled={!!backupBusyAction}
+                        className="text-accent hover:underline text-xs mr-3 disabled:opacity-40 disabled:no-underline inline-flex items-center gap-1"
+                      >
+                        {backupBusyAction === `upload:${b.id}` ? <Loader2 className="w-3 h-3 animate-spin" /> : <UploadCloud className="w-3 h-3" />}
+                        Upload
+                      </button>
+                    )}
+                    {b.status === 'success' && (
+                      <button
+                        type="button"
                         onClick={() => onShare(b)}
                         className="text-accent hover:underline text-xs mr-3"
                       >
@@ -2982,7 +3035,8 @@ function BackupsTab({ connection }) {
                     <button
                       type="button"
                       onClick={() => onDelete(b)}
-                      className="text-red-400 hover:underline text-xs"
+                      disabled={!!backupBusyAction}
+                      className="text-red-400 hover:underline text-xs disabled:opacity-40 disabled:no-underline"
                     >
                       Delete
                     </button>
@@ -3675,11 +3729,11 @@ function ScheduleTab({ connection }) {
     <div className="p-4 flex flex-col gap-3 h-full min-h-0">
       <div className="rounded border border-blue-500/25 bg-blue-500/10 p-2.5 text-xs text-blue-100/90 leading-relaxed max-w-4xl">
         <strong className="text-blue-200">APScheduler</strong> runs while Ascend is up. Use <strong className="text-blue-200">24</strong> h for daily runs;
-        hour and minute are <strong className="text-blue-200">wall clock</strong> in the timezone column (e.g.{' '}
+        start hour and minute are <strong className="text-blue-200">wall clock</strong> anchors in the timezone column (e.g.{' '}
         <span className="font-mono text-blue-100">Asia/Beirut</span>
         ). Blank timezone → server default{' '}
         <span className="font-mono text-gray-300">{serverTimezone}</span>
-        . Polling pauses while a row is open for edit.
+        . For 6h from 02:00, runs are 02:00, 08:00, 14:00, and 20:00.
       </div>
 
       {error && (
@@ -3718,8 +3772,8 @@ function ScheduleTab({ connection }) {
               <th className="px-3 py-2 font-medium">Database</th>
               <th className="px-3 py-2 font-medium w-14">On</th>
               <th className="px-3 py-2 font-medium">Every (h)</th>
-              <th className="px-3 py-2 font-medium">Hour</th>
-              <th className="px-3 py-2 font-medium">Min</th>
+              <th className="px-3 py-2 font-medium">Start h</th>
+              <th className="px-3 py-2 font-medium">Start min</th>
               <th className="px-3 py-2 font-medium">Ret. (d)</th>
               <th className="px-3 py-2 font-medium min-w-[7rem]">Timezone</th>
               <th className="px-3 py-2 font-medium min-w-[10rem]">Next run</th>
@@ -3729,7 +3783,8 @@ function ScheduleTab({ connection }) {
           </thead>
           <tbody>
             {rows.map((r) => {
-              const daily = Number(r.every_hours) === 24
+              const hours = Number(r.every_hours) || 24
+              const cadenceLabel = hours === 24 ? 'daily' : `every ${hours}h`
               const target = (r.target_database || '').trim()
               const displayTz = (r.schedule_timezone || '').trim() || serverTimezone || 'UTC'
               const nextLabel = !r.enabled
@@ -3793,12 +3848,11 @@ function ScheduleTab({ connection }) {
                         min={0}
                         max={23}
                         value={r.at_hour ?? 0}
-                        disabled={!daily}
                         onChange={(e) => patchRow(r.id, { at_hour: Number(e.target.value) })}
-                        className="w-14 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs disabled:opacity-40"
+                        className="w-14 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs"
                       />
                     ) : (
-                      <span className="text-gray-300 text-xs">{daily ? (r.at_hour ?? 0) : '—'}</span>
+                      <span className="text-gray-300 text-xs">{r.at_hour ?? 0}</span>
                     )}
                   </td>
                   <td className="px-3 py-2 align-top">
@@ -3812,7 +3866,7 @@ function ScheduleTab({ connection }) {
                         className="w-14 bg-primary border border-gray-700 rounded px-1.5 py-1 text-white text-xs"
                       />
                     ) : (
-                      <span className="text-gray-300 text-xs">{daily ? (r.at_minute ?? 0) : '—'}</span>
+                      <span className="text-gray-300 text-xs">{r.at_minute ?? 0}</span>
                     )}
                   </td>
                   <td className="px-3 py-2 align-top">
@@ -3855,13 +3909,13 @@ function ScheduleTab({ connection }) {
                         <span className="text-green-300 whitespace-nowrap">{nextLabel}</span>
                         {!r.enabled && <span className="text-gray-500 block mt-0.5">schedule off</span>}
                         {r.enabled && (
-                          <span className="text-gray-500 font-mono text-[10px] block mt-0.5">{displayTz}</span>
+                          <span className="text-gray-500 font-mono text-[10px] block mt-0.5">{cadenceLabel} from {atWall} {displayTz}</span>
                         )}
                       </>
                     )}
                     {isEdit && (
                       <span className="text-gray-500 text-[11px] leading-snug">
-                        Save to refresh next run. Wall time when daily:{' '}
+                        Unsaved. Click Save to apply {cadenceLabel} from{' '}
                         <span className="font-mono text-gray-400">{atWall}</span>
                         {' '}in TZ column.
                       </span>
