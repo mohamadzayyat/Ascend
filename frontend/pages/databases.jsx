@@ -2608,7 +2608,6 @@ function BackupsTab({ connection }) {
       setBackups(nextBackups)
       setSelectedBackups((current) => new Set([...current].filter((id) => nextIds.has(id))))
       setBackupSelectionAnchorId((current) => (nextIds.has(current) ? current : null))
-      setError('')
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to load backups')
     } finally {
@@ -2627,6 +2626,7 @@ function BackupsTab({ connection }) {
   useEffect(() => {
     setSelectedBackups(new Set())
     setBackupSelectionAnchorId(null)
+    setError('')
     setMessage('')
   }, [connection.id])
 
@@ -2794,6 +2794,10 @@ function BackupsTab({ connection }) {
       setMessage(`Uploaded ${b.filename} to ${res.data.uploaded_to}`)
       await refresh()
     } catch (err) {
+      const failedBackup = err.response?.data?.backup
+      if (failedBackup?.id) {
+        setBackups((items) => items.map((item) => (item.id === failedBackup.id ? failedBackup : item)))
+      }
       setError(err.response?.data?.error || 'Remote upload failed')
     } finally {
       setBackupBusyAction('')
@@ -2992,7 +2996,14 @@ function BackupsTab({ connection }) {
                       aria-label={`Select backup ${b.filename}`}
                     />
                   </td>
-                  <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">{b.filename}</td>
+                  <td className="px-3 py-1.5 text-gray-200 font-mono text-xs">
+                    <div className="break-all">{b.filename}</div>
+                    {b.error_message && (b.status === 'failed' || b.remote_upload_failed) && (
+                      <div className="mt-1 max-w-sm truncate text-[11px] text-red-300" title={b.error_message}>
+                        {b.error_message}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-3 py-1.5">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <BackupStatusBadge backup={b} />

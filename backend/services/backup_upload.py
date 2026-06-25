@@ -115,7 +115,13 @@ def _webdav_request(method, url, username, password, data=None, content_type=Non
     except urlerror.HTTPError as exc:
         if method == 'MKCOL' and exc.code in (405, 409):
             return exc.code, b''
-        raise
+        body = ''
+        try:
+            body = (exc.read() or b'').decode('utf-8', errors='replace')
+        except Exception:
+            body = ''
+        detail = re.sub(r'\s+', ' ', body).strip() or exc.reason or f'HTTP {exc.code}'
+        raise RuntimeError(f'WebDAV {method} failed ({exc.code}): {detail[:1000]}') from exc
 
 
 def _backup_content_type(filename):

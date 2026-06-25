@@ -2381,6 +2381,25 @@ def _set_backup_uploaded_note(archive, uploaded_to):
     archive.error_message = f'{base} {note}' if base else note
 
 
+def _database_remote_upload_filename(filename):
+    name = secure_filename(Path(str(filename or '')).name) or 'database-backup.sql'
+    if name.lower().endswith('.sql'):
+        return f'{Path(name).stem}.zip'
+    return name
+
+
+def _upload_database_backup_to_remote(filepath, filename):
+    path = Path(filepath)
+    upload_name = _database_remote_upload_filename(filename)
+    if path.suffix.lower() != '.sql':
+        return _upload_backup_to_remote(str(path), upload_name)
+    with tempfile.TemporaryDirectory(prefix='ascend-db-remote-upload-') as tmp:
+        zip_path = Path(tmp) / upload_name
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(path, arcname=Path(str(filename or path.name)).name)
+        return _upload_backup_to_remote(str(zip_path), upload_name)
+
+
 def _backup_remote_uploaded_to(message):
     text = (message or '').strip()
     marker = 'Uploaded to '
@@ -2510,7 +2529,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
             archive.status = 'success'
             archive.error_message = fallback_note
             try:
-                uploaded_to = _upload_backup_to_remote(str(filepath), filename)
+                uploaded_to = _upload_database_backup_to_remote(filepath, filename)
                 if uploaded_to:
                     _set_backup_uploaded_note(archive, uploaded_to)
             except Exception as upload_exc:
@@ -2895,9 +2914,14 @@ def api_db_backup_upload(backup_id):
     if not settings.get('enabled'):
         return jsonify({'error': 'Remote backup upload is not enabled.'}), 400
     try:
-        uploaded_to = _upload_backup_to_remote(str(path), a.filename)
+        uploaded_to = _upload_database_backup_to_remote(path, a.filename)
     except Exception as exc:
-        return jsonify({'error': f'Remote upload failed: {str(exc)[:300]}'}), 400
+        detail = str(exc)[:1000]
+        base = _backup_non_upload_note(a.error_message)
+        note = f'Backup succeeded; remote upload failed: {detail}'
+        a.error_message = f'{base} {note}' if base else note
+        db.session.commit()
+        return jsonify({'error': f'Remote upload failed: {detail}', 'backup': _backup_archive_api_dict(a)}), 400
     if not uploaded_to:
         return jsonify({'error': 'Remote upload did not return a destination.'}), 400
     _set_backup_uploaded_note(a, uploaded_to)
