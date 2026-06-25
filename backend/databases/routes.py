@@ -425,9 +425,9 @@ def _dump_identifier(name):
 
 def _backup_chunk_rows():
     try:
-        configured = int(os.environ.get('ASCEND_DB_BACKUP_CHUNK_ROWS') or '50000')
+        configured = int(os.environ.get('ASCEND_DB_BACKUP_CHUNK_ROWS') or '100000')
     except (TypeError, ValueError):
-        configured = 50000
+        configured = 100000
     return max(1000, min(configured, 500000))
 
 
@@ -491,6 +491,21 @@ def _backup_base_tables(conn, database):
                 client.close()
             except Exception:
                 pass
+
+
+def _backup_large_table_hint(conn, explicit_databases):
+    threshold = _backup_chunk_threshold_rows()
+    for database in _backup_database_names(conn, explicit_databases):
+        for table in _backup_base_tables(conn, database):
+            rows_estimate = int(table.get('rows_estimate') or 0)
+            if rows_estimate >= threshold:
+                return {
+                    'database': database,
+                    'table': table['name'],
+                    'rows_estimate': rows_estimate,
+                    'threshold': threshold,
+                }
+    return None
 
 
 _MYSQL_INTEGER_TYPES = {
@@ -669,7 +684,7 @@ def _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_
             schema_argv = [
                 'mysqldump', '--no-defaults', *base_args,
                 *timeout_args, '--single-transaction', '--routines', '--events',
-                '--triggers', '--no-data', '--default-character-set=utf8mb4',
+                '--skip-triggers', '--no-data', '--default-character-set=utf8mb4',
             ]
             schema_argv += ['--databases', *target_databases]
             _run_mysqldump_to_stream(schema_argv, env, out)
@@ -688,6 +703,13 @@ def _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_
                         if not _is_mysqldump_interruption(str(exc)):
                             raise
                         _dump_table_data_chunked(conn, env, base_args, timeout_args, out, database, table_name, tmp_path.parent)
+            trigger_argv = [
+                'mysqldump', '--no-defaults', *base_args,
+                *timeout_args, '--single-transaction', '--no-data', '--no-create-info',
+                '--triggers', '--default-character-set=utf8mb4',
+                '--databases', *target_databases,
+            ]
+            _run_mysqldump_to_stream(trigger_argv, env, out)
         os.replace(tmp_path, filepath)
     except Exception:
         try:
@@ -2416,31 +2438,46 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         try:
             timeout_restore = _temporarily_disable_dump_statement_timeouts(conn, timeout_args)
             try:
-                try:
-                    with open(filepath, 'wb') as out:
-                        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-                        try:
-                            while True:
-                                chunk = proc.stdout.read(64 * 1024)
-                                if not chunk:
-                                    break
-                                out.write(chunk)
-                        except Exception as inner_exc:
-                            proc.kill()
-                            raise inner_exc
-                        stderr = proc.stderr.read()
-                        proc.wait()
-                        if proc.returncode != 0:
-                            raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
-                except Exception as dump_exc:
-                    if not _is_mysqldump_interruption(str(dump_exc)):
-                        raise
-                    print(f'[backup] standard mysqldump interrupted for {conn.name}; retrying with chunked fallback', file=sys.stderr)
-                    fallback_note = 'Backup succeeded using chunked fallback after mysqldump was interrupted.'
+                large_table_hint = _backup_large_table_hint(conn, databases)
+                if large_table_hint:
+                    print(
+                        f'[backup] using chunked dump for {conn.name}; large table '
+                        f'{large_table_hint["database"]}.{large_table_hint["table"]} '
+                        f'~{large_table_hint["rows_estimate"]} rows',
+                        file=sys.stderr,
+                    )
+                    fallback_note = (
+                        'Backup used chunked mode because a large table was detected: '
+                        f'{large_table_hint["database"]}.{large_table_hint["table"]} '
+                        f'(~{large_table_hint["rows_estimate"]} rows).'
+                    )
+                    _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_args)
+                else:
                     try:
-                        _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_args)
-                    except Exception as fallback_exc:
-                        raise RuntimeError(f'{dump_exc}\nChunked fallback also failed: {fallback_exc}') from fallback_exc
+                        with open(filepath, 'wb') as out:
+                            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                            try:
+                                while True:
+                                    chunk = proc.stdout.read(64 * 1024)
+                                    if not chunk:
+                                        break
+                                    out.write(chunk)
+                            except Exception as inner_exc:
+                                proc.kill()
+                                raise inner_exc
+                            stderr = proc.stderr.read()
+                            proc.wait()
+                            if proc.returncode != 0:
+                                raise RuntimeError((stderr or b'').decode('utf-8', errors='replace').strip() or f'mysqldump exited {proc.returncode}')
+                    except Exception as dump_exc:
+                        if not _is_mysqldump_interruption(str(dump_exc)):
+                            raise
+                        print(f'[backup] standard mysqldump interrupted for {conn.name}; retrying with chunked fallback', file=sys.stderr)
+                        fallback_note = 'Backup succeeded using chunked fallback after mysqldump was interrupted.'
+                        try:
+                            _run_chunked_backup_dump(conn, filepath, databases, env, base_args, timeout_args)
+                        except Exception as fallback_exc:
+                            raise RuntimeError(f'{dump_exc}\nChunked fallback also failed: {fallback_exc}') from fallback_exc
             finally:
                 _restore_dump_statement_timeouts(conn, timeout_restore)
             archive.size_bytes = filepath.stat().st_size
@@ -2541,6 +2578,41 @@ def _apply_retention(connection_id, retention_days):
     db.session.commit()
 
 
+def _backup_pending_live_size(row):
+    sizes = [int(row.size_bytes or 0)]
+    try:
+        path = Path(row.filepath)
+    except TypeError:
+        return max(sizes)
+    candidates = [path]
+    if path.suffix:
+        candidates.append(path.with_suffix(path.suffix + '.chunked'))
+    candidates.append(Path(str(path) + '.chunked'))
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if candidate.is_file():
+                sizes.append(candidate.stat().st_size)
+        except OSError:
+            pass
+    return max(sizes)
+
+
+def _backup_archive_api_dict(row):
+    data = row.to_dict()
+    if row.status == 'pending':
+        data['size_bytes'] = _backup_pending_live_size(row)
+        started = row.started_at
+        if started:
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            data['duration_seconds'] = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+    return data
+
+
 # Avoid circular: we already imported datetime+timezone at the top of app.py
 from datetime import timedelta as _timedelta
 
@@ -2555,7 +2627,7 @@ def api_db_backups_list(conn_id):
     if err:
         return err
     rows = BackupArchive.query.filter_by(connection_id=conn.id).order_by(BackupArchive.started_at.desc()).limit(200).all()
-    return jsonify({'backups': [r.to_dict() for r in rows]})
+    return jsonify({'backups': [_backup_archive_api_dict(r) for r in rows]})
 
 
 @bp.route('/api/databases/connections/<int:conn_id>/backups/archive', methods=['POST'])
