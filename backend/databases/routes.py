@@ -2409,6 +2409,28 @@ def _backup_remote_uploaded_to(message):
     return text[idx + len(marker):].strip().splitlines()[0].strip()
 
 
+def _delete_backup_archive_local_file(row):
+    try:
+        p = Path(row.filepath)
+        if p.exists():
+            p.unlink()
+    except (OSError, TypeError):
+        pass
+
+
+def _prune_previous_local_backups(current_archive):
+    if not getattr(current_archive, 'id', None):
+        return 0
+    old = BackupArchive.query.filter(
+        BackupArchive.connection_id == current_archive.connection_id,
+        BackupArchive.id < current_archive.id,
+    ).all()
+    for row in old:
+        _delete_backup_archive_local_file(row)
+        db.session.delete(row)
+    return len(old)
+
+
 def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_database=None):
     """Synchronously run mysqldump for a connection. Records a BackupArchive
     row in either success or failed state. Used by both the manual endpoint
@@ -2532,6 +2554,7 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
                 uploaded_to = _upload_database_backup_to_remote(filepath, filename)
                 if uploaded_to:
                     _set_backup_uploaded_note(archive, uploaded_to)
+                    _prune_previous_local_backups(archive)
             except Exception as upload_exc:
                 prefix = f'{fallback_note} ' if fallback_note else ''
                 archive.error_message = f'{prefix}Backup succeeded; remote upload failed: {str(upload_exc)[:900]}'
@@ -2925,6 +2948,7 @@ def api_db_backup_upload(backup_id):
     if not uploaded_to:
         return jsonify({'error': 'Remote upload did not return a destination.'}), 400
     _set_backup_uploaded_note(a, uploaded_to)
+    _prune_previous_local_backups(a)
     db.session.commit()
     return jsonify({'ok': True, 'uploaded_to': uploaded_to, 'backup': _backup_archive_api_dict(a)})
 
