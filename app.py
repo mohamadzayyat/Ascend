@@ -3776,48 +3776,60 @@ def _php_mutable_paths(app_row):
     return sorted(paths)
 
 
-def _backup_php_mutable_paths(app_row, target, backup_root, log):
-    preserved = []
+def _path_exists_or_symlink(path):
+    return path.exists() or path.is_symlink()
+
+
+def _remove_path_for_replace(path, log=None, label='path'):
+    path = Path(path)
+    if not _path_exists_or_symlink(path):
+        return True
+    if path.is_dir() and not path.is_symlink():
+        return _rmtree_best_effort(path, log, label)
+    try:
+        path.unlink()
+        return True
+    except Exception as exc:
+        if log:
+            log.write(f"  Warning: could not remove old {label} {path}: {exc}\n")
+        return False
+
+
+def _move_php_mutable_paths(app_row, previous_target, target, log):
+    moved = []
     for rel in _php_mutable_paths(app_row):
-        source = target / rel
-        if not source.exists() and not source.is_symlink():
+        source = previous_target / rel
+        if not _path_exists_or_symlink(source):
             continue
-        backup = backup_root / rel
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if source.is_dir() and not source.is_symlink():
-                shutil.copytree(source, backup, symlinks=True)
-            elif source.is_symlink():
-                os.symlink(os.readlink(source), backup)
-            else:
-                shutil.copy2(source, backup)
-            preserved.append(rel)
-        except Exception as exc:
-            log.write(f"  Warning: could not preserve {source}: {exc}\n")
-    return preserved
-
-
-def _restore_php_mutable_paths(target, backup_root, preserved, log):
-    for rel in preserved:
-        source = backup_root / rel
         dest = target / rel
-        if not source.exists() and not source.is_symlink():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if not _remove_path_for_replace(dest, log, f'new runtime data {rel}'):
+                raise RuntimeError(f'could not replace {dest}')
+            source.rename(dest)
+            moved.append(rel)
+        except Exception as exc:
+            raise RuntimeError(f"Could not preserve runtime data {rel}: {exc}") from exc
+    return moved
+
+
+def _restore_moved_php_mutable_paths(target, previous_target, moved, log):
+    restored = True
+    for rel in reversed(moved):
+        source = target / rel
+        dest = previous_target / rel
+        if not _path_exists_or_symlink(source):
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            if source.is_dir() and not source.is_symlink():
-                shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)
-            elif source.is_symlink():
-                if dest.exists() or dest.is_symlink():
-                    if dest.is_dir() and not dest.is_symlink():
-                        shutil.rmtree(dest)
-                    else:
-                        dest.unlink()
-                os.symlink(os.readlink(source), dest)
-            else:
-                shutil.copy2(source, dest)
+            if not _remove_path_for_replace(dest, log, f'rollback runtime data {rel}'):
+                restored = False
+                continue
+            source.rename(dest)
         except Exception as exc:
-            log.write(f"  Warning: could not restore preserved {rel}: {exc}\n")
+            restored = False
+            log.write(f"  Warning: could not roll back preserved runtime data {rel}: {exc}\n")
+    return restored
 
 
 def _rmtree_best_effort(path, log=None, label='path'):
@@ -3866,40 +3878,7 @@ def _unique_retired_path(target):
     return candidate
 
 
-def _publish_php_app(app_row, log):
-    source = _app_deploy_dir(app_row)
-    source_public = _php_source_public_dir(app_row)
-    if not source_public.exists() or not source_public.is_dir():
-        raise RuntimeError(f"PHP public directory not found: {app_row.php_public_path or '(repo root)'}")
-    target = _php_runtime_root(app_row)
-    if os.name == 'nt':
-        return source
-    target.parent.mkdir(parents=True, exist_ok=True)
-    retired_target = None
-    with tempfile.TemporaryDirectory(prefix=f'.{target.name}-preserve-', dir=str(target.parent)) as tmp:
-        backup_root = Path(tmp)
-        previous_target = target
-        if target.exists() or target.is_symlink():
-            retired_target = _unique_retired_path(target)
-            target.rename(retired_target)
-            previous_target = retired_target
-        preserved = _backup_php_mutable_paths(app_row, previous_target, backup_root, log) if previous_target.exists() else []
-        if preserved:
-            log.write(f"  Preserving runtime data: {', '.join(preserved)}\n")
-        try:
-            shutil.copytree(
-                source,
-                target,
-                ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
-            )
-            _restore_php_mutable_paths(target, backup_root, preserved, log)
-        except Exception:
-            _rmtree_best_effort(target, log, 'partial PHP publish')
-            if retired_target and retired_target.exists() and not target.exists():
-                retired_target.rename(target)
-            raise
-    if retired_target:
-        _rmtree_best_effort(retired_target, log, 'PHP publish directory')
+def _adjust_php_publish_permissions(target, log):
     try:
         subprocess.run(['chmod', '-R', 'a+rX', str(target)], capture_output=True, timeout=30)
         for writable in ('runtime', 'web/assets', 'frontend/runtime', 'frontend/web/assets', 'backend/runtime', 'backend/web/assets'):
@@ -3910,6 +3889,47 @@ def _publish_php_app(app_row, log):
         subprocess.run(['chmod', 'a+x', str(target.parent)], capture_output=True, timeout=15)
     except Exception as exc:
         log.write(f"  Warning: could not adjust PHP publish permissions: {exc}\n")
+
+
+def _publish_php_app(app_row, log):
+    source = _app_deploy_dir(app_row)
+    source_public = _php_source_public_dir(app_row)
+    if not source_public.exists() or not source_public.is_dir():
+        raise RuntimeError(f"PHP public directory not found: {app_row.php_public_path or '(repo root)'}")
+    target = _php_runtime_root(app_row)
+    if os.name == 'nt':
+        return source
+    target.parent.mkdir(parents=True, exist_ok=True)
+    retired_target = None
+    previous_target = None
+    moved_runtime = []
+    if target.exists() or target.is_symlink():
+        retired_target = _unique_retired_path(target)
+        target.rename(retired_target)
+        previous_target = retired_target
+    try:
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
+        )
+        _adjust_php_publish_permissions(target, log)
+        if previous_target and previous_target.exists():
+            moved_runtime = _move_php_mutable_paths(app_row, previous_target, target, log)
+            if moved_runtime:
+                log.write(f"  Preserved runtime data by moving: {', '.join(moved_runtime)}\n")
+    except Exception:
+        if moved_runtime and previous_target:
+            if not _restore_moved_php_mutable_paths(target, previous_target, moved_runtime, log):
+                log.write("  Warning: rollback incomplete; leaving partial PHP publish so runtime data is not removed.\n")
+                raise
+        if target.exists() or target.is_symlink():
+            _rmtree_best_effort(target, log, 'partial PHP publish')
+        if retired_target and retired_target.exists() and not target.exists():
+            retired_target.rename(target)
+        raise
+    if retired_target:
+        _rmtree_best_effort(retired_target, log, 'PHP publish directory')
     log.write(f"  Published PHP app to {target}\n")
     log.write(f"  Nginx web root: {_php_public_dir(app_row)}\n")
     return target
