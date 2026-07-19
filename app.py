@@ -3273,6 +3273,8 @@ def _probe_app_health(app_row, timeout=3):
         )
         response = connection.getresponse()
         body = response.read(16384)
+        if response.status == 404:
+            return None
         if response.status != 200:
             raise RuntimeError(f'{health_path} returned HTTP {response.status}')
         payload = json.loads(body.decode('utf-8', errors='replace'))
@@ -3302,6 +3304,7 @@ def _validate_pm2_rollout(app_row, deploy_dir, log, process_env, timeout=90):
     stable_restarts = None
     stable_since = None
     last_reason = 'PM2 workers have not reported ready yet'
+    health_mode = 'release'
 
     while time.time() < deadline:
         rows = [
@@ -3321,12 +3324,21 @@ def _validate_pm2_rollout(app_row, deploy_dir, log, process_env, timeout=90):
             time.sleep(0.5)
             continue
 
+        health_mode = 'release'
         observed = set()
         release_mismatch = None
         probe_error = None
         for _ in range(max(16, expected_count * 8)):
             try:
-                pid, release = _probe_app_health(app_row)
+                health = _probe_app_health(app_row)
+                if health is None:
+                    # Legacy applications may not expose Ascend's optional
+                    # release-aware endpoint. A 404 still proves that the HTTP
+                    # server is responding; retain exact PM2 worker-count and
+                    # restart-stability checks as the compatibility fallback.
+                    health_mode = 'http'
+                    break
+                pid, release = health
                 if release != expected_release:
                     release_mismatch = f'worker {pid} reports release {release}'
                     continue
@@ -3343,7 +3355,7 @@ def _validate_pm2_rollout(app_row, deploy_dir, log, process_env, timeout=90):
                 probe_error = str(exc)
                 break
 
-        if len(observed) != expected_count:
+        if health_mode == 'release' and len(observed) != expected_count:
             last_reason = (
                 release_mismatch
                 or probe_error
@@ -3364,7 +3376,8 @@ def _validate_pm2_rollout(app_row, deploy_dir, log, process_env, timeout=90):
         if stable_since is not None and time.time() - stable_since >= 2:
             log.write(
                 f"  PM2 rollout healthy: {expected_count}/{expected_count} online, "
-                f"pids={list(current_pids)}, release={expected_release}.\n"
+                f"pids={list(current_pids)}, release={expected_release}, "
+                f"health={health_mode}.\n"
             )
             return True
         time.sleep(0.5)
