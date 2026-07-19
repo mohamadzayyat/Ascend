@@ -19,6 +19,7 @@ import subprocess
 import threading
 import secrets
 import socket
+import http.client
 import ipaddress
 import tempfile
 import platform
@@ -3044,9 +3045,13 @@ def _app_deploy_dir(app_row):
 
 def _env_with_app_port(app_row):
     content = app_row.env_content or ''
-    if app_row.app_port and not re.search(r'(?m)^\s*PORT\s*=', content):
-        suffix = '' if not content or content.endswith('\n') else '\n'
-        content = f'{content}{suffix}PORT={app_row.app_port}\n'
+    if app_row.app_port:
+        port_pattern = r'(?m)^[ \t]*(?:export[ \t]+)?PORT[ \t]*=.*$'
+        if re.search(port_pattern, content):
+            content = re.sub(port_pattern, f'PORT={app_row.app_port}', content)
+        else:
+            suffix = '' if not content or content.endswith('\n') else '\n'
+            content = f'{content}{suffix}PORT={app_row.app_port}\n'
     return content
 
 
@@ -3056,10 +3061,115 @@ def _write_app_env(app_row, deploy_dir, log):
         log.write("  No .env content saved; leaving existing .env unchanged.\n")
         return
     (deploy_dir / '.env').write_text(content, encoding='utf-8')
-    if app_row.app_port and not re.search(r'(?m)^\s*PORT\s*=', app_row.env_content or ''):
-        log.write(f"  .env written (added PORT={app_row.app_port})\n")
+    if app_row.app_port:
+        log.write(f"  .env written (PORT pinned to {app_row.app_port})\n")
     else:
         log.write("  .env written\n")
+
+
+def _env_setting(content, key):
+    """Read one non-secret deployment setting from dotenv-style content."""
+    pattern = rf'(?m)^[ \t]*(?:export[ \t]+)?{re.escape(key)}[ \t]*=[ \t]*(.*?)[ \t]*$'
+    match = re.search(pattern, content or '')
+    if not match:
+        return None
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1]
+    return value
+
+
+def _git_release_sha(deploy_dir):
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=str(deploy_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        sha = (result.stdout or '').strip()
+        if result.returncode == 0 and re.fullmatch(r'[0-9a-fA-F]{40}', sha):
+            return sha.lower()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return 'unknown'
+
+
+def _ecosystem_file(deploy_dir):
+    if not deploy_dir:
+        return None
+    deploy_dir = Path(deploy_dir)
+    for filename in ('ecosystem.config.cjs', 'ecosystem.config.js'):
+        ecosystem = deploy_dir / filename
+        if ecosystem.is_file():
+            return ecosystem
+    return None
+
+
+def _ecosystem_worker_count(app_row, deploy_dir, process_env):
+    ecosystem = _ecosystem_file(deploy_dir)
+    if not ecosystem:
+        return 1
+    script = (
+        "const cfg=require(process.argv[1]);"
+        "const apps=Array.isArray(cfg.apps)?cfg.apps:[];"
+        "const app=apps.find(x=>x&&x.name===process.argv[2]);"
+        "if(!app)process.exit(2);"
+        "const n=app.instances==='max'?require('os').cpus().length:Number(app.instances||1);"
+        "if(!Number.isInteger(n)||n<1)process.exit(3);"
+        "process.stdout.write(String(n));"
+    )
+    try:
+        result = subprocess.run(
+            ['node', '-e', script, str(ecosystem.resolve()), app_row.pm2_name],
+            cwd=str(deploy_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=process_env,
+        )
+        if result.returncode == 0:
+            count = int((result.stdout or '').strip())
+            if count > 0:
+                return count
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return 1
+
+
+def _pm2_runtime_env(app_row, deploy_dir=None, release_sha=None):
+    """Return an explicit PM2 environment without leaking Ascend's own PORT."""
+    process_env = {
+        key: os.environ[key]
+        for key in (
+            'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL',
+            'TERM', 'TMPDIR', 'TZ',
+        )
+        if os.environ.get(key)
+    }
+
+    process_env['PM2_HOME'] = '/root/.pm2'
+    if app_row.app_port:
+        process_env['PORT'] = str(app_row.app_port)
+        process_env['API_PORT'] = str(app_row.app_port)
+
+    content = _env_with_app_port(app_row)
+    concurrency = _env_setting(content, 'WEB_CONCURRENCY')
+    try:
+        if not concurrency or int(concurrency) < 1:
+            concurrency = None
+    except (TypeError, ValueError):
+        concurrency = None
+
+    process_env['RELEASE_SHA'] = release_sha or _git_release_sha(deploy_dir)
+    if concurrency:
+        process_env['WEB_CONCURRENCY'] = str(int(concurrency))
+    else:
+        process_env['WEB_CONCURRENCY'] = str(
+            _ecosystem_worker_count(app_row, deploy_dir, process_env)
+        )
+    return process_env
 
 
 def _php_composer_dir(app_row, deploy_dir):
@@ -3091,7 +3201,24 @@ def _run_php_build(app_row, deploy_dir, log):
     _publish_php_app(app_row, log)
 
 
-def _pm2_start_command(app_row):
+def _pm2_start_command(app_row, deploy_dir=None, process_env=None):
+    # Respect an application's checked-in PM2 cluster definition when present.
+    ecosystem = _ecosystem_file(deploy_dir)
+    if ecosystem:
+        return [
+            'pm2', 'startOrReload', ecosystem.name,
+            '--only', app_row.pm2_name,
+            '--update-env',
+        ]
+
+    # Non-ecosystem apps cannot use startOrReload. Reload an existing process
+    # without deleting it; only use `start` for the first launch.
+    if any(
+        proc.get('name') == app_row.pm2_name
+        for proc in _load_pm2_processes(process_env=process_env)
+    ):
+        return ['pm2', 'reload', app_row.pm2_name, '--update-env']
+
     # Run arbitrary start commands through bash so commands like
     # "npm run start:prod" behave the same as they do in a terminal.
     # PM2 does not load .env files by itself, so source it here and make
@@ -3121,6 +3248,128 @@ def _wait_for_app_port(app_row, log, timeout=20):
         f"  App did not bind to port {app_row.app_port} within {timeout}s. "
         "Check that the app reads PORT from .env or update the app port setting.\n"
     )
+    return False
+
+
+def _probe_app_health(app_row, timeout=3):
+    if not app_row.app_port:
+        raise RuntimeError('App port is not configured')
+    base_path = _env_setting(
+        _env_with_app_port(app_row), 'NEXT_PUBLIC_BASE_PATH'
+    ) or ''
+    base_path = f'/{base_path.strip("/")}' if base_path.strip('/') else ''
+    health_path = f'{base_path}/healthz'
+    connection = http.client.HTTPConnection('127.0.0.1', app_row.app_port, timeout=timeout)
+    try:
+        connection.request(
+            'GET',
+            health_path,
+            headers={
+                'Accept': 'application/json',
+                'Cache-Control': 'no-cache',
+                'Connection': 'close',
+                'Host': f'127.0.0.1:{app_row.app_port}',
+            },
+        )
+        response = connection.getresponse()
+        body = response.read(16384)
+        if response.status != 200:
+            raise RuntimeError(f'{health_path} returned HTTP {response.status}')
+        payload = json.loads(body.decode('utf-8', errors='replace'))
+        if not isinstance(payload, dict) or payload.get('status') != 'ok':
+            raise RuntimeError('/healthz returned an invalid status payload')
+        pid = payload.get('pid')
+        if not isinstance(pid, int) or pid < 1:
+            raise RuntimeError('/healthz did not return a valid worker pid')
+        release = payload.get('release')
+        if not isinstance(release, str) or not release:
+            raise RuntimeError('/healthz did not return a release identifier')
+        return pid, release
+    finally:
+        connection.close()
+
+
+def _validate_pm2_rollout(app_row, deploy_dir, log, process_env, timeout=90):
+    """Require every configured PM2 worker to answer healthz for this release."""
+    expected_count = _ecosystem_worker_count(app_row, deploy_dir, process_env)
+    expected_release = process_env.get('RELEASE_SHA') or 'unknown'
+    log.write(
+        f"  Validating {expected_count} PM2 worker(s) for release {expected_release}...\n"
+    )
+
+    deadline = time.time() + timeout
+    stable_pids = None
+    stable_restarts = None
+    stable_since = None
+    last_reason = 'PM2 workers have not reported ready yet'
+
+    while time.time() < deadline:
+        rows = [
+            proc for proc in _load_pm2_processes(process_env=process_env)
+            if proc.get('name') == app_row.pm2_name
+        ]
+        online = [proc for proc in rows if proc.get('status') == 'online']
+        pids = {int(proc.get('pid') or 0) for proc in online if int(proc.get('pid') or 0) > 0}
+        restarts = tuple(sorted((int(proc.get('pid') or 0), int(proc.get('restarts') or 0)) for proc in online))
+
+        if len(rows) != expected_count or len(online) != expected_count or len(pids) != expected_count:
+            last_reason = (
+                f'expected exactly {expected_count} online worker(s), '
+                f'found total={len(rows)}, online={len(online)}, unique_pids={len(pids)}'
+            )
+            stable_pids = stable_restarts = stable_since = None
+            time.sleep(0.5)
+            continue
+
+        observed = set()
+        release_mismatch = None
+        probe_error = None
+        for _ in range(max(16, expected_count * 8)):
+            try:
+                pid, release = _probe_app_health(app_row)
+                if release != expected_release:
+                    release_mismatch = f'worker {pid} reports release {release}'
+                    continue
+                # PM2 may supervise a shell/package-manager wrapper while the
+                # HTTP server runs in a child process. In that setup the
+                # application PID is intentionally different from PM2's PID.
+                # The exact PM2 worker count is checked above; here, verify
+                # that the expected number of distinct application workers
+                # answer for the release being deployed.
+                observed.add(pid)
+                if len(observed) >= expected_count:
+                    break
+            except Exception as exc:
+                probe_error = str(exc)
+                break
+
+        if len(observed) != expected_count:
+            last_reason = (
+                release_mismatch
+                or probe_error
+                or f'healthz reached {len(observed)}/{expected_count} distinct application worker(s)'
+            )
+            stable_pids = stable_restarts = stable_since = None
+            time.sleep(0.5)
+            continue
+
+        current_pids = tuple(sorted(pids))
+        if current_pids != stable_pids or restarts != stable_restarts:
+            stable_pids = current_pids
+            stable_restarts = restarts
+            stable_since = time.time()
+            time.sleep(1)
+            continue
+
+        if stable_since is not None and time.time() - stable_since >= 2:
+            log.write(
+                f"  PM2 rollout healthy: {expected_count}/{expected_count} online, "
+                f"pids={list(current_pids)}, release={expected_release}.\n"
+            )
+            return True
+        time.sleep(0.5)
+
+    log.write(f"  PM2 rollout validation failed: {last_reason}.\n")
     return False
 
 
@@ -3184,10 +3433,28 @@ def _restore_deployed_pm2_apps_on_boot():
 
             log = _BootLog()
             _write_app_env(app_row, deploy_dir, log)
-            run_cmd(['pm2', 'delete', pm2_name], log, check=False)
-            if run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
-                run_cmd(['pm2', 'save'], log, check=False)
-                _wait_for_app_port(app_row, log, timeout=30)
+            process_env = _pm2_runtime_env(app_row, deploy_dir)
+            if run_cmd(
+                _pm2_start_command(app_row, deploy_dir, process_env),
+                log,
+                cwd=deploy_dir,
+                process_env=process_env,
+            ):
+                if _validate_pm2_rollout(
+                    app_row, deploy_dir, log, process_env, timeout=90
+                ):
+                    run_cmd(
+                        ['pm2', 'save'],
+                        log,
+                        check=False,
+                        process_env=process_env,
+                    )
+                else:
+                    print(
+                        f'[runtime-restore] health validation failed for {pm2_name}; '
+                        'PM2 state was not saved',
+                        file=sys.stderr,
+                    )
             else:
                 print(f'[runtime-restore] PM2 start failed for {pm2_name}', file=sys.stderr)
         except Exception as exc:
@@ -3277,20 +3544,34 @@ def deploy_app_bg(deployment_id, github_username, github_token):
 
                 if _is_static_app(app_row):
                     log.write(f"\nStep 5: Preparing static site from {_static_public_dir(app_row)}...\n")
-                    if app_row.pm2_name:
-                        run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
-                        run_cmd(['pm2', 'save'], log, check=False)
                     _publish_static_site(app_row, log)
                     log.write("  Static output is ready for Nginx.\n")
                 elif not _is_php_app(app_row) and app_row.start_command and app_row.pm2_name:
-                    log.write(f"\nStep 5: Starting with PM2 as '{app_row.pm2_name}'...\n")
-                    run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
-                    if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
-                        raise RuntimeError("pm2 start failed")
-                    run_cmd(['pm2', 'save'], log)
-                    if not _wait_for_app_port(app_row, log):
-                        run_cmd(['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'], log, check=False)
-                        raise RuntimeError(f"App did not start listening on port {app_row.app_port}")
+                    log.write(f"\nStep 5: Rolling out with PM2 as '{app_row.pm2_name}'...\n")
+                    process_env = _pm2_runtime_env(app_row, deploy_dir)
+                    if not run_cmd(
+                        _pm2_start_command(app_row, deploy_dir, process_env),
+                        log,
+                        cwd=deploy_dir,
+                        process_env=process_env,
+                    ):
+                        raise RuntimeError("pm2 startOrReload failed")
+                    if not _validate_pm2_rollout(
+                        app_row, deploy_dir, log, process_env, timeout=90
+                    ):
+                        run_cmd(
+                            ['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'],
+                            log,
+                            check=False,
+                            process_env=process_env,
+                        )
+                        raise RuntimeError(
+                            f"PM2 worker health validation failed on port {app_row.app_port}"
+                        )
+                    if not run_cmd(
+                        ['pm2', 'save'], log, process_env=process_env
+                    ):
+                        raise RuntimeError('pm2 save failed after healthy rollout')
 
                 if app_row.domain:
                     log.write("\nStep 6: Configuring Nginx...\n")
@@ -3492,20 +3773,42 @@ def restart_app_bg(deployment_id):
                 else:
                     if not app_row.pm2_name:
                         raise RuntimeError('App has no PM2 name configured')
-                    log.write("\nStep 2: Restarting PM2 process...\n")
+                    log.write("\nStep 2: Rolling PM2 process...\n")
+                    process_env = _pm2_runtime_env(app_row, deploy_dir)
                     if app_row.start_command:
-                        log.write("  Recreating PM2 process so .env and PORT are loaded cleanly...\n")
-                        run_cmd(['pm2', 'delete', app_row.pm2_name], log, check=False)
-                        if not run_cmd(_pm2_start_command(app_row), log, cwd=deploy_dir):
-                            raise RuntimeError('PM2 restart/start failed')
+                        log.write("  Applying the saved environment with a rolling reload...\n")
+                        if not run_cmd(
+                            _pm2_start_command(app_row, deploy_dir, process_env),
+                            log,
+                            cwd=deploy_dir,
+                            process_env=process_env,
+                        ):
+                            raise RuntimeError('PM2 rolling reload/start failed')
                     else:
-                        if not run_cmd(['pm2', 'restart', app_row.pm2_name, '--update-env'], log, cwd=deploy_dir):
+                        if not run_cmd(
+                            ['pm2', 'reload', app_row.pm2_name, '--update-env'],
+                            log,
+                            cwd=deploy_dir,
+                            process_env=process_env,
+                        ):
                             raise RuntimeError('PM2 restart failed and no start command is configured')
 
-                    run_cmd(['pm2', 'save'], log, check=False)
-                    if not _wait_for_app_port(app_row, log):
-                        run_cmd(['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'], log, check=False)
-                        raise RuntimeError(f"App did not start listening on port {app_row.app_port}")
+                    if not _validate_pm2_rollout(
+                        app_row, deploy_dir, log, process_env, timeout=90
+                    ):
+                        run_cmd(
+                            ['pm2', 'logs', app_row.pm2_name, '--lines', '50', '--nostream'],
+                            log,
+                            check=False,
+                            process_env=process_env,
+                        )
+                        raise RuntimeError(
+                            f"PM2 worker health validation failed on port {app_row.app_port}"
+                        )
+                    if not run_cmd(
+                        ['pm2', 'save'], log, process_env=process_env
+                    ):
+                        raise RuntimeError('pm2 save failed after healthy restart')
                 log.write("\n=== App Restart Completed Successfully ===\n")
                 deployment.status = 'success'
 
@@ -3542,7 +3845,15 @@ def restart_app_bg(deployment_id):
                 pass
 
 
-def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
+def run_cmd(
+    cmd,
+    log_file,
+    cwd=None,
+    shell=False,
+    check=True,
+    redact=None,
+    process_env=None,
+):
     """Run a command and stream output to the log file."""
     try:
         result = subprocess.run(
@@ -3552,6 +3863,7 @@ def run_cmd(cmd, log_file, cwd=None, shell=False, check=True, redact=None):
             text=True,
             timeout=600,
             cwd=str(cwd) if cwd else None,
+            env=process_env,
         )
         stdout = result.stdout
         stderr = result.stderr
@@ -4053,6 +4365,11 @@ def _build_nginx_config(app_row, cert_info=None):
         f"        add_header Cache-Control no-store always;\n"
         f"    }}\n"
     )
+    extra_config_path = f'/etc/nginx/snippets/ascend-{app_row.domain}-extra.conf'
+    extra_locations = (
+        f'    include {extra_config_path};\n'
+        if os.path.exists(extra_config_path) else ''
+    )
     if _is_php_app(app_row):
         app_locations = _build_php_locations(app_row)
     elif _is_static_app(app_row):
@@ -4087,6 +4404,7 @@ def _build_nginx_config(app_row, cert_info=None):
             f"\n"
             f"{challenge}"
             f"\n"
+            f"{extra_locations}"
             f"{app_locations}"
             f"}}\n"
         )
@@ -4099,6 +4417,7 @@ def _build_nginx_config(app_row, cert_info=None):
         f"\n"
         f"{challenge}"
         f"\n"
+        f"{extra_locations}"
         f"{app_locations}"
         f"}}\n"
     )
@@ -4162,7 +4481,10 @@ def _cleanup_stale_nginx_sites_for_app(app_row, current_config_path, current_ena
     candidates = []
     for root in (Path('/etc/nginx/sites-enabled'), Path('/etc/nginx/sites-available')):
         if root.exists():
-            candidates.extend([p for p in root.iterdir() if p.name != app_row.domain])
+            candidates.extend([
+                p for p in root.iterdir()
+                if p.name != app_row.domain and not p.name.endswith('.ascend.bak')
+            ])
 
     removed = []
     for candidate in candidates:
@@ -4172,10 +4494,12 @@ def _cleanup_stale_nginx_sites_for_app(app_row, current_config_path, current_ena
                 continue
             text = candidate.read_text(encoding='utf-8', errors='ignore')
             has_app_marker = any(marker in text for marker in markers)
-            has_same_server_name = any(
-                re.search(rf'\bserver_name\s+[^;]*\b{re.escape(name)}\b', text)
-                for name in server_names
-            )
+            declared_server_names = {
+                token
+                for declaration in re.findall(r'\bserver_name\s+([^;]+);', text)
+                for token in declaration.split()
+            }
+            has_same_server_name = bool(declared_server_names.intersection(server_names))
             if not has_app_marker and not has_same_server_name:
                 continue
             candidate.unlink()
@@ -4496,9 +4820,14 @@ def _pm2_summary(proc):
     }
 
 
-def _load_pm2_processes():
+def _load_pm2_processes(process_env=None):
     try:
-        result = subprocess.run(['pm2', 'jlist'], capture_output=True, timeout=10)
+        result = subprocess.run(
+            ['pm2', 'jlist'],
+            capture_output=True,
+            timeout=10,
+            env=process_env,
+        )
         if result.returncode != 0:
             return []
         out = result.stdout.decode('utf-8', errors='replace').strip() or '[]'
