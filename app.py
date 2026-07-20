@@ -4225,31 +4225,46 @@ def _publish_php_app(app_row, log):
     if os.name == 'nt':
         return source
     target.parent.mkdir(parents=True, exist_ok=True)
+    staged_target = _unique_retired_path(
+        target.parent / f'.{target.name}.new'
+    )
     retired_target = None
     previous_target = None
     moved_runtime = []
-    if target.exists() or target.is_symlink():
-        retired_target = _unique_retired_path(target)
-        target.rename(retired_target)
-        previous_target = retired_target
     try:
         shutil.copytree(
             source,
-            target,
+            staged_target,
             ignore=shutil.ignore_patterns('.git', 'node_modules', '.next', 'dist'),
         )
-        _adjust_php_publish_permissions(target, log)
+        _adjust_php_publish_permissions(staged_target, log)
+
+        # Never expose a partially copied PHP tree at the path served by
+        # Nginx. Live Yii requests can create runtime/logs while copytree is
+        # still running, which races with the source runtime directory and
+        # raises FileExistsError. Build off-path first, then swap directories.
+        if target.exists() or target.is_symlink():
+            retired_target = _unique_retired_path(target)
+            target.rename(retired_target)
+            previous_target = retired_target
+
         if previous_target and previous_target.exists():
-            moved_runtime = _move_php_mutable_paths(app_row, previous_target, target, log)
+            moved_runtime = _move_php_mutable_paths(
+                app_row, previous_target, staged_target, log
+            )
             if moved_runtime:
                 log.write(f"  Preserved runtime data by moving: {', '.join(moved_runtime)}\n")
+        staged_target.rename(target)
     except Exception:
         if moved_runtime and previous_target:
-            if not _restore_moved_php_mutable_paths(target, previous_target, moved_runtime, log):
+            mutable_source = target if _path_exists_or_symlink(target) else staged_target
+            if not _restore_moved_php_mutable_paths(
+                mutable_source, previous_target, moved_runtime, log
+            ):
                 log.write("  Warning: rollback incomplete; leaving partial PHP publish so runtime data is not removed.\n")
                 raise
-        if target.exists() or target.is_symlink():
-            _rmtree_best_effort(target, log, 'partial PHP publish')
+        if staged_target.exists() or staged_target.is_symlink():
+            _rmtree_best_effort(staged_target, log, 'staged PHP publish')
         if retired_target and retired_target.exists() and not target.exists():
             retired_target.rename(target)
         raise
