@@ -3386,6 +3386,41 @@ def _validate_pm2_rollout(app_row, deploy_dir, log, process_env, timeout=90):
     return False
 
 
+def _validate_pm2_rollout_with_recovery(
+    app_row, deploy_dir, log, process_env, timeout=90, recovery_timeout=60
+):
+    """Retry one transient PM2 rollout without rebuilding the application."""
+    if _validate_pm2_rollout(
+        app_row, deploy_dir, log, process_env, timeout=timeout
+    ):
+        return True
+
+    log.write(
+        "  Initial PM2 health validation failed; performing one automatic "
+        "reload and recovery check...\n"
+    )
+    # A second webhook deployment commonly succeeds because its PM2 reload
+    # replaces a worker left in a transient state by the first reload. Do that
+    # recovery here without repeating dependency installation or the build.
+    if not run_cmd(
+        _pm2_start_command(app_row, deploy_dir, process_env),
+        log,
+        cwd=deploy_dir,
+        process_env=process_env,
+    ):
+        log.write("  Automatic PM2 recovery reload failed.\n")
+        return False
+
+    recovered = _validate_pm2_rollout(
+        app_row, deploy_dir, log, process_env, timeout=recovery_timeout
+    )
+    if recovered:
+        log.write("  PM2 rollout recovered after the automatic reload.\n")
+    else:
+        log.write("  PM2 rollout remained unhealthy after automatic recovery.\n")
+    return recovered
+
+
 def _restore_deployed_pm2_apps_on_boot():
     """Best-effort restore for deployed Node apps after panel updates/reboots."""
     if not shutil.which('pm2'):
@@ -3569,7 +3604,7 @@ def deploy_app_bg(deployment_id, github_username, github_token):
                         process_env=process_env,
                     ):
                         raise RuntimeError("pm2 startOrReload failed")
-                    if not _validate_pm2_rollout(
+                    if not _validate_pm2_rollout_with_recovery(
                         app_row, deploy_dir, log, process_env, timeout=90
                     ):
                         run_cmd(
@@ -3806,7 +3841,7 @@ def restart_app_bg(deployment_id):
                         ):
                             raise RuntimeError('PM2 restart failed and no start command is configured')
 
-                    if not _validate_pm2_rollout(
+                    if not _validate_pm2_rollout_with_recovery(
                         app_row, deploy_dir, log, process_env, timeout=90
                     ):
                         run_cmd(
