@@ -66,6 +66,10 @@ BOUNCER_SERVICE_CANDIDATES = [
 HTTP_401_SCENARIO_MARKER = 'http-generic-401-bf'
 HTTP_401_THRESHOLD = 10
 HTTP_401_WINDOW = '24h'
+AGGRESSIVE_HTTP_SCENARIOS = {
+    'http-crawl-non_statics': 'crowdsecurity/http-crawl-non_statics',
+    'http-probing': 'crowdsecurity/http-probing',
+}
 
 
 def _now():
@@ -219,6 +223,101 @@ def _set_crowdsec_http_401_enabled(enabled):
             target = Path(str(path) + '.ascend-disabled')
             if target.exists():
                 target = Path(str(path) + f'.ascend-disabled-{int(time.time())}')
+            path.replace(target)
+            results.append({'path': str(path), 'disabled_to': str(target), 'changed': True})
+    systemctl = shutil.which('systemctl')
+    if systemctl:
+        rc, out, err = _run([systemctl, 'restart', 'crowdsec.service'], timeout=20)
+        results.append({'cmd': 'systemctl restart crowdsec.service', 'returncode': rc, 'stdout': out, 'stderr': err})
+        if rc != 0:
+            return False, results
+    return True, results
+
+
+def _crowdsec_aggressive_http_scenario_files(include_disabled=False):
+    roots = [Path('/etc/crowdsec/scenarios'), Path('/etc/crowdsec/postoverflows')]
+    matches = {key: [] for key in AGGRESSIVE_HTTP_SCENARIOS}
+    suffixes = {'.yaml'}
+    if include_disabled:
+        suffixes.add('.ascend-disabled')
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            candidates = []
+            for suffix in suffixes:
+                candidates.extend(root.rglob(f'*{suffix}'))
+            for path in candidates:
+                try:
+                    text = path.read_text(encoding='utf-8', errors='replace')
+                except Exception:
+                    continue
+                for key, marker in AGGRESSIVE_HTTP_SCENARIOS.items():
+                    if marker in text or key in path.name:
+                        matches[key].append(path)
+        except Exception:
+            continue
+    return matches
+
+
+def _crowdsec_aggressive_http_status():
+    active = _crowdsec_aggressive_http_scenario_files()
+    all_files = _crowdsec_aggressive_http_scenario_files(include_disabled=True)
+    rows = []
+    for key, marker in AGGRESSIVE_HTTP_SCENARIOS.items():
+        active_paths = active.get(key) or []
+        disabled_paths = [path for path in (all_files.get(key) or []) if str(path).endswith('.ascend-disabled')]
+        rows.append({
+            'scenario': marker,
+            'active': bool(active_paths),
+            'disabled': bool(disabled_paths),
+            'files': [str(path) for path in active_paths],
+            'disabled_files': [str(path) for path in disabled_paths],
+        })
+    active_count = sum(1 for row in rows if row['active'])
+    disabled_count = sum(1 for row in rows if row['disabled'] and not row['active'])
+    return {
+        'available': shutil.which('cscli') is not None,
+        'active': active_count > 0,
+        'disabled': active_count == 0 and disabled_count > 0,
+        'scenarios': rows,
+        'message': (
+            'Crawl and probing rules are turned off.'
+            if active_count == 0 and disabled_count > 0
+            else f'{active_count} aggressive HTTP rule(s) are active.'
+            if active_count > 0
+            else 'Crawl and probing scenarios were not found.'
+        ),
+    }
+
+
+def _set_crowdsec_aggressive_http_enabled(enabled):
+    active = _crowdsec_aggressive_http_scenario_files()
+    all_files = _crowdsec_aggressive_http_scenario_files(include_disabled=True)
+    results = []
+    if enabled:
+        disabled = {
+            key: [path for path in paths if str(path).endswith('.ascend-disabled')]
+            for key, paths in all_files.items()
+        }
+        paths = {path for scenario_paths in disabled.values() for path in scenario_paths}
+        if not paths:
+            results.append({'changed': False, 'message': 'Crawl and probing rules are already on or were not found.'})
+        for path in paths:
+            target = Path(str(path)[:-len('.ascend-disabled')])
+            if target.exists():
+                target = target.with_name(f'{target.stem}.restored-{int(time.time())}{target.suffix}')
+            path.replace(target)
+            results.append({'path': str(path), 'restored_to': str(target), 'changed': True})
+    else:
+        paths = {path for scenario_paths in active.values() for path in scenario_paths}
+        if not paths:
+            results.append({'changed': False, 'message': 'Crawl and probing rules are already off or were not found.'})
+        for path in paths:
+            target = Path(str(path) + '.ascend-disabled')
+            if target.exists():
+                results.append({'path': str(path), 'changed': False, 'message': 'A disabled copy already exists.'})
+                continue
             path.replace(target)
             results.append({'path': str(path), 'disabled_to': str(target), 'changed': True})
     systemctl = shutil.which('systemctl')
@@ -1091,6 +1190,7 @@ def _current_status():
             'crowdsec_service': _service_active('crowdsec.service'),
             'crowdsec_firewall_bouncer_service': _service_active_any(BOUNCER_SERVICE_CANDIDATES),
             'crowdsec_http_401_threshold': _crowdsec_http_401_threshold_status(),
+            'crowdsec_aggressive_http': _crowdsec_aggressive_http_status(),
             'crowdsec_decisions': _cached_crowdsec_decisions(),
             'clamav_freshclam_service': _service_active('clamav-freshclam.service'),
             'clamav_daemon_service': _service_active('clamav-daemon.service'),
@@ -1677,6 +1777,16 @@ def api_security_repair():
             'steps': [],
             'custom': 'http_401_enable',
         },
+        'crowdsec_aggressive_http_disable': {
+            'label': 'Turn off aggressive HTTP crawl and probing rules',
+            'steps': [],
+            'custom': 'aggressive_http_disable',
+        },
+        'crowdsec_aggressive_http_enable': {
+            'label': 'Turn on aggressive HTTP crawl and probing rules',
+            'steps': [],
+            'custom': 'aggressive_http_enable',
+        },
     }
     spec = actions.get(action)
     if not spec:
@@ -1704,6 +1814,15 @@ def api_security_repair():
         if not ok:
             return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
         return jsonify({'message': f'HTTP 401 brute-force rule {"turned on" if enable else "turned off"}.', 'results': results})
+    if spec.get('custom') in {'aggressive_http_disable', 'aggressive_http_enable'}:
+        enable = spec.get('custom') == 'aggressive_http_enable'
+        ok, results = _set_crowdsec_aggressive_http_enabled(enable)
+        status = 'ok' if ok else 'failed'
+        _audit_log('security.repair', status, spec['label'], {'action': action, 'results': results})
+        if not ok:
+            return jsonify({'error': f'{spec["label"]} failed.', 'results': results}), 500
+        state = 'turned on' if enable else 'turned off'
+        return jsonify({'message': f'HTTP crawl and probing rules {state}.', 'results': results})
     if spec.get('custom') == 'crowdsec_bouncer':
         ok, results = _repair_crowdsec_bouncer()
         status = 'ok' if ok else 'failed'

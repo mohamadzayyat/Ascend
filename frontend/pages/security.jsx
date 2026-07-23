@@ -223,6 +223,10 @@ export default function SecurityPage() {
   const crowdsecInstalled = !!tools.cscli?.installed
   const bouncerOk = !!tools.crowdsec_firewall_bouncer_service?.ok
   const http401Threshold = tools.crowdsec_http_401_threshold || {}
+  const aggressiveHttp = tools.crowdsec_aggressive_http || {}
+  const aggressiveHttpAction = aggressiveHttp.disabled
+    ? 'crowdsec_aggressive_http_enable'
+    : 'crowdsec_aggressive_http_disable'
   const http401Action = http401Threshold.disabled
     ? 'crowdsec_http_401_enable'
     : http401Threshold.configured
@@ -400,6 +404,24 @@ export default function SecurityPage() {
   }, [issues])
 
   const runFix = async (fix) => {
+    if (fix === 'crowdsec_aggressive_http_disable') {
+      const ok = await dialog.confirm({
+        title: 'Turn off crawl and probing rules?',
+        message: 'This stops crowdsecurity/http-crawl-non_statics and crowdsecurity/http-probing from blocking CMS infinite-scroll traffic. SSH, login brute-force, and other CrowdSec protection stay active.',
+        confirmLabel: 'Turn off rules',
+        tone: 'warning',
+      })
+      if (!ok) return
+    }
+    if (fix === 'crowdsec_aggressive_http_enable') {
+      const ok = await dialog.confirm({
+        title: 'Turn on crawl and probing rules?',
+        message: 'CrowdSec will resume blocking traffic detected by the crawl and HTTP probing scenarios.',
+        confirmLabel: 'Turn on rules',
+        tone: 'warning',
+      })
+      if (!ok) return
+    }
     if (fix === 'crowdsec_http_401_disable') {
       const ok = await dialog.confirm({
         title: 'Turn off HTTP 401 brute-force rule?',
@@ -1035,6 +1057,7 @@ export default function SecurityPage() {
                 <StatusRow title="Firewall bouncer" ok={bouncerOk} detail={`${tools.crowdsec_firewall_bouncer_service?.name || 'crowdsec firewall bouncer'}: ${tools.crowdsec_firewall_bouncer_service?.active || 'unknown'}`} action="Repair" busy={busy === 'crowdsec_bouncer_restart'} onAction={() => runFix('crowdsec_bouncer_restart')} />
                 <StatusRow title="Nginx/SSH collections" ok={crowdsecInstalled} detail="Installs core Linux, SSH, and Nginx detection collections." action="Apply" busy={busy === 'crowdsec_collections'} onAction={() => runFix('crowdsec_collections')} />
                 <StatusRow title="HTTP 401 brute-force rule" ok={!!http401Threshold.configured || !!http401Threshold.disabled} detail={http401Threshold.message || 'Blocks repeated HTTP 401 authentication failures.'} action={crowdsecInstalled ? http401ActionLabel : ''} busy={busy === http401Action} onAction={() => runFix(http401Action)} />
+                <StatusRow title="HTTP crawl/probing rules" ok={!!aggressiveHttp.disabled} detail={aggressiveHttp.message || 'Aggressive crawl and probing detection for public HTTP traffic.'} action={crowdsecInstalled ? (aggressiveHttp.disabled ? 'Turn on' : 'Turn off') : ''} busy={busy === aggressiveHttpAction} onAction={() => runFix(aggressiveHttpAction)} />
               </div>
               <section className="rounded-lg border border-gray-700 bg-secondary p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
