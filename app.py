@@ -2395,7 +2395,7 @@ def api_retry_app_ssl(app_id):
         return jsonify({'error': 'Unauthorized'}), 403
     if not a.domain:
         return jsonify({'error': 'Set a domain before retrying SSL'}), 400
-    if not _is_php_app(a) and not a.app_port:
+    if not _is_php_app(a) and not _is_static_app(a) and not a.app_port:
         return jsonify({'error': 'Set an app port before retrying SSL'}), 400
     if not a.enable_ssl:
         return jsonify({'error': 'Enable SSL in app settings before retrying'}), 400
@@ -3707,7 +3707,7 @@ def retry_app_ssl_bg(deployment_id):
 
                 if not app_row.domain:
                     raise RuntimeError('App has no domain configured')
-                if not app_row.app_port:
+                if not _is_php_app(app_row) and not _is_static_app(app_row) and not app_row.app_port:
                     raise RuntimeError('App has no app port configured')
                 if not app_row.enable_ssl:
                     raise RuntimeError('SSL is disabled for this app. Enable SSL in app settings first.')
