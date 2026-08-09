@@ -1231,6 +1231,7 @@ def api_server_files_delete():
 # ══════════════════════════════════════════════════════════════════
 
 _fm_scheduler = None
+_FOLDER_BACKUP_LOCK_ROOT = Path('/tmp/ascend-folder-backup-locks')
 
 
 def _ensure_fm_scheduler():
@@ -1419,9 +1420,44 @@ def _execute_folder_backup(schedule_id, triggered_by='scheduled'):
     return _execute_folder_backup_in_context(schedule_id, triggered_by)
 
 
+def _acquire_folder_backup_lock(schedule_id, stale_after=6 * 60 * 60):
+    """Prevent separate backend workers from running one schedule together."""
+    _FOLDER_BACKUP_LOCK_ROOT.mkdir(parents=True, exist_ok=True)
+    lock_path = _FOLDER_BACKUP_LOCK_ROOT / f'schedule-{int(schedule_id)}'
+    try:
+        lock_path.mkdir()
+    except FileExistsError:
+        try:
+            if time.time() - lock_path.stat().st_mtime <= stale_after:
+                return None
+            shutil.rmtree(lock_path, ignore_errors=True)
+            lock_path.mkdir()
+        except (FileExistsError, OSError):
+            return None
+    try:
+        (lock_path / 'pid').write_text(str(os.getpid()), encoding='utf-8')
+    except OSError:
+        shutil.rmtree(lock_path, ignore_errors=True)
+        return None
+    return lock_path
+
+
+def _release_folder_backup_lock(lock_path):
+    if lock_path:
+        shutil.rmtree(lock_path, ignore_errors=True)
+
+
 def _execute_folder_backup_in_context(schedule_id, triggered_by='scheduled'):
     from backend.models import FolderBackupSchedule, FolderBackupArchive
     from backend.extensions import db
+
+    lock_path = _acquire_folder_backup_lock(schedule_id)
+    if lock_path is None:
+        print(
+            f'[backup scheduler] Skipping duplicate execution for schedule {schedule_id}',
+            file=sys.stderr,
+        )
+        return None
 
     try:
         schedule = FolderBackupSchedule.query.get(schedule_id)
@@ -1513,6 +1549,8 @@ def _execute_folder_backup_in_context(schedule_id, triggered_by='scheduled'):
     except Exception as e:
         print(f'[backup scheduler] Error executing schedule {schedule_id}: {e}', file=sys.stderr)
         return None
+    finally:
+        _release_folder_backup_lock(lock_path)
 
 
 # Folder backup schedule routes

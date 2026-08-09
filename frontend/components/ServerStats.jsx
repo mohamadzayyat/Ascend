@@ -71,6 +71,7 @@ export default function ServerStats() {
   if (!stats) return null
 
   const { cpu, memory, swap, disk, network, load_average, uptime_seconds, process_count } = stats
+  const disks = stats.disks?.length ? stats.disks : (disk ? [disk] : [])
 
   return (
     <div className="bg-secondary rounded-lg border border-gray-700 overflow-hidden mb-8">
@@ -94,7 +95,7 @@ export default function ServerStats() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 divide-x divide-y divide-gray-700 md:divide-y-0">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7 divide-x divide-y divide-gray-700">
         <Metric
           icon={<Cpu className="w-4 h-4" />}
           label="CPU"
@@ -125,15 +126,16 @@ export default function ServerStats() {
             sub="not configured"
           />
         )}
-        {disk && (
+        {disks.map((item) => (
           <Metric
+            key={`${item.device || ''}:${item.path}`}
             icon={<HardDrive className="w-4 h-4" />}
-            label="Disk"
-            value={`${disk.percent.toFixed(0)}%`}
-            sub={`${formatBytes(disk.used)} / ${formatBytes(disk.total)}`}
-            percent={disk.percent}
+            label={`Disk ${item.path}`}
+            value={`${item.percent.toFixed(0)}%`}
+            sub={`${formatBytes(item.used)} / ${formatBytes(item.total)}`}
+            percent={item.percent}
           />
-        )}
+        ))}
         <Metric
           icon={<Network className="w-4 h-4" />}
           label="Network"

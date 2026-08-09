@@ -11,6 +11,12 @@
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# systemd-run does not provide HOME by default. The installer requires root
+# and invokes PM2 before service environment files are loaded, so establish a
+# deterministic PM2 home for detached updates launched from the panel.
+export HOME="${HOME:-/root}"
+export PM2_HOME="${PM2_HOME:-$HOME/.pm2}"
+
 # ── Ports ───────────────────────────────────────────────────────
 PANEL_PORT=8716          # public-facing Nginx port
 BACKEND_PORT=8765        # Flask (internal, 127.0.0.1 only)

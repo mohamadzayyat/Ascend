@@ -1171,6 +1171,7 @@ def api_update_start():
     unit = f'ascend-update-{int(time.time())}'
     cmd = (
         f'cd {shlex.quote(str(BASE_DIR))} && '
+        f'HOME=${{HOME:-/root}} PM2_HOME=${{PM2_HOME:-/root/.pm2}} '
         f'TERM=${{TERM:-dumb}} DEBIAN_FRONTEND=noninteractive ASCEND_PANEL_UPDATE=1 '
         f'bash {shlex.quote(str(script))} > {shlex.quote(str(log_path))} 2>&1'
     )
@@ -5293,6 +5294,52 @@ def _load_server_stats():
     except Exception:
         disk = None
 
+    # Report each local data filesystem as well as the legacy primary `disk`
+    # field.  A separately mounted drive does not increase `/`, so collapsing
+    # everything into the deploy filesystem hides newly attached storage.
+    disks = []
+    seen_disk_paths = set()
+
+    def add_disk(path, device=None, fstype=None):
+        normalized = os.path.abspath(path)
+        if normalized in seen_disk_paths:
+            return
+        try:
+            usage = psutil.disk_usage(normalized)
+        except (OSError, PermissionError):
+            return
+        seen_disk_paths.add(normalized)
+        disks.append({
+            'path': normalized,
+            'device': device,
+            'fstype': fstype,
+            'total': usage.total,
+            'used': usage.used,
+            'free': usage.free,
+            'percent': usage.percent,
+        })
+
+    if disk and os.name == 'nt':
+        add_disk(disk_target)
+    if os.name != 'nt':
+        local_filesystems = {'ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'zfs'}
+        try:
+            partitions = psutil.disk_partitions(all=False)
+        except Exception:
+            partitions = []
+        for partition in partitions:
+            if not partition.device.startswith('/dev/'):
+                continue
+            if partition.fstype.lower() not in local_filesystems:
+                continue
+            add_disk(partition.mountpoint, partition.device, partition.fstype)
+    if disk and not disks:
+        add_disk(disk_target)
+    # Small boot partitions are system internals, not usable application
+    # storage, and only add noise to the dashboard.
+    disks = [item for item in disks if item['path'] == '/' or item['total'] >= 5 * 1024 ** 3]
+    disks.sort(key=lambda item: (item['path'] != '/', item['path']))
+
     # Network throughput: compute bytes/sec since the previous sample.
     now = time.time()
     io = psutil.net_io_counters()
@@ -5344,6 +5391,7 @@ def _load_server_stats():
         },
         'swap': swap,
         'disk': disk,
+        'disks': disks,
         'network': {
             'bytes_sent': io.bytes_sent,
             'bytes_recv': io.bytes_recv,
