@@ -4411,6 +4411,18 @@ def _build_static_locations(app_row):
     )
 
 
+def _nginx_listen_directive(kind):
+    """Return the configurable listen target used by managed app vhosts.
+
+    Ascend normally owns public ports 80/443.  Installations that use a TCP
+    front door (for example HAProxy during a staged migration) can bind the
+    managed Nginx vhosts to private loopback ports instead.
+    """
+    if kind == 'https':
+        return os.environ.get('ASCEND_NGINX_HTTPS_LISTEN', '443 ssl').strip() or '443 ssl'
+    return os.environ.get('ASCEND_NGINX_HTTP_LISTEN', '80').strip() or '80'
+
+
 def _build_nginx_config(app_row, cert_info=None):
     server_names = ' '.join(_app_server_names(app_row) or [app_row.domain])
     redirect = _nginx_redirect_if_needed(app_row)
@@ -4446,6 +4458,8 @@ def _build_nginx_config(app_row, cert_info=None):
         )
 
     if cert_info:
+        http_listen = _nginx_listen_directive('http')
+        https_listen = _nginx_listen_directive('https')
         ssl_options = ''
         if os.path.exists('/etc/letsencrypt/options-ssl-nginx.conf'):
             ssl_options += "    include /etc/letsencrypt/options-ssl-nginx.conf;\n"
@@ -4453,13 +4467,13 @@ def _build_nginx_config(app_row, cert_info=None):
             ssl_options += "    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;\n"
         return (
             f"server {{\n"
-            f"    listen 80;\n"
+            f"    listen {http_listen};\n"
             f"    server_name {server_names};\n"
             f"{challenge}"
             f"    location / {{ return 301 https://$host$request_uri; }}\n"
             f"}}\n\n"
             f"server {{\n"
-            f"    listen 443 ssl;\n"
+            f"    listen {https_listen};\n"
             f"    server_name {server_names};\n"
             f"    client_max_body_size {app_row.client_max_body};\n"
             f"    ssl_certificate {cert_info['fullchain_path']};\n"
@@ -4473,9 +4487,10 @@ def _build_nginx_config(app_row, cert_info=None):
             f"}}\n"
         )
 
+    http_listen = _nginx_listen_directive('http')
     return (
         f"server {{\n"
-        f"    listen 80;\n"
+        f"    listen {http_listen};\n"
         f"    server_name {server_names};\n"
         f"    client_max_body_size {app_row.client_max_body};\n"
         f"\n"
