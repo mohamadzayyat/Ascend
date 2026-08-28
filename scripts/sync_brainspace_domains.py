@@ -93,6 +93,8 @@ def main() -> int:
                 if domain and (Path('/etc/nginx/sites-enabled') / domain).exists():
                     hosts.add(domain)
                     managed.add(domain)
+                    if domain.count('.') == 1:
+                        hosts.add(f'www.{domain}')
     directories = list(VHOST_ROOT.glob('*.brain-space.app')) + [VHOST_ROOT / 'brain-space.app']
     for directory in directories:
         source = directory / 'vhost.conf'
