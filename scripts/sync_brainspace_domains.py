@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from pathlib import Path
 VHOST_ROOT = Path('/usr/local/lsws/conf/vhosts')
 OUTPUT_ROOT = Path('/etc/nginx/ascend-brainspace-sites')
 HOST_LIST = Path('/etc/haproxy/brainspace-hosts.lst')
+ASCEND_DB = Path('/opt/ascend/cpanel.db')
 
 
 def _proxy_routes(config: str) -> dict[str, str]:
@@ -82,6 +84,15 @@ def main() -> int:
     desired: dict[Path, str] = {}
     hosts: set[str] = set()
     managed: set[str] = set()
+    if ASCEND_DB.exists():
+        with sqlite3.connect(ASCEND_DB) as connection:
+            for (domain,) in connection.execute(
+                "select domain from app where length(coalesce(domain, '')) > 0"
+            ):
+                domain = domain.strip().lower()
+                if domain and (Path('/etc/nginx/sites-enabled') / domain).exists():
+                    hosts.add(domain)
+                    managed.add(domain)
     directories = list(VHOST_ROOT.glob('*.brain-space.app')) + [VHOST_ROOT / 'brain-space.app']
     for directory in directories:
         source = directory / 'vhost.conf'
