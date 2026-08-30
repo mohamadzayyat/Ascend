@@ -1160,7 +1160,7 @@ def api_db_mysql_users_list(conn_id):
                 ORDER BY User, Host
             """)
             users = [{'username': r[0], 'host': r[1], 'grants': []} for r in cur.fetchall()]
-            if database and _valid_identifier(database):
+            if _valid_database_name(database):
                 for row in users:
                     try:
                         cur.execute(f"SHOW GRANTS FOR {_mysql_user_ref(row['username'], row['host'])}")
@@ -1249,7 +1249,7 @@ def api_db_mysql_user_grant(conn_id):
     username = (data.get('username') or '').strip()
     host = (data.get('host') or 'localhost').strip() or 'localhost'
     database = (data.get('database') or '').strip()
-    if not database or not _valid_identifier(database):
+    if not _valid_database_name(database):
         return jsonify({'error': 'Choose a valid database.'}), 400
     try:
         privileges = _normalize_privileges(data.get('privileges'))
@@ -1371,7 +1371,7 @@ def api_db_table_create(conn_id):
     charset = (data.get('charset') or 'utf8mb4').strip()
     collation = (data.get('collation') or 'utf8mb4_general_ci').strip()
     primary_key = (data.get('primary_key') or '').strip()
-    if not _valid_identifier(database) or not _valid_identifier(table):
+    if not _valid_database_name(database) or not _valid_identifier(table):
         return jsonify({'error': 'Invalid database or table name.'}), 400
     if not columns:
         return jsonify({'error': 'Add at least one column.'}), 400
@@ -1785,7 +1785,7 @@ def api_db_table_rows(conn_id):
     # Identifier sanity: backtick-safe chars only. Prevents SQL injection
     # since we have to interpolate identifiers (parameterized binds don't
     # cover schema/table names).
-    if not _valid_identifier(database) or not _valid_identifier(table):
+    if not _valid_database_name(database) or not _valid_identifier(table):
         return jsonify({'error': 'Invalid database or table name.'}), 400
     try:
         page = max(int(request.args.get('page') or 1), 1)
@@ -1909,7 +1909,7 @@ def _db_table_request_data():
     data = request.get_json(silent=True) or {}
     database = (data.get('database') or request.args.get('database') or '').strip()
     table = (data.get('table') or request.args.get('table') or '').strip()
-    if not _valid_identifier(database) or not _valid_identifier(table):
+    if not _valid_database_name(database) or not _valid_identifier(table):
         raise ValueError('Invalid database or table name.')
     return data, database, table
 
@@ -1925,7 +1925,7 @@ def api_db_table_design(conn_id):
         return err
     database = (request.args.get('database') or '').strip()
     table = (request.args.get('table') or '').strip()
-    if not _valid_identifier(database) or not _valid_identifier(table):
+    if not _valid_database_name(database) or not _valid_identifier(table):
         return jsonify({'error': 'Invalid database or table name.'}), 400
     try:
         client = _open_mysql(conn, database=database)
