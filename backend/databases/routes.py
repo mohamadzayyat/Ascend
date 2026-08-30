@@ -84,6 +84,17 @@ def _valid_identifier(name):
     return bool(re.fullmatch(r'[A-Za-z0-9_$]+', name or ''))
 
 
+def _valid_database_name(name):
+    """Return whether *name* is a safely supported MySQL database name."""
+    return bool(name and len(name) <= 64 and re.fullmatch(r'[A-Za-z0-9_$-]+', name))
+
+
+def _qdb(name):
+    if not _valid_database_name(name):
+        raise ValueError('Invalid database name.')
+    return f'`{name}`'
+
+
 def _qi(name):
     if not _valid_identifier(name):
         raise ValueError('Invalid identifier.')
@@ -1189,7 +1200,7 @@ def api_db_mysql_user_create(conn_id):
         return jsonify({'error': 'Host may contain letters, numbers, %, :, ., _, and - only.'}), 400
     if not password:
         return jsonify({'error': 'Password is required.'}), 400
-    if database and not _valid_identifier(database):
+    if database and not _valid_database_name(database):
         return jsonify({'error': 'Invalid database name.'}), 400
     try:
         privileges = _normalize_privileges(data.get('privileges'))
@@ -1205,7 +1216,7 @@ def api_db_mysql_user_create(conn_id):
             cur.execute(f"CREATE USER IF NOT EXISTS {user_ref} IDENTIFIED BY %s", (password,))
             grant_sql = None
             if database:
-                grant_sql = f"GRANT {', '.join(privileges)} ON {_qi(database)}.* TO {user_ref}"
+                grant_sql = f"GRANT {', '.join(privileges)} ON {_qdb(database)}.* TO {user_ref}"
                 cur.execute(grant_sql)
             cur.execute('FLUSH PRIVILEGES')
         client.commit()
@@ -1251,7 +1262,7 @@ def api_db_mysql_user_grant(conn_id):
         return jsonify({'error': str(e)}), 502
     try:
         with client.cursor() as cur:
-            cur.execute(f"GRANT {', '.join(privileges)} ON {_qi(database)}.* TO {user_ref}")
+            cur.execute(f"GRANT {', '.join(privileges)} ON {_qdb(database)}.* TO {user_ref}")
             cur.execute('FLUSH PRIVILEGES')
         client.commit()
     except Exception as e:
@@ -1450,7 +1461,7 @@ def api_db_tables_bulk(conn_id):
     data = request.get_json(silent=True) or {}
     database = (data.get('database') or '').strip()
     action = (data.get('action') or '').strip().lower()
-    if not _valid_identifier(database):
+    if not _valid_database_name(database):
         return jsonify({'error': 'Invalid database name.'}), 400
     if action not in {'copy', 'truncate', 'delete'}:
         return jsonify({'error': 'Unsupported bulk table action.'}), 400
@@ -1519,7 +1530,7 @@ def api_db_views_bulk(conn_id):
     data = request.get_json(silent=True) or {}
     database = (data.get('database') or '').strip()
     action = (data.get('action') or '').strip().lower()
-    if not _valid_identifier(database):
+    if not _valid_database_name(database):
         return jsonify({'error': 'Invalid database name.'}), 400
     if action != 'delete':
         return jsonify({'error': 'Unsupported view action.'}), 400
@@ -1572,7 +1583,7 @@ def api_db_tables_export(conn_id):
         return err
     data = request.get_json(silent=True) or {}
     database = (data.get('database') or '').strip()
-    if not _valid_identifier(database):
+    if not _valid_database_name(database):
         return jsonify({'error': 'Invalid database name.'}), 400
     try:
         tables = _selected_table_names(data.get('tables'), max_count=200)
@@ -1702,7 +1713,7 @@ def api_db_database_schema(conn_id):
     if err:
         return err
     database = (request.args.get('database') or '').strip()
-    if not database or not re.fullmatch(r'[A-Za-z0-9_$]+', database):
+    if not _valid_database_name(database):
         return jsonify({'error': 'Invalid database name.'}), 400
     try:
         client = _open_mysql(conn, database=database)
@@ -2446,13 +2457,13 @@ def _run_backup(conn_id, schedule_id=None, triggered_by='manual', target_databas
         databases = []
         if target_database:
             td = str(target_database).strip()
-            if re.fullmatch(r'[A-Za-z0-9_$]+', td):
+            if _valid_database_name(td):
                 databases = [td]
         elif schedule_id is not None:
             sched = db.session.get(BackupSchedule, schedule_id)
             if sched:
                 td = (getattr(sched, 'target_database', None) or '').strip()
-                if td and re.fullmatch(r'[A-Za-z0-9_$]+', td):
+                if _valid_database_name(td):
                     databases = [td]
                 elif sched.databases:
                     try:
@@ -2800,7 +2811,7 @@ def api_db_backups_run(conn_id):
         return err
     data = request.get_json(silent=True) or {}
     target_database = str(data.get('target_database') or '').strip()
-    if target_database and not re.fullmatch(r'[A-Za-z0-9_$]+', target_database):
+    if target_database and not _valid_database_name(target_database):
         return jsonify({'error': 'Invalid database name.'}), 400
     # Run in a background thread so the HTTP request doesn't block on a long dump
     def _run():
@@ -3095,8 +3106,8 @@ def _normalize_schedule_target_database(val):
     s = str(val).strip()
     if not s:
         return ''
-    if not re.fullmatch(r'[A-Za-z0-9_$]+', s):
-        raise ValueError('Database name must be alphanumeric/underscore, or empty for all databases.')
+    if not _valid_database_name(s):
+        raise ValueError('Database name may contain letters, numbers, _, $, and -, or be empty for all databases.')
     return s[:255]
 
 

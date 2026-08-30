@@ -75,8 +75,8 @@ def _restore_job_update(job_id, **patch):
 
 def _mysql_ident(raw, label='identifier'):
     s = (raw or '').strip()
-    if not re.fullmatch(r'[A-Za-z0-9_$]+', s):
-        raise ValueError(f'Invalid {label}. Use letters, numbers, underscore, or $.')
+    if not s or len(s) > 64 or not re.fullmatch(r'[A-Za-z0-9_$-]+', s):
+        raise ValueError(f'Invalid {label}. Use letters, numbers, underscore, $, or hyphen.')
     return s
 
 
