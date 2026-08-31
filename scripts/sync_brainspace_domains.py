@@ -38,6 +38,22 @@ def _value(config: str, key: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _render_http_challenge(host: str) -> str:
+    """Register a new tenant before its certificate exists.
+
+    Certbot's HTTP-01 request must reach the shared webroot before we can render
+    the HTTPS server. The next reconciliation promotes this configuration once
+    the certificate and key appear.
+    """
+    return f'''server {{
+    listen 127.0.0.1:8080;
+    server_name {host};
+    location /.well-known/acme-challenge/ {{ root /usr/local/lsws/Example/html; }}
+    location / {{ return 503; }}
+}}
+'''
+
+
 def _render(host: str, upstream: str, certificate: str, key: str, socket: str | None) -> str:
     socket_location = ''
     if socket:
@@ -109,18 +125,20 @@ def main() -> int:
         config = source.read_text(errors='ignore')
         proxies = _proxy_routes(config)
         root_handler = _handler(config, '/')
+        if not root_handler or root_handler not in proxies:
+            continue
+        hosts.add(host)
+        output = OUTPUT_ROOT / f'{host}.conf'
         certificate = _value(config, 'certFile')
         key = _value(config, 'keyFile')
-        if not root_handler or root_handler not in proxies or not certificate or not key:
-            continue
-        if not Path(certificate).exists() or not Path(key).exists():
+        if not certificate or not key or not Path(certificate).exists() or not Path(key).exists():
+            desired[output] = _render_http_challenge(host)
             continue
         socket_handler = _handler(config, '/socket.io/')
         socket = proxies.get(socket_handler) if socket_handler else None
-        desired[OUTPUT_ROOT / f'{host}.conf'] = _render(
+        desired[output] = _render(
             host, proxies[root_handler], certificate, key, socket
         )
-        hosts.add(host)
 
     changed = False
     for path in OUTPUT_ROOT.glob('*.conf'):
